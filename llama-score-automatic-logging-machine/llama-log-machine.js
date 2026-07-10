@@ -77,9 +77,105 @@ function readConfig(args) {
   if (args.campaignKey) config.campaignKey = args.campaignKey;
   config.saveDir = path.resolve(saveDirBase, config.saveDir);
   config.dataDir = path.resolve(dataDirBase, config.dataDir);
-  config.archiveDir = path.join(config.dataDir, "archive");
+  config.campaignsDir = path.join(config.dataDir, "campaigns");
   config.autosaveRegex = new RegExp(config.autosavePattern, "i");
   return config;
+}
+
+// Campaign keys come from campaignKeyFromFile() - normally an autosave UUID,
+// filesystem-safe as-is, but sanitized defensively since it also accepts a
+// bare non-"autosave_" filename (--campaign can be pointed at anything).
+function safeCampaignKey(campaignKey) {
+  return String(campaignKey || "unknown").replace(/[^\w.-]+/g, "_");
+}
+
+function campaignDir(config, campaignKey) {
+  return path.join(config.campaignsDir, safeCampaignKey(campaignKey));
+}
+
+function campaignSnapshotsFile(config, campaignKey) {
+  return path.join(campaignDir(config, campaignKey), "snapshots.jsonl");
+}
+
+function campaignEventsFile(config, campaignKey) {
+  return path.join(campaignDir(config, campaignKey), "war-events.jsonl");
+}
+
+function campaignArchiveDir(config, campaignKey) {
+  return path.join(campaignDir(config, campaignKey), "archive");
+}
+
+// One-time upgrade path: earlier versions of this recorder appended every
+// campaign into one shared data/snapshots.jsonl + data/war-events.jsonl,
+// which meant scoring one campaign in the analyzer required loading (and the
+// analyzer silently filtering out) every other campaign ever recorded - slow
+// and, worse, actively corrupted "latest snapshot"/player-attribution logic
+// when an unrelated campaign happened to sort as more recent. Split any
+// legacy files found into per-campaign bins under data/campaigns/<key>/, the
+// same layout new snapshots are written to below, then move the originals
+// aside so this only runs once.
+function migrateLegacyLedgerIfNeeded(config) {
+  const legacySnapshots = path.join(config.dataDir, "snapshots.jsonl");
+  const legacyEvents = path.join(config.dataDir, "war-events.jsonl");
+  if (!fs.existsSync(legacySnapshots) && !fs.existsSync(legacyEvents)) return;
+
+  console.log("Found legacy single-file ledger - migrating to per-campaign bins...");
+  const sourceHashToCampaign = new Map();
+  const snapshotLinesByCampaign = new Map();
+
+  if (fs.existsSync(legacySnapshots)) {
+    for (const line of fs.readFileSync(legacySnapshots, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let snapshot;
+      try {
+        snapshot = JSON.parse(line);
+      } catch {
+        continue; // Drop a truncated/corrupt line rather than fail the whole migration.
+      }
+      const key = snapshot.campaignKey || "unknown";
+      if (!snapshotLinesByCampaign.has(key)) snapshotLinesByCampaign.set(key, []);
+      snapshotLinesByCampaign.get(key).push(line);
+      if (snapshot.sourceHash) sourceHashToCampaign.set(snapshot.sourceHash, key);
+    }
+    for (const [key, lines] of snapshotLinesByCampaign.entries()) {
+      ensureDir(campaignDir(config, key));
+      fs.writeFileSync(campaignSnapshotsFile(config, key), lines.join("\n") + "\n");
+    }
+  }
+
+  let eventCampaignCount = 0;
+  if (fs.existsSync(legacyEvents)) {
+    const eventLinesByCampaign = new Map();
+    for (const line of fs.readFileSync(legacyEvents, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      // war-events.jsonl doesn't carry campaignKey directly - trace it back
+      // through the snapshot that produced the event (same sourceHash).
+      const key = sourceHashToCampaign.get(event.sourceHash) || "unknown";
+      if (!eventLinesByCampaign.has(key)) eventLinesByCampaign.set(key, []);
+      eventLinesByCampaign.get(key).push(line);
+    }
+    eventCampaignCount = eventLinesByCampaign.size;
+    for (const [key, lines] of eventLinesByCampaign.entries()) {
+      ensureDir(campaignDir(config, key));
+      fs.writeFileSync(campaignEventsFile(config, key), lines.join("\n") + "\n");
+    }
+  }
+
+  const legacyDir = path.join(config.dataDir, "legacy");
+  ensureDir(legacyDir);
+  if (fs.existsSync(legacySnapshots)) fs.renameSync(legacySnapshots, path.join(legacyDir, "snapshots.jsonl"));
+  if (fs.existsSync(legacyEvents)) fs.renameSync(legacyEvents, path.join(legacyDir, "war-events.jsonl"));
+
+  console.log(
+    `Migrated ${snapshotLinesByCampaign.size} campaign(s) (snapshots) / ${eventCampaignCount} campaign(s) (events) into ${config.campaignsDir}. ` +
+      `Originals moved to ${legacyDir}.`
+  );
 }
 
 function ensureDir(dir) {
@@ -627,27 +723,41 @@ function shouldArchive(events, snapshot, state, config) {
 }
 
 function archiveSave(file, snapshot, config) {
-  ensureDir(config.archiveDir);
+  const archiveDir = campaignArchiveDir(config, snapshot.campaignKey);
+  ensureDir(archiveDir);
   const safeDate = String(snapshot.date || "unknown").replace(/[^\w.-]+/g, "_");
-  const out = path.join(config.archiveDir, `${safeDate}_${snapshot.sourceHash.slice(0, 12)}_${path.basename(file)}`);
+  const out = path.join(archiveDir, `${safeDate}_${snapshot.sourceHash.slice(0, 12)}_${path.basename(file)}`);
   if (!fs.existsSync(out)) fs.copyFileSync(file, out);
   return out;
 }
 
+function listCampaignSnapshotFiles(config) {
+  if (!fs.existsSync(config.campaignsDir)) return [];
+  const files = [];
+  for (const d of fs.readdirSync(config.campaignsDir, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    const file = path.join(config.campaignsDir, d.name, "snapshots.jsonl");
+    if (fs.existsSync(file)) files.push(file);
+  }
+  return files;
+}
+
 function hydrateStateFromSnapshots(config, state) {
-  const file = path.join(config.dataDir, "snapshots.jsonl");
-  if (!fs.existsSync(file)) return;
+  const files = listCampaignSnapshotFiles(config);
+  if (!files.length) return;
   const latestByCampaign = new Map();
-  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const snapshot = JSON.parse(line);
-      if (!snapshot || !snapshot.campaignKey) continue;
-      const prev = latestByCampaign.get(snapshot.campaignKey);
-      if (!prev || compareDates(snapshot.date, prev.date) > 0) latestByCampaign.set(snapshot.campaignKey, snapshot);
-    } catch {
-      // Keep the recorder resilient if a JSONL line was interrupted.
+  for (const file of files) {
+    const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const snapshot = JSON.parse(line);
+        if (!snapshot || !snapshot.campaignKey) continue;
+        const prev = latestByCampaign.get(snapshot.campaignKey);
+        if (!prev || compareDates(snapshot.date, prev.date) > 0) latestByCampaign.set(snapshot.campaignKey, snapshot);
+      } catch {
+        // Keep the recorder resilient if a JSONL line was interrupted.
+      }
     }
   }
   if (!latestByCampaign.size) return;
@@ -705,8 +815,9 @@ async function processParsedFile(file, stat, hash, result, config, state) {
     return false;
   }
   const { events, currentWars } = classifyEvents(previousWars, snapshot);
-  appendJsonl(path.join(config.dataDir, "snapshots.jsonl"), snapshot);
-  for (const event of events) appendJsonl(path.join(config.dataDir, "war-events.jsonl"), event);
+  ensureDir(campaignDir(config, snapshot.campaignKey));
+  appendJsonl(campaignSnapshotsFile(config, snapshot.campaignKey), snapshot);
+  for (const event of events) appendJsonl(campaignEventsFile(config, snapshot.campaignKey), event);
 
   let archivedTo = null;
   if (shouldArchive(events, snapshot, state, config)) archivedTo = archiveSave(file, snapshot, config);
@@ -770,6 +881,7 @@ async function main() {
   const state = loadJson(stateFile, { files: {}, hashes: {}, activeWarsByCampaign: {}, checkpoints: {}, lastSnapshot: null, lastDateByCampaign: {} });
   state.activeWarsByCampaign = state.activeWarsByCampaign || {};
   state.lastDateByCampaign = state.lastDateByCampaign || {};
+  migrateLegacyLedgerIfNeeded(config);
   hydrateStateFromSnapshots(config, state);
 
   console.log("Llama Score Automatic Logging Machine");

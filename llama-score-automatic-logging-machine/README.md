@@ -18,12 +18,24 @@ By default, output is written to:
 llama-score-automatic-logging-machine/data/
 ```
 
-The important files are:
+Each campaign gets its own bin, keyed by the autosave UUID:
 
-- `snapshots.jsonl` - one compact parsed snapshot per processed autosave.
-- `war-events.jsonl` - detected war start/update/disappear events.
-- `state.json` - recorder state, file hashes, active-war cache.
-- `archive/` - full save copies for interesting snapshots only.
+```text
+data/campaigns/<campaignUUID>/snapshots.jsonl   - one compact parsed snapshot per processed autosave
+data/campaigns/<campaignUUID>/war-events.jsonl  - detected war start/update/disappear events
+data/campaigns/<campaignUUID>/archive/          - full save copies for interesting snapshots only
+data/state.json                                 - recorder state, file hashes, active-war cache (shared across campaigns)
+```
+
+Point the analyzer's Llama Score panel at one campaign's `snapshots.jsonl` +
+`war-events.jsonl` to score just that campaign. Older versions of this
+recorder wrote one shared `data/snapshots.jsonl` / `data/war-events.jsonl`
+across every campaign ever recorded - mixing campaigns corrupts player/
+country attribution and the "latest state" the analyzer scores from, since
+country numbers and "most recent snapshot" are only meaningful within a
+single campaign. The recorder auto-migrates a legacy ledger like this into
+per-campaign bins the next time it starts, moving the originals to
+`data/legacy/`.
 
 By default it only watches the most recent autosave campaign UUID in the save
 folder. That keeps startup cheap and avoids mixing old campaigns into the
