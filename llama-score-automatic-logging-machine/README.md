@@ -1,0 +1,69 @@
+# Llama Score Automatic Logging Machine
+
+Small companion recorder for EU5 campaigns. It watches a save folder, waits for
+new/changed autosaves to finish writing, parses only the light campaign metadata
+needed for war logging, and appends compact JSONL records.
+
+It does not modify the game, saves, or mods. It reads copied save files only.
+
+## Run
+
+```powershell
+node .\llama-score-automatic-logging-machine\llama-log-machine.js --save-dir "C:\Users\samca\Documents\Paradox Interactive\Europa Universalis V\save games"
+```
+
+By default, output is written to:
+
+```text
+llama-score-automatic-logging-machine/data/
+```
+
+The important files are:
+
+- `snapshots.jsonl` - one compact parsed snapshot per processed autosave.
+- `war-events.jsonl` - detected war start/update/disappear events.
+- `state.json` - recorder state, file hashes, active-war cache.
+- `archive/` - full save copies for interesting snapshots only.
+
+By default it only watches the most recent autosave campaign UUID in the save
+folder. That keeps startup cheap and avoids mixing old campaigns into the
+current run. Use `--all-campaigns` for backfills, or `--campaign <uuid>` to pin
+one specific campaign.
+
+By default it also keeps only wars involving a human-played country. Set
+`"playerWarsOnly": false` in config for a full-world diagnostic backfill.
+Country economy/territory snapshots are likewise limited to player-war
+participants unless `"storeAllEconomyCountries": true` is enabled.
+
+## Retention Model
+
+The recorder does not blindly keep every full autosave forever. It always keeps
+the small parsed ledger, but only archives full saves when something useful
+happens:
+
+- a war appears,
+- a war changes meaningfully,
+- a war disappears from the save,
+- a periodic checkpoint is due.
+
+This keeps the core recorder low-cost while preserving enough evidence to debug
+the hard cases.
+
+`war-events.jsonl` includes each war's participants split by side, last known
+attacker/defender score when the save still exposes it, and an `outcome` or
+`inferredOutcome` block. If EU5 purges a war before a concluded snapshot is
+captured, the winner is marked as inferred rather than authoritative.
+
+## Notes
+
+EU5 autosaves appear to rotate as:
+
+```text
+autosave_<campaign>.eu5
+autosave_<campaign>_1.eu5
+...
+autosave_<campaign>_5.eu5
+```
+
+The unsuffixed file is newest, `_5` is oldest. The recorder copies interesting
+saves before the game rotates them away.

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EU5 Save Analyzer</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>EU5 Save Analyzer</h1>
+    <p class="subtitle">Drop in an Europa Universalis V save (compressed or melted) to see players, countries, and world stats.</p>
+  </header>
+
+  <main>
+    <section id="uploader" class="panel">
+      <div id="uploaderSummary" class="uploader-summary" hidden>
+        <span id="uploaderSummaryText"></span>
+        <button type="button" id="changeFileBtn" class="link-btn">Load a different save</button>
+      </div>
+      <label for="fileInput" id="dropzone" class="dropzone">
+        <span id="dropzoneText">Click to choose a .eu5 save file, or drag one here</span>
+        <input type="file" id="fileInput" accept=".eu5" hidden />
+      </label>
+      <div id="status" class="status" hidden>
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        <span id="statusText"></span>
+      </div>
+      <div id="errorBox" class="error-box" hidden></div>
+      <div id="pendingShareNotice" class="pending-share-notice" hidden></div>
+    </section>
+
+    <section id="savesLibraryPanel" class="panel" hidden>
+      <h2>Recent saves</h2>
+      <div id="savesLibraryTable" class="table-wrap"></div>
+    </section>
+
+    <section id="results" hidden>
+      <nav class="app-tabs" aria-label="Result sections">
+        <button type="button" class="app-tab active" data-tab="stats">Statistics</button>
+        <button type="button" class="app-tab" data-tab="map">Map</button>
+        <button type="button" id="copyLinkBtn" class="link-btn copy-link-btn">Copy link</button>
+      </nav>
+
+      <section id="statsTab" class="tab-panel">
+        <section id="overview" class="panel"></section>
+
+        <section class="panel">
+          <h2>Trends</h2>
+          <div class="trends-grid">
+            <div id="populationChart" class="trend-chart-wrap"></div>
+            <div id="taxBaseChart" class="trend-chart-wrap"></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Players (<span id="playerCount">0</span>)</h2>
+          <div id="playersTable" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="blackDeathPanel">
+          <h2>Black Death</h2>
+          <p id="blackDeathSummary" class="panel-note"></p>
+          <div id="blackDeathTable" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="llamaScorePanel">
+          <h2>Llama Score</h2>
+          <p class="panel-note">
+            Load the recorder ledgers from <code>llama-score-automatic-logging-machine/data</code>. Finished player wars are scored from
+            recorded win/loss inference, including land-transfer peace results.
+          </p>
+          <div class="ledger-loader">
+            <label>Snapshots <input type="file" id="llamaSnapshotsInput" accept=".jsonl,.txt,application/jsonl"></label>
+            <label>War events <input type="file" id="llamaEventsInput" accept=".jsonl,.txt,application/jsonl"></label>
+          </div>
+          <p id="llamaLedgerStatus" class="panel-note">No recorder ledger loaded yet.</p>
+          <div id="llamaLeaderboard"></div>
+          <h3>Scored Wars</h3>
+          <div id="llamaWarsTable" class="table-wrap"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Countries (<span id="countryCount">0</span>)</h2>
+          <div id="metricTabs" class="metric-tabs" aria-label="Metric groups">
+            <button type="button" class="metric-tab active" data-metrics="key">Key</button>
+            <button type="button" class="metric-tab" data-metrics="economy">Economy</button>
+            <button type="button" class="metric-tab" data-metrics="military">Military</button>
+            <button type="button" class="metric-tab" data-metrics="demographic">Demographic</button>
+          </div>
+          <input type="search" id="countrySearch" class="search-box" placeholder="Filter by tag or government..." />
+          <div id="countriesTable" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="mapTab" class="tab-panel" hidden>
+        <section class="panel map-panel">
+          <h2>Map</h2>
+          <div id="mapContainer"></div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <footer>
+    <p>Runs entirely in your browser - your save file is never uploaded anywhere.</p>
+  </footer>
+
+  <script src="js/clausewitz.js"></script>
+  <script src="js/eu5-fixed-ids.js"></script>
+  <script src="js/clausewitz-binary.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/llama-score.js"></script>
+  <script src="js/save-library.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

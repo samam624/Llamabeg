@@ -1,0 +1,13 @@
+{
+  "saveDir": "C:\\Users\\samca\\Documents\\Paradox Interactive\\Europa Universalis V\\save games",
+  "dataDir": "./data",
+  "pollMs": 15000,
+  "stableMs": 2500,
+  "checkpointYears": 10,
+  "archiveFullSaves": false,
+  "playerWarsOnly": true,
+  "storeAllEconomyCountries": false,
+  "campaignMode": "latest",
+  "campaignKey": null,
+  "autosavePattern": "^autosave_.*\\.eu5$"
+}
