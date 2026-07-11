@@ -14,6 +14,7 @@
   const OUTSIDE_MAP_COLOR = [12, 16, 21];
   const MAX_RENDER_DPR = 1.5;
   const LOCATION_BOUNDARY_MIN_SCALE = 0.33;
+  const FAST_RENDER_BORDER_MIN_SCALE = 0.55;
   const PLAYER_LABEL_FONT = "'Cinzel', 'Trajan Pro', 'Times New Roman', Georgia, serif";
   const WIKI_FILE_BASE = "https://eu5.paradoxwikis.com/Special:Redirect/file/";
   const wikiIcon = (name) => WIKI_FILE_BASE + encodeURIComponent(name);
@@ -708,7 +709,8 @@
     }
 
     const COAST_SHADE = 0.6;
-    if (!fast && s >= LOCATION_BOUNDARY_MIN_SCALE) {
+    const drawDetailedBorders = (!fast || s >= FAST_RENDER_BORDER_MIN_SCALE) && s >= LOCATION_BOUNDARY_MIN_SCALE;
+    if (drawDetailedBorders) {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
         const hasDown = dy + 1 < destH;
@@ -738,7 +740,7 @@
     // and no border was drawn between them - the bug behind "border between
     // players still not working".
     let hasPlayerBoundary = false;
-    if (!fast) {
+    if (!fast || s >= FAST_RENDER_BORDER_MIN_SCALE) {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
         const hasDown = dy + 1 < destH;
@@ -1117,8 +1119,271 @@
       slaves: "#8d5a8d",
     };
     const POP_CLASS_FALLBACK_COLOR = "#7f8c9a";
+    function popClassKey(key) {
+      return estateToPopClass(key);
+    }
+
     function popClassColor(key) {
-      return POP_CLASS_COLORS[key] || POP_CLASS_FALLBACK_COLOR;
+      return POP_CLASS_COLORS[popClassKey(key)] || POP_CLASS_FALLBACK_COLOR;
+    }
+
+    function popClassLabelHtml(key, label) {
+      const classKey = popClassKey(key);
+      const color = popClassColor(classKey);
+      const title = String(label || classKey).replace(/_/g, " ");
+      return `<span class="demographic-label" style="--demographic-color:${color}" title="${escapeHtml(title)}">
+        <span class="demographic-swatch" aria-hidden="true"></span>
+        <span>${label ? humanize(label) : humanize(classKey)}</span>
+      </span>`;
+    }
+
+    const ROAD_ICON = wikiIcon("Global road building time.png");
+
+    // The exact entries here come from the generated EU5 Wiki building pages'
+    // Employment column (Common/Rural/Urban buildings). The keyword fallback
+    // covers internal save keys such as "marketplace" when they do not match
+    // the wiki's display string exactly.
+    const BUILDING_POP_TYPE_OVERRIDES = {
+      academy_of_sciences: "nobles",
+      admiralty: "burghers",
+      apothecary: "burghers",
+      aqueduct_system: "laborers",
+      armory: "soldiers",
+      artisan_guilds: "burghers",
+      bank: "burghers",
+      barracks: "soldiers",
+      bastion: "soldiers",
+      bridge: "laborers",
+      burgher_mansion: "burghers",
+      castle: "soldiers",
+      cathedral: "clergy",
+      city_guard: "soldiers",
+      city_walls: "soldiers",
+      clay_pit: "laborers",
+      commerce_center: "burghers",
+      conscription_center: "soldiers",
+      construction_center: "laborers",
+      cotton_plantation: "slaves",
+      dock: "soldiers",
+      dry_dock: "soldiers",
+      farming_village: "peasants",
+      fishing_village: "peasants",
+      fortress: "soldiers",
+      grand_marketplace: "burghers",
+      guild_hall: "burghers",
+      hospital: "clergy",
+      irrigation: "peasants",
+      library: "burghers",
+      local_markets: "burghers",
+      local_shrine: "clergy",
+      lumbermill: "laborers",
+      madrasa: "clergy",
+      market_village: "peasants",
+      market_warehouse: "burghers",
+      marketplace: "burghers",
+      mason: "laborers",
+      merchants_guild: "burghers",
+      mission: "clergy",
+      monastery: "clergy",
+      noble_courts: "nobles",
+      noble_villa: "nobles",
+      palace: "nobles",
+      paper_mill: "laborers",
+      plantation: "slaves",
+      quarry: "laborers",
+      regimental_camp: "soldiers",
+      rural_smelter: "laborers",
+      salt_collector: "laborers",
+      sawmill: "laborers",
+      settlement: "peasants",
+      shipyard: "soldiers",
+      stock_exchange: "burghers",
+      stockade: "soldiers",
+      stone_quarry: "laborers",
+      sugar_plantation: "slaves",
+      temple: "clergy",
+      textile_mill: "laborers",
+      tobacco_plantation: "slaves",
+      trade_office: "burghers",
+      trading_hub: "burghers",
+      training_fields: "soldiers",
+      university: "clergy",
+      weapon_mill: "laborers",
+      wharf: "burghers",
+      windmill: "laborers",
+    };
+    const BUILDING_DISPLAY_NAME_OVERRIDES = {
+      banking_office: "Banking Office",
+      cloth_guild: "Spinners' Guild",
+      dyes_guild: "Dye Maker",
+      fine_cloth_guild: "Tailors' Guild",
+      furniture_guild: "Carpenters' Guild",
+      jewelry_guild: "Jewelers' Guild",
+      paper_guild: "Papermakers' Guild",
+      pottery_guild: "Potters' Guild",
+      pound_lock_canal_infrastructure: "Pound Lock Canal",
+      trade_office: "Trade Office",
+      weapon_guild: "Weaponsmith",
+    };
+
+    function lookupKey(value) {
+      return String(value || "")
+        .replace(/^building_/, "")
+        .replace(/([a-z])([A-Z])/g, "$1_$2")
+        .replace(/&/g, " and ")
+        .replace(/['’]/g, "")
+        .replace(/[^A-Za-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .toLowerCase();
+    }
+
+    function buildingPopType(name) {
+      const key = lookupKey(name);
+      const wikiMap = root.EU5_BUILDING_POP_TYPES || {};
+      const title = String(name || "")
+        .replace(/^building_/, "")
+        .replace(/_/g, " ")
+        .replace(/\b\w/g, (c) => c.toUpperCase());
+      return (
+        BUILDING_POP_TYPE_OVERRIDES[key] ||
+        wikiMap[name] ||
+        wikiMap[title] ||
+        (/(janissary|mamluk|gilman|slave.*barracks|galley_barracks)/i.test(key) ? "slaves" : null) ||
+        (/(bastion|castle|fort|stockade|wall|barrack|garrison|armory|arsenal|shipyard|dock|naval|training|warrior|guard|battery|gunnery|conscription|regimental|sergeantry)/i.test(key)
+          ? "soldiers"
+          : null) ||
+        (/(cathedral|temple|church|monastery|madrasa|mission|shrine|clergy|cleric|hospital|university|order|preacher|convent|retreat)/i.test(key) ? "clergy" : null) ||
+        (/(palace|noble|manor|court|governor|embassy|villa|parliament|lieutenancy|viceroyalty)/i.test(key) ? "nobles" : null) ||
+        (/(plantation)/i.test(key) ? "slaves" : null) ||
+        (/(farm|fishing|forest|settlement|village|irrigation|polder|local_school|hunting_ground|pirate|brothel)/i.test(key) ? "peasants" : null) ||
+        (/(mill|mine|quarry|pit|foundry|factory|construction|mason|bridge|aqueduct|canal|road|lumber|granary|kiln|smelter|workshop)/i.test(key) ? "laborers" : null) ||
+        (/(market|trade|merchant|guild|bank|warehouse|office|customs|tax|library|theater|opera|school|newspaper|apothecary|wharf|port|mint)/i.test(key) ? "burghers" : null) ||
+        "burghers"
+      );
+    }
+
+    function buildingDisplayName(name) {
+      const key = lookupKey(name);
+      return BUILDING_DISPLAY_NAME_OVERRIDES[key] || humanize(name);
+    }
+
+    const POP_CLASS_ORDER = ["burghers", "peasants", "laborers", "clergy", "soldiers", "nobles", "tribesmen", "slaves"];
+    function popClassSortIndex(key) {
+      const idx = POP_CLASS_ORDER.indexOf(popClassKey(key));
+      return idx === -1 ? POP_CLASS_ORDER.length : idx;
+    }
+
+    function buildingNameHtml(name, popType) {
+      const color = popClassColor(popType);
+      return `<span class="building-name" style="--demographic-color:${color}">
+        <span class="demographic-swatch" aria-hidden="true"></span>
+        <span>${buildingDisplayName(name)}</span>
+      </span>`;
+    }
+
+    function buildingItemsForLocation(loc) {
+      const items =
+        Array.isArray(loc.buildings) && loc.buildings.length
+          ? [
+              ...loc.buildings
+                .reduce((byType, b) => {
+                  const key = b.type || "unknown";
+                  const item =
+                    byType.get(key) ||
+                    {
+                      name: key,
+                      popType: buildingPopType(key),
+                      level: 0,
+                      employed: 0,
+                      profit: 0,
+                      count: 0,
+                      statuses: new Set(),
+                    };
+                  item.level += typeof b.level === "number" ? b.level : 0;
+                  item.employed += typeof b.employed === "number" ? b.employed : 0;
+                  item.profit += typeof b.lastMonthsProfit === "number" ? b.lastMonthsProfit : 0;
+                  item.count += 1;
+                  if (b.employmentRequirementStatus) item.statuses.add(b.employmentRequirementStatus);
+                  byType.set(key, item);
+                  return byType;
+                }, new Map())
+                .values(),
+            ].map((item) => ({
+              ...item,
+              status: item.statuses.size ? [...item.statuses].join(", ") : undefined,
+            }))
+          : sortedEntries(loc.buildingCounts).map(([name, count]) => ({
+              name,
+              popType: buildingPopType(name),
+              count,
+            }));
+      return items.sort((a, b) => popClassSortIndex(a.popType) - popClassSortIndex(b.popType) || String(a.name || "").localeCompare(String(b.name || "")));
+    }
+
+    function buildingTabsHtml(loc) {
+      const items = buildingItemsForLocation(loc);
+      if (!items.length) return `<p>No buildings found</p>`;
+      const groups = new Map();
+      for (const item of items) {
+        const key = popClassKey(item.popType);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      }
+      const orderedGroups = [...groups.entries()].sort((a, b) => popClassSortIndex(a[0]) - popClassSortIndex(b[0]));
+      const tabs = orderedGroups
+        .map(([key, group], index) => {
+          const count = group.reduce((sum, item) => sum + (item.count || 1), 0);
+          return `<button type="button" class="building-pop-tab${index === 0 ? " active" : ""}" data-pop="${escapeHtml(key)}" style="--demographic-color:${popClassColor(key)}">
+            <span class="demographic-swatch" aria-hidden="true"></span>
+            <span>${humanize(key)}</span>
+            <strong>${fmtNum(count, 0)}</strong>
+          </button>`;
+        })
+        .join("");
+      const panels = orderedGroups
+        .map(([key, group], index) => {
+          const rows = group
+            .map((item) => {
+              const amount = Array.isArray(loc.buildings) && loc.buildings.length ? item.level : item.count;
+              return `<tr class="demographic-row" style="--demographic-color:${popClassColor(key)}">
+                <td>${buildingNameHtml(item.name, key)}</td>
+                <td class="num">${fmtNum(amount, 0)}</td>
+                <td class="num">${fmtNum(item.employed, 2)}</td>
+                <td>${humanize(item.status)}</td>
+                <td class="num">${fmtNum(item.profit, 2)}</td>
+              </tr>`;
+            })
+            .join("");
+          return `<div class="building-tab-panel" data-pop="${escapeHtml(key)}"${index === 0 ? "" : " hidden"}>
+            <table><thead><tr><th>Building</th><th>${Array.isArray(loc.buildings) && loc.buildings.length ? "Level" : "Count"}</th><th>Employed</th><th>Status</th><th>Profit</th></tr></thead><tbody>${rows}</tbody></table>
+          </div>`;
+        })
+        .join("");
+      return `<div class="building-tabs">${tabs}</div>${panels}`;
+    }
+
+    function roadSummaryHtml(loc) {
+      const entries = sortedEntries(loc.roadCounts);
+      const total = entries.reduce((sum, [, count]) => sum + count, 0);
+      const chips = entries.length
+        ? entries
+            .map(
+              ([name, count]) => `<span class="road-chip">
+                <img src="${ROAD_ICON}" alt="" aria-hidden="true">
+                <span>${humanize(name)}</span>
+                <strong>${fmtNum(count, 0)}</strong>
+              </span>`
+            )
+            .join("")
+        : `<span class="road-chip empty"><img src="${ROAD_ICON}" alt="" aria-hidden="true"><span>No road assets found</span></span>`;
+      return `<section class="location-detail-section road-assets-section">
+        <h4>Roads</h4>
+        <div class="road-assets-head">
+          <img src="${ROAD_ICON}" alt="" aria-hidden="true">
+          <strong>${total ? fmtNum(total, 0) + " road asset" + (total === 1 ? "" : "s") : "No road assets found"}</strong>
+        </div>
+        <div class="road-chip-row">${chips}</div>
+      </section>`;
     }
 
     function estateToPopClass(name) {
@@ -1175,8 +1440,8 @@
           const tax = summary.tax[key] || 0;
           const popShare = summary.totalPop ? pop / summary.totalPop : undefined;
           const efficiency = pop > 0 ? tax / pop : undefined;
-          return `<tr>
-            <td><span class="map-legend-swatch" style="background:${popClassColor(key)}"></span>${humanize(key)}</td>
+          return `<tr class="demographic-row" style="--demographic-color:${popClassColor(key)}">
+            <td>${popClassLabelHtml(key)}</td>
             <td class="num">${fmtPopulation(pop)}</td>
             <td class="num">${fmtPercent(popShare, 1)}</td>
             <td class="num">${fmtNum(tax, 3)}</td>
@@ -1209,6 +1474,11 @@
       return raw ? humanize(raw) : fmtMaybeId(id, fallbackPrefix);
     }
 
+    function cleanDefinitionName(value) {
+      if (!value) return "&mdash;";
+      return humanize(String(value).replace(/_province$/i, ""));
+    }
+
     function countryDetailsHtml(countryNumber) {
       const country = countryByNumber.get(countryNumber);
       if (!country) return "";
@@ -1218,6 +1488,7 @@
       const totalPop = sumField(rows, "population");
       const totalDev = sumField(rows, "development");
       const totalTax = sumField(rows, "tax");
+      const displayedPopulation = typeof country.population === "number" ? country.population : totalPop;
       const stats = [
         detailStat("Tag", escapeHtml(country.tag || "?")),
         detailStat("Player", escapeHtml(playerText)),
@@ -1225,8 +1496,9 @@
         detailStat("Rank", fmtNum(country.scorePlace, 0)),
         detailStat("Locations", fmtNum(rows.length, 0)),
         detailStat("Capital", capitalMeta ? humanize(capitalMeta.name) : fmtMaybeId(country.capital, "Location")),
-        detailStat("Population", fmtPopulation(totalPop)),
+        detailStat("Population", fmtPopulation(displayedPopulation)),
         detailStat("Development", typeof totalDev === "number" ? fmtNum(totalDev, 1) + " points" : "&mdash;"),
+        detailStat("Avg Development", typeof totalDev === "number" && rows.length ? fmtNum(totalDev / rows.length, 2) + " / location" : "&mdash;"),
         detailStat("Tax Base", typeof totalTax === "number" ? fmtNum(totalTax, 3) + " tax" : "&mdash;"),
         detailStat("Avg Control", fmtPercent(avgField(rows, "control"), 1)),
         detailStat("Avg Prosperity", fmtPercent(avgField(rows, "prosperity"), 1)),
@@ -1235,13 +1507,13 @@
         detailStat("Income/mo", fmtNum(country.lastMonthGoldIncome, 2)),
         detailStat("Profit", fmtNum(country.profit, 1)),
         detailStat("Manpower", fmtNum(country.manpower, 2)),
-        detailStat("Manpower / 1k People", typeof country.manpower === "number" && totalPop > 0 ? fmtNum(country.manpower / totalPop, 4) : "&mdash;"),
+        detailStat("Manpower / 1k People", typeof country.manpower === "number" && displayedPopulation > 0 ? fmtNum(country.manpower / displayedPopulation, 4) : "&mdash;"),
       ].join("");
       return `
         <div class="location-detail-head">
           <div>
             <h3>${escapeHtml(country.tag || `Country #${countryNumber}`)}</h3>
-            <div class="location-detail-sub">Country #${countryNumber}</div>
+            <div class="location-detail-sub">${escapeHtml(playerText)} - Country #${countryNumber}</div>
           </div>
           <button type="button" class="location-detail-close country-detail-close" title="Clear country focus">x</button>
         </div>
@@ -1261,10 +1533,14 @@
       const controller = countryLabel(loc.controller);
       const overlord = subjectToOverlord.has(loc.owner) ? countryLabel(subjectToOverlord.get(loc.owner)) : null;
       const type = meta.type || "unknown";
+      const provinceName = meta.province || loc.province;
+      const headerContext = [
+        { label: "Province", value: cleanDefinitionName(provinceName) },
+        { label: "Nation", value: owner ? escapeHtml(owner) : "&mdash;" },
+        { label: "Controller", value: controller ? escapeHtml(controller) : "&mdash;" },
+      ];
 
       const stats = [
-        detailStat("Owner", owner ? escapeHtml(owner) : "&mdash;"),
-        detailStat("Controller", controller ? escapeHtml(controller) : "&mdash;"),
         detailStat("Overlord", overlord ? escapeHtml(overlord) : "&mdash;"),
         detailStat("Rank", humanize(loc.rank)),
         detailStat("Development", typeof loc.development === "number" ? fmtNum(loc.development, 2) + " points" : "&mdash;"),
@@ -1283,17 +1559,13 @@
         detailStat("Culture", definitionNameFor(cultureByNumber, loc.culture, "Culture")),
         detailStat("Religion", definitionNameFor(religionByNumber, loc.religion, "Religion")),
         detailStat("Language", humanize(loc.language)),
-        detailStat("Province", fmtMaybeId(loc.province, "Province")),
       ].join("");
 
-      const buildingRows = sortedEntries(loc.buildingCounts)
-        .map(([name, count]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(count, 0)}</td></tr>`)
-        .join("");
-      const roadRows = sortedEntries(loc.roadCounts)
-        .map(([name, count]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(count, 0)}</td></tr>`)
-        .join("");
       const estateTaxRows = sortedEntries(loc.estateTax)
-        .map(([name, value]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(value, 4)}</td></tr>`)
+        .map(
+          ([name, value]) =>
+            `<tr class="demographic-row" style="--demographic-color:${popClassColor(name)}"><td>${popClassLabelHtml(name, name)}</td><td class="num">${fmtNum(value, 4)}</td></tr>`
+        )
         .join("");
       const institutionRows = sortedEntries(loc.institutions)
         .map(([name, value]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(value, 1)}</td></tr>`)
@@ -1301,7 +1573,7 @@
       const popRows = (loc.populationClasses || [])
         .map(
           (p) =>
-            `<tr><td>${humanize(p.name)}</td><td class="num">${fmtPopulation(p.total)}</td><td class="num">${fmtPopulation(p.unemployed)}</td><td class="num">${fmtPopulation(p.employedInRgo)}</td></tr>`
+            `<tr class="demographic-row" style="--demographic-color:${popClassColor(p.name)}"><td>${popClassLabelHtml(p.name)}</td><td class="num">${fmtPopulation(p.total)}</td><td class="num">${fmtPopulation(p.unemployed)}</td><td class="num">${fmtPopulation(p.employedInRgo)}</td></tr>`
         )
         .join("");
 
@@ -1313,16 +1585,24 @@
         <div class="location-detail-head">
           <div>
             <h3>${escapeHtml(meta.name || `Location #${id}`)}</h3>
-            <div class="location-detail-sub">#${id} - ${escapeHtml(type)}</div>
+            <div class="location-detail-sub">Location #${id} - ${escapeHtml(type)}</div>
           </div>
           <button type="button" class="location-detail-close" title="Close location details">x</button>
         </div>
+        <div class="location-context-row">
+          ${headerContext
+            .map((item) => `<div class="location-context-pill"><span>${escapeHtml(item.label)}</span><strong>${item.value}</strong></div>`)
+            .join("")}
+        </div>
         <div class="location-detail-stats">${stats}</div>
-        ${section("Buildings", buildingRows ? `<table><tbody>${buildingRows}</tbody></table>` : "", "No buildings found")}
         ${section("Demography", popRows ? `<table><thead><tr><th>Class</th><th>Total</th><th>Unemployed</th><th>RGO</th></tr></thead><tbody>${popRows}</tbody></table>` : "", "No population data")}
         ${section("Estate Tax", estateTaxRows ? `<table><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
         ${section("Institutions", institutionRows ? `<table><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
-        ${section("Roads", roadRows ? `<table><tbody>${roadRows}</tbody></table>` : "", "No road assets found")}
+        ${roadSummaryHtml(loc)}
+        <section class="location-detail-section building-detail-section">
+          <h4>Buildings</h4>
+          ${buildingTabsHtml(loc)}
+        </section>
       `;
     }
 
@@ -1405,6 +1685,15 @@
       details.innerHTML = locationDetailsHtml(id);
       const close = details.querySelector(".location-detail-close");
       if (close) close.addEventListener("click", clearLocationDetails);
+      details.querySelectorAll(".building-pop-tab").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const pop = btn.dataset.pop;
+          details.querySelectorAll(".building-pop-tab").forEach((tab) => tab.classList.toggle("active", tab === btn));
+          details.querySelectorAll(".building-tab-panel").forEach((panel) => {
+            panel.hidden = panel.dataset.pop !== pop;
+          });
+        });
+      });
       updateMapBodyClasses();
       redraw();
       updateLeaderLine();

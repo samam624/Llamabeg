@@ -645,6 +645,46 @@
     }
   }
 
+  function parseBuildingManagerSection(dec, view, onBuilding) {
+    dec.pos += 2; // consume OPEN already peeked by caller
+    while (true) {
+      const peek = view.getUint16(dec.pos, true);
+      if (peek === CLOSE) {
+        dec.pos += 2;
+        break;
+      }
+      const resolved = dec.resolveToken();
+      const key = dec.keyToPropName(resolved);
+      const eq = view.getUint16(dec.pos, true);
+      if (eq !== EQUALS) throw new Error(`building_manager desync at ${dec.pos}`);
+      dec.pos += 2;
+
+      if (key === "database") {
+        const openCode = view.getUint16(dec.pos, true);
+        dec.pos += 2;
+        if (openCode !== OPEN) throw new Error("expected building_manager.database to be a subobject");
+        while (true) {
+          const p2 = view.getUint16(dec.pos, true);
+          if (p2 === CLOSE) {
+            dec.pos += 2;
+            break;
+          }
+          const numResolved = dec.resolveToken();
+          const eq2 = view.getUint16(dec.pos, true);
+          if (eq2 !== EQUALS) throw new Error(`building_manager.database desync at ${dec.pos}`);
+          dec.pos += 2;
+          const buildingObj = dec.readBareValue();
+          if (buildingObj && typeof buildingObj === "object" && !Array.isArray(buildingObj) && !("fixedNum" in buildingObj)) {
+            const building = Clausewitz.extractBuildingFields(numResolved, buildingObj);
+            if (building && building.type && typeof building.location === "number") onBuilding(building);
+          }
+        }
+      } else {
+        dec.skipBareValue();
+      }
+    }
+  }
+
   function parseNamedDatabaseSection(dec, view, sectionName, onEntry) {
     dec.pos += 2; // consume OPEN already peeked by caller
     while (true) {
@@ -1104,6 +1144,7 @@
       locations: [],
       dependencies: [],
       locationAssets: [],
+      buildings: [],
       cultures: [],
       religions: [],
       markets: [],
@@ -1128,6 +1169,7 @@
     let locationsSeen = false;
     let diplomacySeen = false;
     let estateManagerSeen = false;
+    let buildingManagerSeen = false;
     let cultureManagerSeen = false;
     let religionManagerSeen = false;
     let marketManagerSeen = false;
@@ -1199,6 +1241,21 @@
         estateManagerSeen = true;
         parseEstateManagerSection(dec, gsView, (asset) => {
           result.locationAssets.push(asset);
+        });
+        return true;
+      }
+      if (key === "building_manager" && includeLocations && !buildingManagerSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        buildingManagerSeen = true;
+        parseBuildingManagerSection(dec, gsView, (building) => {
+          result.buildings.push(building);
         });
         return true;
       }
@@ -1342,6 +1399,8 @@
     // logic, not duplicated here.
     Clausewitz.collapsePlayerSessions(result);
     Clausewitz.attachLocationAssets(result);
+    Clausewitz.attachLocationBuildings(result);
+    Clausewitz.reconcileWarOccupation(result);
 
     onProgress(1);
     return result;

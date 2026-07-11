@@ -1,7 +1,7 @@
 {
   "saveDir": "C:\\Users\\samca\\Documents\\Paradox Interactive\\Europa Universalis V\\save games",
   "dataDir": "./data",
-  "pollMs": 15000,
+  "pollMs": 5000,
   "stableMs": 2500,
   "checkpointYears": 10,
   "archiveFullSaves": false,

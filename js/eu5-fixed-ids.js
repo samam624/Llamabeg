@@ -52,6 +52,7 @@
     "2e94": "market_manager",
     "312f": "situation_manager",
     "31df": "war_manager",
+    "2e6b": "building_manager",
 
     // war_manager.database entries. Derived by position-matching a
     // generically-decoded war object against the melted text of the exact
@@ -89,6 +90,14 @@
     "3050": "war_goal_held",
     "3053": "attacker_score",
     "3054": "defender_score",
+    // War-wide casualty totals, unlike attacker_score/defender_score above -
+    // confirmed these survive war conclusion (present with real values on a
+    // real `previous=yes` war entry), which is exactly why they're useful:
+    // see js/clausewitz.js's extractWarFields sumLosses() and the win/loss
+    // heuristic in js/llama-score.js.
+    "3534": "attacker_losses",
+    "3535": "defender_losses",
+    "3059": "stalled_years",
     // countries container
     "1cf": "tags",
     "5ab": "database",
@@ -146,6 +155,11 @@
     "3895": "end_location",
     "3803": "road_type",
     "2dce": "culture_definition",
+    "3281": "employed",
+    "39a3": "employment_requirement",
+    "39a4": "employment_requirement_status",
+    "3735": "last_months_profit",
+    "3a46": "upkeep",
 
     // per-country fields
     "2cc6": "country_name",

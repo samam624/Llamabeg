@@ -428,6 +428,22 @@
     };
   }
 
+  function extractBuildingFields(number, obj) {
+    if (!obj || typeof obj !== "object") return null;
+    return {
+      number,
+      type: obj.type,
+      level: obj.level,
+      employed: obj.employed,
+      employmentRequirement: obj.employment_requirement,
+      employmentRequirementStatus: obj.employment_requirement_status,
+      location: obj.location,
+      owner: obj.owner,
+      lastMonthsProfit: obj.last_months_profit,
+      upkeep: obj.upkeep,
+    };
+  }
+
   function colorValueToCss(color) {
     const values = color && Array.isArray(color.values) ? color.values : null;
     return values ? `rgb(${values[0]}, ${values[1]}, ${values[2]})` : null;
@@ -475,6 +491,27 @@
           loc.roadCounts[asset.roadType] = (loc.roadCounts[asset.roadType] || 0) + 1;
           loc.roadTotal = (loc.roadTotal || 0) + 1;
         }
+      }
+    }
+  }
+
+  function attachLocationBuildings(result) {
+    if (!result.buildings || !result.buildings.length) return;
+    const locByNumber = new Map(result.locations.map((l) => [l.number, l]));
+    for (const building of result.buildings) {
+      if (!building.type || typeof building.location !== "number") continue;
+      const loc = locByNumber.get(building.location);
+      if (!loc) continue;
+      if (!loc.buildings) loc.buildings = [];
+      if (!loc.buildingCounts) loc.buildingCounts = {};
+      loc.buildings.push(building);
+      loc.buildingCounts[building.type] = (loc.buildingCounts[building.type] || 0) + 1;
+      loc.buildingTotal = (loc.buildingTotal || 0) + 1;
+      loc.buildingLevelTotal = (loc.buildingLevelTotal || 0) + (typeof building.level === "number" ? building.level : 0);
+    }
+    for (const loc of locByNumber.values()) {
+      if (Array.isArray(loc.buildings)) {
+        loc.buildings.sort((a, b) => String(a.type || "").localeCompare(String(b.type || "")) || (a.number || 0) - (b.number || 0));
       }
     }
   }
@@ -583,6 +620,42 @@
             const assetObj = scanner.parseValue();
             const asset = extractEstateAssetFields(parseInt(numTok.raw, 10), assetObj);
             if (asset && (asset.building || asset.roadType || typeof asset.rgo === "number")) onAsset(asset);
+          }
+        } else {
+          scanner.skipValue();
+        }
+      } else {
+        scanner.skipValue();
+      }
+    }
+  }
+
+  function parseBuildingManagerSection(scanner, onBuilding) {
+    while (true) {
+      scanner.skipWs();
+      if (scanner.text[scanner.pos] === "}") {
+        scanner.pos++;
+        break;
+      }
+      if (scanner.eof()) break;
+      const key = scanner.readScalarToken().raw;
+      scanner.consumeIfPresent("=");
+      if (key === "database") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          while (true) {
+            scanner.skipWs();
+            if (scanner.text[scanner.pos] === "}") {
+              scanner.pos++;
+              break;
+            }
+            if (scanner.eof()) break;
+            const numTok = scanner.readScalarToken();
+            scanner.consumeIfPresent("=");
+            const buildingObj = scanner.parseValue();
+            const building = extractBuildingFields(parseInt(numTok.raw, 10), buildingObj);
+            if (building && building.type && typeof building.location === "number") onBuilding(building);
           }
         } else {
           scanner.skipValue();
@@ -792,18 +865,70 @@
       if (p.side !== "Attacker" && p.side !== "Defender") p.side = sideByCountry.get(p.country) || p.side;
     }
 
+    // NOTE: this war entry's own `locations` map is who *owns* each of these
+    // locations, not who currently *controls* them - ownership doesn't
+    // change until a peace treaty transfers it, so for an ongoing war this
+    // is frozen at (essentially) pre-war values the entire time, not a live
+    // occupation signal at all. Confirmed on real data: three real multi-
+    // year wars each showed byte-identical attacker/defender location
+    // counts on *every single snapshot* from war-start to war-disappeared -
+    // impossible for genuine battlefield occupation to hold steady that
+    // long, but exactly what you'd expect from ownership that simply hasn't
+    // transferred yet. Cross-checked directly against a real save's
+    // `locations.locations[].owner` vs `.controller`: this war's own map
+    // matched `owner` on 145/145 sampled locations and `controller` on only
+    // 143/145 - the discrepancy is exactly the (small) set of locations
+    // someone has actually seized so far.
+    //
+    // Real live occupation requires `locations.locations[].controller`,
+    // which isn't available here (this function only sees the war entry
+    // itself) - so this computes the OWNERSHIP-based split for backward
+    // compatibility/fallback, and separately retains locationIds +
+    // sideByCountry so parseSave/parseCompressedSave's post-pass
+    // (reconcileWarOccupation, below) can recompute this using the real
+    // `locations.locations[].controller` once the whole save has been
+    // walked - but only when the caller actually parsed locations
+    // (includeLocations: true); otherwise this ownership-based value is
+    // all that's available, same as before.
     let attackerLocations = 0;
     let defenderLocations = 0;
     let otherLocations = 0;
     let totalLocations = 0;
+    const locationIds = [];
     if (obj.locations && typeof obj.locations === "object" && !Array.isArray(obj.locations)) {
-      for (const ownerRaw of Object.values(obj.locations)) {
+      for (const [locIdRaw, ownerRaw] of Object.entries(obj.locations)) {
         totalLocations++;
+        const locId = Number(locIdRaw);
+        if (Number.isFinite(locId)) locationIds.push(locId);
         const side = typeof ownerRaw === "number" ? sideByCountry.get(ownerRaw) : undefined;
         if (side === "Attacker") attackerLocations++;
         else if (side === "Defender") defenderLocations++;
         else otherLocations++;
       }
+    }
+    const sideByCountryMap = {};
+    for (const [country, side] of sideByCountry) sideByCountryMap[country] = side;
+
+    // War-wide casualty totals (`attacker_losses`/`defender_losses`), unlike
+    // `attacker_score`/`defender_score`, survive war conclusion - confirmed
+    // on a real concluded war entry (`previous=yes`), which still had both
+    // fully populated. Each is `{ losses: { <unit_type>: { Battle, Attrition,
+    // Capture } } }`, summed here into one total per cause plus a grand
+    // total per side - a useful corroborating signal for the win/loss
+    // heuristic (js/llama-score.js) precisely because it doesn't get wiped
+    // the way the war-level score fields do.
+    function sumLosses(lossesObj) {
+      const totals = { battle: 0, attrition: 0, capture: 0 };
+      const byUnit = lossesObj && lossesObj.losses;
+      if (byUnit && typeof byUnit === "object") {
+        for (const unit of Object.values(byUnit)) {
+          if (!unit || typeof unit !== "object") continue;
+          if (typeof unit.Battle === "number") totals.battle += unit.Battle;
+          if (typeof unit.Attrition === "number") totals.attrition += unit.Attrition;
+          if (typeof unit.Capture === "number") totals.capture += unit.Capture;
+        }
+      }
+      return { ...totals, total: totals.battle + totals.attrition + totals.capture };
     }
 
     return {
@@ -819,7 +944,60 @@
       attackerScore: typeof obj.attacker_score === "number" ? obj.attacker_score : null,
       defenderScore: typeof obj.defender_score === "number" ? obj.defender_score : null,
       occupation: { attackerLocations, defenderLocations, otherLocations, totalLocations },
+      attackerLosses: sumLosses(obj.attacker_losses),
+      defenderLosses: sumLosses(obj.defender_losses),
+      // Also present but not yet wired up: attacker_siege_pop_losses/
+      // defender_siege_pop_losses and attacker_levy_pop_losses/
+      // defender_levy_pop_losses (population lost to sieges/levies per
+      // side) - seen in melted text on a real war, held back here rather
+      // than added asymmetrically because the binary fixed ID for the
+      // defender-side counterpart couldn't be cross-validated yet (see
+      // js/eu5-fixed-ids.js's note). attacker_losses/defender_losses above
+      // are the ones actually used for scoring; these are a possible
+      // future refinement, not a current gap in the win/loss heuristic.
+      stalledYears: typeof obj.stalled_years === "number" ? obj.stalled_years : null,
+      // Internal - consumed by reconcileWarOccupation() below, then deleted
+      // from the final result. Not meaningful to any other caller.
+      locationIds,
+      sideByCountryMap,
     };
+  }
+
+  // Recomputes each war's `occupation` from real, live location CONTROLLER
+  // data (locations.locations[].controller) instead of the war entry's own
+  // (frozen, ownership-based - see extractWarFields' comment above)
+  // locations map, then discards the temporary fields extractWarFields
+  // stashed for this purpose. Only does anything when the caller actually
+  // parsed locations (`includeLocations: true` - result.locations
+  // non-empty); otherwise every war's `occupation` is left exactly as
+  // extractWarFields computed it (the ownership-based fallback), same
+  // behavior as before this existed. Shared by both parsers - called once
+  // at the end of each one's top-level walk, after result.wars AND
+  // result.locations are both fully populated.
+  function reconcileWarOccupation(result) {
+    const wars = result.wars || [];
+    const controllerByLocation =
+      result.locations && result.locations.length ? new Map(result.locations.map((l) => [l.number, l.controller])) : null;
+    for (const war of wars) {
+      const locationIds = war.locationIds;
+      const sideByCountryMap = war.sideByCountryMap;
+      delete war.locationIds;
+      delete war.sideByCountryMap;
+      if (!controllerByLocation || !locationIds || !locationIds.length) continue;
+      let attackerLocations = 0;
+      let defenderLocations = 0;
+      let otherLocations = 0;
+      let totalLocations = 0;
+      for (const locId of locationIds) {
+        totalLocations++;
+        const controller = controllerByLocation.get(locId);
+        const side = typeof controller === "number" ? sideByCountryMap[controller] : undefined;
+        if (side === "Attacker") attackerLocations++;
+        else if (side === "Defender") defenderLocations++;
+        else otherLocations++;
+      }
+      war.occupation = { attackerLocations, defenderLocations, otherLocations, totalLocations };
+    }
   }
 
   // Parses "war_manager={ names={...} database={...} }" - mirrors
@@ -1147,7 +1325,7 @@
     const includeWars = !!options.includeWars;
     const HANDLED_TOP_LEVEL_KEYS = new Set(
       BASE_TOP_LEVEL_KEYS.concat(
-        includeLocations ? ["locations", "estate_manager", "culture_manager", "religion_manager", "market_manager", "provinces"] : [],
+        includeLocations ? ["locations", "estate_manager", "building_manager", "culture_manager", "religion_manager", "market_manager", "provinces"] : [],
         includeWars ? ["war_manager"] : []
       )
     );
@@ -1170,6 +1348,7 @@
       locations: [],
       dependencies: [],
       locationAssets: [],
+      buildings: [],
       cultures: [],
       religions: [],
       markets: [],
@@ -1278,6 +1457,16 @@
         } else {
           scanner.skipValue();
         }
+      } else if (key === "building_manager") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          parseBuildingManagerSection(scanner, (building) => {
+            result.buildings.push(building);
+          });
+        } else {
+          scanner.skipValue();
+        }
       } else if (key === "culture_manager") {
         scanner.skipWs();
         if (scanner.text[scanner.pos] === "{") {
@@ -1330,6 +1519,8 @@
 
     collapsePlayerSessions(result);
     attachLocationAssets(result);
+    attachLocationBuildings(result);
+    reconcileWarOccupation(result);
 
     onProgress(1);
     return result;
@@ -1406,11 +1597,14 @@
     extractLocationFields,
     extractDependencyFields,
     extractEstateAssetFields,
+    extractBuildingFields,
     extractNamedDefinitionFields,
     extractMarketFields,
     extractBlackDeath,
     extractWarFields,
+    reconcileWarOccupation,
     attachLocationAssets,
+    attachLocationBuildings,
     collapsePlayerSessions,
   };
 });

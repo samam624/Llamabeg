@@ -1,0 +1,12 @@
+{
+  "name": "eu5-save-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-netlify-site.js",
+    "supabase:status": "supabase status",
+    "supabase:push": "supabase db push",
+    "data:dry-run": "node scripts/import-llama-ledgers-to-supabase.js --dry-run",
+    "data:import": "node scripts/import-llama-ledgers-to-supabase.js"
+  }
+}

@@ -4,6 +4,8 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const os = require("os");
+const { Worker } = require("worker_threads");
 
 const Clausewitz = require("../js/clausewitz.js");
 const ClausewitzBinary = require("../js/clausewitz-binary.js");
@@ -11,7 +13,15 @@ const ClausewitzBinary = require("../js/clausewitz-binary.js");
 const DEFAULT_CONFIG = {
   saveDir: "C:\\Users\\samca\\Documents\\Paradox Interactive\\Europa Universalis V\\save games",
   dataDir: "./data",
-  pollMs: 15000,
+  // Lowered from 15000: at high game speed the autosave rotation can cycle
+  // through all ~9-10 slots in well under 90 seconds (confirmed on a real
+  // session - all slots overwritten within about a minute), and each poll
+  // only reads whatever autosaves currently exist on disk - one this slow
+  // risked a save rotating away again before the next poll ever looked at
+  // it. Each file only takes ~2.3s to parse (well within a rotation
+  // interval this fast), so the bottleneck was purely how often scan() got
+  // called, not how fast it ran once called.
+  pollMs: 5000,
   stableMs: 2500,
   checkpointYears: 10,
   archiveFullSaves: false,
@@ -285,14 +295,26 @@ async function readAndParseSave(file, config) {
   if (!headerText.startsWith("SAV")) throw new Error("Not an EU5 save file");
   const formatCode = headerText.slice(5, 7);
 
+  // includeLocations is needed even though this recorder has no use for map
+  // data itself - it's what lets reconcileWarOccupation() (in
+  // js/clausewitz.js, shared by both parsers) recompute each war's
+  // occupation from the real, live location CONTROLLER instead of the war
+  // entry's own (frozen, ownership-based - see extractWarFields' comment)
+  // locations map. Confirmed on real data: without this, the win/loss
+  // heuristic was reading who owned a war's contested provinces *before*
+  // the war even started, not who was actually winning it - wrong on every
+  // war checked in one real campaign. Measured overhead: ~10% (running the
+  // full location extraction over ~28,500 locations costs about 220ms on
+  // top of an already ~2.3s parse), acceptable for a recorder that only
+  // runs once per new autosave.
   if (formatCode === "00") {
     const text = bytes.toString("utf8");
-    return { hash, result: Clausewitz.parseSave(text, { includeWars: true, includeLocations: false, playerWarsOnly: !!config.playerWarsOnly }) };
+    return { hash, result: Clausewitz.parseSave(text, { includeWars: true, includeLocations: true, playerWarsOnly: !!config.playerWarsOnly }) };
   }
 
   if (formatCode === "03") {
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    return { hash, result: await ClausewitzBinary.parseCompressedSave(buffer, { includeWars: true, includeLocations: false, playerWarsOnly: !!config.playerWarsOnly }) };
+    return { hash, result: await ClausewitzBinary.parseCompressedSave(buffer, { includeWars: true, includeLocations: true, playerWarsOnly: !!config.playerWarsOnly }) };
   }
 
   throw new Error(`Unsupported save format code ${formatCode}`);
@@ -501,62 +523,160 @@ function economicOutcomeSignal(economy) {
   return signals[0];
 }
 
+// Battle-inflicted casualties (Battle+Capture, NOT Attrition) compared
+// between sides - unlike Attrition, which a large/far-from-home invading
+// army racks up regardless of whether it's winning (confirmed on a real
+// concluded war: the attacker held 92% of contested territory yet had the
+// only recorded losses, all Attrition, none Battle - a clean Attacker win
+// with a heavily attrited army, not a contradiction), Battle/Capture losses
+// are actually inflicted by the other side, so a lopsided split there is a
+// real (if indirect) signal of who's losing the fight. Needs a minimum
+// sample and a decisive-enough margin to matter - see thresholds below.
+function battleLossSignal(war) {
+  const a = war.attackerLosses;
+  const d = war.defenderLosses;
+  if (!a || !d) return null;
+  const aCombat = (a.battle || 0) + (a.capture || 0);
+  const dCombat = (d.battle || 0) + (d.capture || 0);
+  const total = aCombat + dCombat;
+  if (total < 50) return null; // too small a sample to read anything into
+  const spread = dCombat - aCombat; // positive -> attacker inflicted more -> attacker likely winning
+  if (Math.abs(spread) / total < 0.2) return null; // not a decisive enough margin
+  return { winnerSide: spread > 0 ? "Attacker" : "Defender", reason: "battle-losses-inflicted" };
+}
+
+const CONFIDENCE_ORDER = ["unknown", "low", "medium", "high"];
+function shiftConfidence(level, delta) {
+  const idx = CONFIDENCE_ORDER.indexOf(level);
+  if (idx < 0) return level;
+  return CONFIDENCE_ORDER[Math.max(0, Math.min(CONFIDENCE_ORDER.length - 1, idx + delta))];
+}
+
 function inferOutcome(war, disappeared, economy) {
   const aScore = war.attackerScore;
   const dScore = war.defenderScore;
+  const lossSignal = battleLossSignal(war);
+
+  // Applied to every call below, regardless of which signal made it: an
+  // independently-derived battle-losses margin that agrees raises
+  // confidence a notch (two signals derived from completely different data
+  // pointing the same way is real corroboration); one that disagrees is
+  // flagged (not overridden - occupation/war-score are still more direct
+  // evidence of the territorial/diplomatic outcome than casualties, which a
+  // winning invader can still rack up) rather than silently trusted or
+  // silently ignored. A war that stalled for years before ending is more
+  // likely a negotiated/stalemate result than a clean decisive one, so a
+  // long stall knocks confidence back down a notch no matter the source.
+  function finalize(result) {
+    let confidence = result.confidence;
+    let lossSignalAgrees = null;
+    if (lossSignal && result.reason !== "battle-losses-inflicted") {
+      lossSignalAgrees = lossSignal.winnerSide === result.winnerSide;
+      confidence = shiftConfidence(confidence, lossSignalAgrees ? 1 : 0);
+    }
+    if (typeof war.stalledYears === "number" && war.stalledYears >= 2) {
+      confidence = shiftConfidence(confidence, -1);
+    }
+    return { ...result, confidence, lossSignalAgrees };
+  }
+
   if (typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore) {
-    return {
+    return finalize({
       winnerSide: aScore > dScore ? "Attacker" : "Defender",
       loserSide: aScore > dScore ? "Defender" : "Attacker",
       confidence: disappeared ? "medium" : "low",
       reason: "last-known-war-score",
       attackerScore: aScore,
       defenderScore: dScore,
-    };
-  }
-  if (typeof aScore === "number" && aScore !== 0 && typeof dScore !== "number") {
-    return {
-      winnerSide: aScore > 0 ? "Attacker" : "Defender",
-      loserSide: aScore > 0 ? "Defender" : "Attacker",
-      confidence: disappeared ? "medium" : "low",
-      reason: "last-known-single-sided-attacker-score",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    };
-  }
-  if (typeof dScore === "number" && dScore !== 0 && typeof aScore !== "number") {
-    return {
-      winnerSide: dScore > 0 ? "Defender" : "Attacker",
-      loserSide: dScore > 0 ? "Attacker" : "Defender",
-      confidence: disappeared ? "medium" : "low",
-      reason: "last-known-single-sided-defender-score",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    };
+    });
   }
 
+  // Before/after territory and treasury change (economicOutcomeSignal)
+  // outranks occupation-during-the-war below - it measures the actual,
+  // formalized CONSEQUENCE of the peace deal (who really ended up with the
+  // land or the gold), where occupation-during-the-war is only ever a
+  // proxy for what the eventual peace *might* do. Confirmed directly on 5
+  // real wars from the same campaign: occupation called 4 of them for the
+  // wrong side, but comparing each side's location/gold count just before
+  // the war disappeared vs. just after matched the true outcome on all 5 -
+  // including two wars where no land changed hands at all (a pure monetary
+  // reparation) that occupation had nothing useful to say about regardless.
+  // Land transfer gets "high" confidence (about as unambiguous as this
+  // game's data gets); gold/prestige-only signals get "medium" (real, but a
+  // country's treasury swings for other reasons too, just less commonly by
+  // this much right as a war ends).
   const economicSignal = economicOutcomeSignal(economy);
   if (economicSignal) {
-    return {
+    return finalize({
       winnerSide: economicSignal.winnerSide,
       loserSide: economicSignal.loserSide,
-      confidence: "medium",
+      confidence: economicSignal.reason === "post-war-land-transfer" ? "high" : "medium",
       reason: economicSignal.reason,
       attackerScore: aScore,
       defenderScore: dScore,
-    };
+    });
   }
 
+  // Occupation counts outrank a SINGLE-sided leftover score (only one of
+  // attacker_score/defender_score still present, the other already null).
+  // Confirmed wrong on real data: a war where the attacker held 238 of 259
+  // contested locations (92%) - about as decisive an occupation result as
+  // this game produces - still had a lone defenderScore=5 lingering, and
+  // the old priority order trusted that residual over the occupation split,
+  // calling a Defender win the user confirmed was actually a clear Attacker
+  // win. A single leftover score value is most likely a partial-clear
+  // artifact from EU5's own end-of-war cleanup (the module doc above notes
+  // both fields normally clear together), not a real signal - unlike a
+  // *direct* two-sided comparison (both scores present at once, checked
+  // first above) or the physical occupation snapshot, so it's now only
+  // consulted as a fallback when occupation itself has nothing to say.
   const occ = war.occupation || {};
   if (typeof occ.attackerLocations === "number" && typeof occ.defenderLocations === "number" && occ.attackerLocations !== occ.defenderLocations) {
-    return {
+    return finalize({
       winnerSide: occ.attackerLocations > occ.defenderLocations ? "Attacker" : "Defender",
       loserSide: occ.attackerLocations > occ.defenderLocations ? "Defender" : "Attacker",
-      confidence: "low",
+      confidence: "medium",
       reason: "occupied-location-count",
       attackerScore: aScore,
       defenderScore: dScore,
-    };
+    });
+  }
+
+  // Occupation, the economic signal, and the two-sided score all had
+  // nothing decisive to say - a clear battle-losses margin is a better bet
+  // than the single-sided leftover score checked next, since it's derived
+  // from the whole side's actual combat performance across every
+  // participant, not a possibly-stale residual value.
+  if (lossSignal) {
+    return finalize({
+      winnerSide: lossSignal.winnerSide,
+      loserSide: lossSignal.winnerSide === "Attacker" ? "Defender" : "Attacker",
+      confidence: "low",
+      reason: lossSignal.reason,
+      attackerScore: aScore,
+      defenderScore: dScore,
+    });
+  }
+
+  if (typeof aScore === "number" && aScore !== 0 && typeof dScore !== "number") {
+    return finalize({
+      winnerSide: aScore > 0 ? "Attacker" : "Defender",
+      loserSide: aScore > 0 ? "Defender" : "Attacker",
+      confidence: "low",
+      reason: "last-known-single-sided-attacker-score",
+      attackerScore: aScore,
+      defenderScore: dScore,
+    });
+  }
+  if (typeof dScore === "number" && dScore !== 0 && typeof aScore !== "number") {
+    return finalize({
+      winnerSide: dScore > 0 ? "Defender" : "Attacker",
+      loserSide: dScore > 0 ? "Attacker" : "Defender",
+      confidence: "low",
+      reason: "last-known-single-sided-defender-score",
+      attackerScore: aScore,
+      defenderScore: dScore,
+    });
   }
 
   return {
@@ -583,6 +703,12 @@ function warSummary(war) {
     defenderScore: war.defenderScore,
     warGoalHeld: war.warGoalHeld,
     occupation: war.occupation,
+    // Unlike attacker_score/defender_score above, these war-wide casualty
+    // totals survive war conclusion (confirmed on a real concluded war) -
+    // see js/clausewitz.js's extractWarFields and inferOutcome() below.
+    attackerLosses: war.attackerLosses,
+    defenderLosses: war.defenderLosses,
+    stalledYears: war.stalledYears,
     sides: countriesBySide(participants),
     participants,
   };
@@ -598,6 +724,9 @@ function warFingerprint(war) {
     defenderScore: war.defenderScore,
     warGoalHeld: war.warGoalHeld,
     occupation: war.occupation,
+    attackerLosses: war.attackerLosses,
+    defenderLosses: war.defenderLosses,
+    stalledYears: war.stalledYears,
     participants: (war.participants || []).map((p) => [p.country, p.side, p.status, p.leaveDate, p.combat, p.siege]),
   };
   return crypto.createHash("sha1").update(JSON.stringify(compact)).digest("hex");
@@ -807,15 +936,37 @@ async function processParsedFile(file, stat, hash, result, config, state) {
   const snapshot = buildSnapshot(file, hash, result, config, previousWars);
   state.lastDateByCampaign = state.lastDateByCampaign || {};
   const lastDate = state.lastDateByCampaign[snapshot.campaignKey];
+  ensureDir(campaignDir(config, snapshot.campaignKey));
+
+  // A snapshot chronologically at-or-behind what's already tracked can
+  // still happen even with parallel parsing (a source saving fast enough
+  // to cycle its rotation slots can hand the recorder content out of
+  // strict chronological order relative to when it actually gets read) -
+  // this USED to drop the snapshot entirely, which silently lost real
+  // data (a war could start and conclude within a stretch the recorder
+  // never got credit for). It's now always saved to snapshots.jsonl -
+  // every consumer that reads the ledger already re-sorts by date
+  // (buildDepartureDates(), latestSnapshot selection, etc. in
+  // js/llama-score.js), so an out-of-order entry in the file causes no
+  // harm there - it's just not fed into the war-start/update/disappeared
+  // diffing below, since that compares THIS snapshot's war list against
+  // the CURRENT (more advanced) active-war state, and an out-of-order
+  // snapshot would produce nonsense events (a war "disappearing" that's
+  // actually still ongoing - this particular snapshot just predates the
+  // point where the recorder already knows it existed). Any war this
+  // snapshot could have taught us something new about will still get
+  // picked up once a properly-ordered later snapshot arrives.
   if (lastDate && compareDates(snapshot.date, lastDate) <= 0) {
+    appendJsonl(campaignSnapshotsFile(config, snapshot.campaignKey), snapshot);
     state.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, hash };
-    state.hashes[hash] = { file: path.basename(file), date: snapshot.date, capturedAt: snapshot.capturedAt, skippedOlderThan: lastDate };
+    state.hashes[hash] = { file: path.basename(file), date: snapshot.date, capturedAt: snapshot.capturedAt, outOfOrderThan: lastDate };
     saveJson(path.join(config.dataDir, "state.json"), state);
-    console.log(`[${snapshot.date || "unknown"}] ${snapshot.campaignKey}: ${path.basename(file)} skipped; older than latest ${lastDate}`);
-    return false;
+    console.log(
+      `[${snapshot.date || "unknown"}] ${snapshot.campaignKey}: ${path.basename(file)} saved out of order (latest known is ${lastDate}) - not used for war-event tracking`
+    );
+    return true;
   }
   const { events, currentWars } = classifyEvents(previousWars, snapshot);
-  ensureDir(campaignDir(config, snapshot.campaignKey));
   appendJsonl(campaignSnapshotsFile(config, snapshot.campaignKey), snapshot);
   for (const event of events) appendJsonl(campaignEventsFile(config, snapshot.campaignKey), event);
 
@@ -835,30 +986,94 @@ async function processParsedFile(file, stat, hash, result, config, state) {
   return true;
 }
 
-async function scan(config, state) {
-  ensureDir(config.dataDir);
-  const saves = listAutosaves(config).sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
-  const parsed = [];
-  let processed = 0;
-  for (const entry of saves) {
-    const file = entry.file;
-    try {
-      const stat = tryStat(file);
-      if (!stat) continue;
-      const age = Date.now() - stat.mtimeMs;
-      if (age < config.stableMs || stat.size <= 0) continue;
-      const known = state.files[file];
-      if (known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) continue;
-      const { hash, result } = await readAndParseSave(file, config);
-      const date = result.metadata && result.metadata.date;
-      parsed.push({ file, stat, hash, result, date });
-    } catch (err) {
-      if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
-        console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
+// Runs one save's read+hash+parse (parse-worker.js) on a worker thread
+// instead of blocking the main thread. Node's zlib decompression here is the
+// SYNCHRONOUS API (inflateRawSync) - fully blocking, not just single-
+// threaded-but-yielding - so parsing N files back-to-back on the main
+// thread always took N x ~2.3s no matter how often scan() itself was
+// called. See parseFilesInParallel() below for why that mattered.
+function parseSaveInWorker(file, config) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "parse-worker.js"), {
+      workerData: { file, playerWarsOnly: !!config.playerWarsOnly },
+    });
+    let settled = false;
+    worker.once("message", (msg) => {
+      settled = true;
+      worker.terminate();
+      if (msg.ok) resolve({ hash: msg.hash, result: msg.result });
+      else {
+        const err = new Error(msg.error);
+        err.code = msg.code;
+        reject(err);
+      }
+    });
+    worker.once("error", (err) => {
+      if (settled) return;
+      worker.terminate();
+      reject(err);
+    });
+  });
+}
+
+// Bounded to a handful of threads (not one per file) so a large backlog
+// doesn't spawn dozens of workers at once - CPU count minus one leaves a
+// core free for the main thread's own bookkeeping (sorting, writing jsonl,
+// updating state.json).
+const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
+
+// Parses every candidate file CONCURRENTLY across a small worker pool
+// instead of one at a time. Matters specifically when a save folder is
+// autosaving fast: the old sequential loop could take 10+ seconds to drain
+// a batch of several new files, and the game keeps rotating its autosave
+// slots the entire time - a slot could get overwritten again before the
+// recorder ever got around to reading it, which is what produced the
+// "skipped; older than latest" messages even after lowering pollMs (that
+// only shortened the wait BETWEEN scans, not how long a single scan's
+// batch took to drain). Confirmed the underlying chronological sort/dedup
+// logic itself was already correct (a frozen, isolated single-file test
+// scan came out perfectly ordered) - this is purely a throughput fix.
+async function parseFilesInParallel(candidates, config) {
+  const results = [];
+  let nextIndex = 0;
+  async function runSlot() {
+    while (nextIndex < candidates.length) {
+      const { file, stat } = candidates[nextIndex++];
+      try {
+        const { hash, result } = await parseSaveInWorker(file, config);
+        const date = result.metadata && result.metadata.date;
+        results.push({ file, stat, hash, result, date });
+      } catch (err) {
+        if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
+          console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
+        }
       }
     }
   }
+  const slotCount = Math.max(1, Math.min(MAX_PARSE_WORKERS, candidates.length));
+  await Promise.all(Array.from({ length: slotCount }, runSlot));
+  return results;
+}
+
+async function scan(config, state) {
+  ensureDir(config.dataDir);
+  const saves = listAutosaves(config).sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
+  const candidates = [];
+  for (const entry of saves) {
+    const file = entry.file;
+    const stat = tryStat(file);
+    if (!stat) continue;
+    const age = Date.now() - stat.mtimeMs;
+    if (age < config.stableMs || stat.size <= 0) continue;
+    const known = state.files[file];
+    if (known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) continue;
+    candidates.push({ file, stat });
+  }
+
+  const parsed = await parseFilesInParallel(candidates, config);
   parsed.sort((a, b) => compareDates(a.date, b.date) || a.stat.mtimeMs - b.stat.mtimeMs);
+
+  let processed = 0;
   for (const item of parsed) {
     try {
       if (await processParsedFile(item.file, item.stat, item.hash, item.result, config, state)) processed++;
@@ -903,7 +1118,13 @@ async function main() {
   pollLoop();
 }
 
-main().catch((err) => {
-  console.error(err.stack || err.message || String(err));
-  process.exit(1);
-});
+// Guarded so this file can be require()'d (e.g. from a test script) without
+// immediately scanning the save folder and starting the poll loop - without
+// this, main() ran unconditionally at module load, which is also what made
+// it awkward to load internals for a one-off diagnostic script.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err.stack || err.message || String(err));
+    process.exit(1);
+  });
+}

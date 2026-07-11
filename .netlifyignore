@@ -1,0 +1,11 @@
+save games/
+melted_saves/
+map_data/
+llama-score-automatic-logging-machine/data/
+llama-score-automatic-logging-machine/data.backup-*/
+UserssamcaAppDataLocalTempclaudec--*/
+.agents/
+.git/
+.env
+.env.local
+.env.*.local
