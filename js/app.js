@@ -11,7 +11,6 @@
   const statusText = document.getElementById("statusText");
   const progressFill = document.getElementById("progressFill");
   const errorBox = document.getElementById("errorBox");
-  const resultsEl = document.getElementById("results");
   const mapContainerEl = document.getElementById("mapContainer");
   const overviewEl = document.getElementById("overview");
   const playersTableEl = document.getElementById("playersTable");
@@ -24,28 +23,61 @@
   const llamaSnapshotsInput = document.getElementById("llamaSnapshotsInput");
   const llamaEventsInput = document.getElementById("llamaEventsInput");
   const llamaLedgerStatusEl = document.getElementById("llamaLedgerStatus");
+  const llamaManualLoaderEl = document.getElementById("llamaManualLoader");
+  const llamaConnectBtn = document.getElementById("llamaConnectBtn");
+  const llamaDisconnectBtn = document.getElementById("llamaDisconnectBtn");
+  const llamaShowToggleEl = document.getElementById("llamaShowToggle");
+  const llamaAutoStatusEl = document.getElementById("llamaAutoStatus");
+  const llamaWarModalEl = document.getElementById("llamaWarModal");
+  const llamaWarDetailsBtn = document.getElementById("llamaWarDetailsBtn");
+  const llamaWarModalCloseBtn = document.getElementById("llamaWarModalClose");
+  const llamaShowAiWarsEl = document.getElementById("llamaShowAiWars");
+  const llamaLinkStatusEl = document.getElementById("llamaLinkStatus");
   const savesLibraryPanel = document.getElementById("savesLibraryPanel");
   const savesLibraryTableEl = document.getElementById("savesLibraryTable");
   const copyLinkBtn = document.getElementById("copyLinkBtn");
   const pendingShareNoticeEl = document.getElementById("pendingShareNotice");
-  const metricTabs = document.querySelectorAll(".metric-tab");
+  const countryMetricTabs = document.querySelectorAll("#metricTabs .metric-tab");
+  const playerMetricTabs = document.querySelectorAll("#playerMetricTabs .metric-tab");
   const tabButtons = document.querySelectorAll(".app-tab");
+  const llamaTabBtn = document.getElementById("llamaTabBtn");
   const tabPanels = {
-    stats: document.getElementById("statsTab"),
+    load: document.getElementById("loadTab"),
+    metrics: document.getElementById("metricsTab"),
+    graphs: document.getElementById("graphsTab"),
+    llama: document.getElementById("llamaTab"),
     map: document.getElementById("mapTab"),
   };
+  const VALID_TABS = Object.keys(tabPanels);
+  // Hidden until a save has actually been parsed - there's nothing to show
+  // on them before that (see setResultTabsAvailable, called from onParsed).
+  const RESULT_ONLY_TAB_KEYS = ["metrics", "graphs", "map"];
 
   let latestCountries = [];
   let latestResult = null;
   let mapRenderedForResult = false;
   let currentMetricGroup = "key";
-  let currentTab = "stats";
+  let currentPlayerMetricGroup = "key";
+  let currentTab = "load";
   let llamaSnapshotsLedger = null;
   let llamaEventsLedger = null;
+  let ledgerConnection = null; // { dataDirHandle, campaignKey, lastModified } while auto-connected
+  let ledgerPollTimer = null;
+  // The filename of whatever save is currently loaded - autosave_<uuid>.eu5
+  // names carry the recorder's own campaign key, so this is what lets the
+  // Llama Score panel find that campaign's ledger with no manual file
+  // picking (see campaignKeyFromFilename/autoLinkLlamaForCurrentSave below).
+  let currentSaveDisplayName = null;
+  // True once ledger data is actually showing (auto-linked OR manually
+  // connected/loaded) - drives whether the panel is visible at all when the
+  // "Show Llama Score" checkbox is unchecked (see updateLlamaPanelVisibility).
+  let llamaAutoLinked = false;
+  let currentLlamaDraw = null; // stores the currently-active mode's draw() so the AI-wars toggle can re-render on demand
+  const LLAMA_SHOW_TOGGLE_KEY = "eu5-analyzer-llama-show-toggle";
   // Set when the page loads with a ?save=<id> URL that isn't in this
   // browser's local history yet - see initFromShareUrl()/onParsed().
   let pendingShareId = null;
-  let pendingShareTab = "stats";
+  let pendingShareTab = "metrics";
 
   function activateTab(tab) {
     currentTab = tab;
@@ -57,15 +89,35 @@
     updateShareUrl();
   }
 
+  // Metrics/Graphs/Map only have anything to show once a save has been
+  // parsed - hidden from the tab bar (rather than just showing empty) until
+  // then. Llama Score has its own, separate visibility rule (see
+  // updateLlamaPanelVisibility) since it can populate from a standalone
+  // recorder ledger connection with no save loaded at all.
+  function setResultTabsAvailable(available) {
+    RESULT_ONLY_TAB_KEYS.forEach((key) => {
+      const btn = document.querySelector(`.app-tab[data-tab="${key}"]`);
+      if (btn) btn.hidden = !available;
+    });
+  }
+
   tabButtons.forEach((btn) => {
     btn.addEventListener("click", () => activateTab(btn.dataset.tab));
   });
 
-  metricTabs.forEach((btn) => {
+  countryMetricTabs.forEach((btn) => {
     btn.addEventListener("click", () => {
       currentMetricGroup = btn.dataset.metrics || "key";
-      metricTabs.forEach((b) => b.classList.toggle("active", b === btn));
+      countryMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
       drawCountryTable();
+    });
+  });
+
+  playerMetricTabs.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      currentPlayerMetricGroup = btn.dataset.metrics || "key";
+      playerMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
+      drawPlayerTable();
     });
   });
 
@@ -111,6 +163,7 @@
   changeFileBtn.addEventListener("click", () => {
     uploaderSummaryEl.hidden = true;
     dropzone.hidden = false;
+    activateTab("load");
   });
 
   function showError(message) {
@@ -128,9 +181,9 @@
 
   async function handleFile(file) {
     errorBox.hidden = true;
-    resultsEl.hidden = true;
     uploaderSummaryEl.hidden = true;
     dropzone.hidden = false;
+    activateTab("load");
     dropzoneText.textContent = file.name;
     setStatus("Checking file format...", 0);
 
@@ -235,8 +288,12 @@
   function onParsed(result, options) {
     options = options || {};
     const displayName = options.displayName || dropzoneText.textContent;
+    // Only auto-navigate away from the Load Save tab the FIRST time a save
+    // lands (i.e. the user was actually looking at it) - reloading a
+    // different save while already on Graphs/Llama/Map shouldn't yank the
+    // view out from under them.
+    const wasOnLoadTab = currentTab === "load";
     statusEl.hidden = true;
-    resultsEl.hidden = false;
     dropzone.hidden = true;
     uploaderSummaryTextEl.textContent = `Loaded: ${displayName}`;
     uploaderSummaryEl.hidden = false;
@@ -262,6 +319,8 @@
 
     latestResult = result;
     mapRenderedForResult = false;
+    setResultTabsAvailable(true);
+    if (wasOnLoadTab) activateTab("metrics");
     // Derived metrics (profit, efficiency, per-pop ratios) are read by both
     // the countries table and the players table - compute once, before
     // either renders, rather than only inside renderCountries() (which used
@@ -271,12 +330,29 @@
       c.__isPlayerCountry = c.players && c.players.length > 0;
       computeDerivedMetrics(c);
     });
+    computeCountryLocationMetrics(result);
     renderOverview(result);
     renderPlayers(result);
     renderCountries(result);
     renderTrends(result);
     renderBlackDeath(result);
+
+    // A new save means whatever ledger was loaded (if any) belonged to a
+    // DIFFERENT save - clear it before the immediate render below so a
+    // previous campaign's data can't flash under this save's name while
+    // autoLinkLlamaForCurrentSave looks for the right one asynchronously.
+    currentSaveDisplayName = displayName;
+    llamaSnapshotsLedger = null;
+    llamaEventsLedger = null;
+    llamaAutoLinked = false;
+    setLlamaLinkStatus(null);
+    llamaAutoStatusEl.textContent = "Checking for this save's recorder data…";
     renderLlamaScore();
+    autoLinkLlamaForCurrentSave().catch((err) => {
+      llamaAutoStatusEl.textContent = `Could not auto-link recorder data: ${err.message}`;
+      updateLlamaPanelVisibility();
+    });
+
     if (tabPanels.map && !tabPanels.map.hidden) renderMap(result);
 
     // Loading a save back out of the local history (see save-library.js)
@@ -365,6 +441,23 @@
     return typeof v === "number" ? v : undefined;
   }
 
+  // Green (least population lost, "won" against the plague) to red (most
+  // lost) - scaled relative to THIS save's own min/max (set by
+  // renderBlackDeath below) rather than a fixed 0-100% axis, since real
+  // per-country tallies cluster in a fairly narrow band (e.g. 20-40%) that
+  // would otherwise all read as a near-identical color against the full
+  // range.
+  const LOSS_PCT_GOOD_RGB = [111, 207, 151]; // --good
+  const LOSS_PCT_BAD_RGB = [235, 87, 87]; // --bad
+  let blackDeathLossRange = { min: 0, max: 1 };
+  function lossPctColor(pct) {
+    const { min, max } = blackDeathLossRange;
+    const span = max - min;
+    const t = span > 0 ? Math.max(0, Math.min(1, (pct - min) / span)) : 0;
+    const rgb = LOSS_PCT_GOOD_RGB.map((g, i) => Math.round(g + (LOSS_PCT_BAD_RGB[i] - g) * t));
+    return `rgb(${rgb.join(",")})`;
+  }
+
   const BLACK_DEATH_COLUMNS = [
     {
       key: "tag",
@@ -375,7 +468,15 @@
     { key: "playerNames", label: "Player(s)", render: (c) => escapeHtml((c.players || []).join(", ")) },
     { key: "popAtStart", label: "Population (start)", numeric: true, render: (c) => fmtPopulation(c.popAtStart) },
     { key: "deaths", label: "Black Death Deaths", numeric: true, render: (c) => (typeof c.deaths === "number" ? fmtPopulation(c.deaths) : "-") },
-    { key: "popLossPct", label: "Lost %", numeric: true, render: (c) => (typeof c.popLossPct === "number" ? (c.popLossPct * 100).toFixed(1) + "%" : "-") },
+    {
+      key: "popLossPct",
+      label: "Lost %",
+      numeric: true,
+      render: (c) =>
+        typeof c.popLossPct === "number"
+          ? `<span style="color:${lossPctColor(c.popLossPct)}; font-weight:600;">${(c.popLossPct * 100).toFixed(1)}%</span>`
+          : "-",
+    },
   ];
 
   // "Winner" is ambiguous here (least population lost vs. most) - left as a
@@ -415,6 +516,9 @@
         return { ...c, popAtStart, deaths, popLossPct };
       });
 
+    const lossValues = rows.map((r) => r.popLossPct).filter((v) => typeof v === "number");
+    blackDeathLossRange = lossValues.length ? { min: Math.min(...lossValues), max: Math.max(...lossValues) } : { min: 0, max: 1 };
+
     renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct" });
   }
 
@@ -436,6 +540,85 @@
     localStorage.setItem(LLAMA_OVERRIDES_PREFIX + saveId, JSON.stringify(overrides));
   }
 
+  // Enemies/Allies count only PLAYER-controlled countries on each side for a
+  // real PvP war (so an AI call-in tagging along doesn't dilute/inflate the
+  // war-score formula) - but a non-PvP war (isPvP false, always excluded/
+  // unscored) instead shows the war's real FULL participant count, AI
+  // included, as reference data. Without this tooltip a large "Allies"
+  // number on a solo-player's excluded row reads as a bug ("I had no player
+  // allies") when it's actually accurate - just counting every co-belligerent
+  // on that side, not just players, because the row isn't scored anyway.
+  function renderEA(value, row) {
+    const num = fmtNum(value, 0);
+    if (row.isPvP) return num;
+    return `<span title="This war had no player opponent, so it isn't scored - this counts every co-belligerent on this side (AI included), not just players.">${num}</span>`;
+  }
+
+  const AUTO_EXCLUDE_TITLES = {
+    "vs-ai": "Auto-excluded: no country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score. Uncheck to score it anyway.",
+    "player-departed": "Auto-excluded: this player was no longer controlling this country by the time the war ended (recorder saw the country revert to AI). Uncheck to score it anyway.",
+    "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign by its end (fighting an abandoned country doesn't score). Uncheck to score it anyway.",
+    "player-hidden": "Auto-excluded: you've hidden this player in the Players table (Hide button) as departed - unhide them there to include their wars again.",
+  };
+  function autoExcludeBadge(reason) {
+    if (!reason || !AUTO_EXCLUDE_TITLES[reason]) return "";
+    return ` <span class="llama-uncertain-badge" title="${escapeHtml(AUTO_EXCLUDE_TITLES[reason])}">auto</span>`;
+  }
+
+  // One <li> per player on a war's side, for the Player Wars (head-to-head)
+  // table - LlamaScore.summarizeWars() groups computeLlamaScores'/
+  // computeFromLedger's per-participant rows back into one entry per war,
+  // but a side can still have more than one player (a coalition), so each
+  // side is its own small list rather than a single cell value.
+  function renderH2HSide(participants) {
+    if (!participants.length) return '<span class="panel-note">-</span>';
+    const items = participants.map((r) => {
+      const name = `${escapeHtml(r.player || "-")} <span class="tag-badge">${escapeHtml(r.countryTag || "?")}</span>`;
+      if (r.excluded) {
+        return `<li>${name} <span class="panel-note">(${escapeHtml(r.autoExcludeReason || "excluded")})</span></li>`;
+      }
+      if (typeof r.warScore !== "number") return `<li>${name} <span class="panel-note">-</span></li>`;
+      const cls = r.warScore > 0 ? "h2h-score-positive" : r.warScore < 0 ? "h2h-score-negative" : "h2h-score-neutral";
+      const sign = r.warScore > 0 ? "+" : "";
+      return `<li>${name} <span class="${cls}">${sign}${fmtNum(r.warScore, 2)}</span></li>`;
+    });
+    return `<ul class="h2h-side">${items.join("")}</ul>`;
+  }
+
+  function renderH2HResult(war) {
+    if (war.whitePeace) return '<span class="h2h-result-whitepeace">White Peace</span>';
+    if (war.winnerSide === "Attacker") return '<span class="h2h-result-attacker">Attacker won</span>';
+    if (war.winnerSide === "Defender") return '<span class="h2h-result-defender">Defender won</span>';
+    return '<span class="panel-note">Unknown</span>';
+  }
+
+  const LLAMA_HEAD_TO_HEAD_COLUMNS = [
+    { key: "startDate", label: "Started", render: (w) => escapeHtml(w.startDate || "-") },
+    { key: "endDate", label: "Ended", render: (w) => escapeHtml(w.endDate || "-") },
+    { key: "attackers", label: "Attacker(s)", render: (w) => renderH2HSide(w.attackers) },
+    { key: "defenders", label: "Defender(s)", render: (w) => renderH2HSide(w.defenders) },
+    { key: "result", label: "Result", render: renderH2HResult },
+  ];
+
+  function renderLlamaHeadToHead(rows) {
+    if (typeof LlamaScore === "undefined" || typeof LlamaScore.summarizeWars !== "function") return;
+    const { wars, playerWhitePeaceCount, aiWhitePeaceCount } = LlamaScore.summarizeWars(rows);
+    const statsEl = document.getElementById("llamaWhitePeaceStats");
+    if (statsEl) {
+      statsEl.textContent =
+        playerWhitePeaceCount || aiWhitePeaceCount
+          ? `White peace count: ${playerWhitePeaceCount} player war(s), ${aiWhitePeaceCount} AI war(s) (neither counts toward score).`
+          : "";
+    }
+    const tableEl = document.getElementById("llamaHeadToHeadTable");
+    if (!tableEl) return;
+    if (!wars.length) {
+      tableEl.innerHTML = '<p class="panel-note">No player-vs-player wars found yet.</p>';
+      return;
+    }
+    renderSortableTable(tableEl, wars, LLAMA_HEAD_TO_HEAD_COLUMNS, { defaultSortKey: "endDate" });
+  }
+
   const LLAMA_WAR_COLUMNS = [
     { key: "startDate", label: "Started", render: (r) => escapeHtml(r.startDate || "-") },
     { key: "endDate", label: "Ended", render: (r) => escapeHtml(r.active ? "In progress" : r.endDate || "-") },
@@ -451,8 +634,8 @@
           : escapeHtml(r.player || "-"),
     },
     { key: "side", label: "Side", render: (r) => escapeHtml(r.side || "-") + (r.revolter ? " (revolter)" : "") },
-    { key: "E", label: "Enemies", numeric: true, render: (r) => fmtNum(r.E, 0) },
-    { key: "A", label: "Allies", numeric: true, render: (r) => fmtNum(r.A, 0) },
+    { key: "E", label: "Enemies", numeric: true, render: (r) => renderEA(r.E, r) },
+    { key: "A", label: "Allies", numeric: true, render: (r) => renderEA(r.A, r) },
     {
       key: "win",
       label: "Win?",
@@ -477,25 +660,40 @@
       key: "excluded",
       label: "Exclude",
       render: (r) =>
-        r.active ? "" : `<input type="checkbox" class="llama-excluded-check" data-key="${escapeHtml(r.__key)}" ${r.excluded ? "checked" : ""}>`,
+        r.active
+          ? ""
+          : `<input type="checkbox" class="llama-excluded-check" data-key="${escapeHtml(r.__key)}" ${r.excluded ? "checked" : ""}>` + autoExcludeBadge(r.autoExcludeReason),
     },
     { key: "warScore", label: "Score", numeric: true, render: (r) => (typeof r.warScore === "number" ? fmtNum(r.warScore, 2) : "-") },
   ];
 
+  // Final ranking as one split (stacked) bar chart per player - each bar's
+  // segments break Llama Points down into its GP Score baseline and its war
+  // performance (wins/losses shown as separate positive/negative segments
+  // rather than netted together), so the ranking itself and what's driving
+  // it are both visible in a single chart instead of needing two side by
+  // side (see Charts.renderStackedBarChart).
   function renderLlamaLeaderboardChart(leaderboardEl, leaderboard) {
     if (typeof Charts === "undefined") return;
-    if (leaderboard.length) {
-      Charts.renderBarChart(leaderboardEl, {
-        title: "Llama Points",
-        items: leaderboard.map((l) => ({
-          label: `${l.player} (${l.countryTag || "?"})`,
-          value: Math.round(l.llamaPoints * 100) / 100,
-          tooltip: `GP Score: ${fmtNum(l.gpScore, 0)} (÷100 = ${fmtNum((l.gpScore || 0) / 100, 2)}) + War: ${fmtNum(l.vpTotal, 2)} = ${fmtNum(l.llamaPoints, 2)}`,
-        })),
-      });
-    } else {
+    if (!leaderboard.length) {
       leaderboardEl.innerHTML = '<p class="panel-note">No players found.</p>';
+      return;
     }
+    leaderboardEl.innerHTML = '<div id="llamaLeaderboardChart"></div>';
+    Charts.renderStackedBarChart(document.getElementById("llamaLeaderboardChart"), {
+      title: "Llama Points",
+      items: leaderboard.map((l) => ({
+        label: `${l.player} (${l.countryTag || "?"})`,
+        player: l.player,
+        countryTag: l.countryTag,
+        total: Math.round((l.llamaPoints || 0) * 100) / 100,
+        segments: [
+          { label: "GP contribution", color: "#5b9dd9", value: Math.round(((l.gpScore || 0) / 100) * 100) / 100 },
+          { label: "War contribution", color: "#6fcf97", value: Math.round((l.vpPositive || 0) * 100) / 100 },
+          { label: "Negative war score", color: "#eb5757", value: Math.round((l.vpNegative || 0) * 100) / 100 },
+        ],
+      })),
+    });
   }
 
   function renderPerSaveLlamaScore(result) {
@@ -508,14 +706,20 @@
     }
 
     function draw() {
-      const { rows, leaderboard } = LlamaScore.computeLlamaScores(result, overrides);
+      const { rows, leaderboard } = LlamaScore.computeLlamaScores(result, overrides, getExcludedPlayers());
       rows.forEach((r) => {
         r.__key = LlamaScore.overrideKey(r.warNumber, r.country);
       });
 
       renderLlamaLeaderboardChart(document.getElementById("llamaLeaderboard"), leaderboard);
+      renderLlamaHeadToHead(rows);
 
-      renderSortableTable(document.getElementById("llamaWarsTable"), rows, LLAMA_WAR_COLUMNS, {
+      // Solo/AI-only wars are real data (kept for the player-attribution
+      // candidate list etc.) but never score, so they're just clutter in the
+      // corrections table by default - the "Show AI-only wars" checkbox in
+      // the modal (see index.html's #llamaWarModal) reveals them again.
+      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => r.isPvP);
+      renderSortableTable(document.getElementById("llamaWarsTable"), visibleRows, LLAMA_WAR_COLUMNS, {
         defaultSortKey: "startDate",
         onRender: (container) => {
           container.querySelectorAll(".llama-player-select").forEach((sel) => {
@@ -546,6 +750,7 @@
       });
     }
 
+    currentLlamaDraw = draw;
     draw();
   }
 
@@ -634,8 +839,8 @@
           : escapeHtml(r.player || "-"),
     },
     { key: "side", label: "Side", render: (r) => escapeHtml(r.side || "-") },
-    { key: "E", label: "Enemies", numeric: true, render: (r) => fmtNum(r.E, 0) },
-    { key: "A", label: "Allies", numeric: true, render: (r) => fmtNum(r.A, 0) },
+    { key: "E", label: "Enemies", numeric: true, render: (r) => renderEA(r.E, r) },
+    { key: "A", label: "Allies", numeric: true, render: (r) => renderEA(r.A, r) },
     {
       key: "win",
       label: "Win?",
@@ -643,6 +848,7 @@
         `<select class="llama-ledger-win-select" data-key="${escapeHtml(r.__key)}">
            <option value="win" ${r.win === true ? "selected" : ""}>Win</option>
            <option value="loss" ${r.win === false ? "selected" : ""}>Loss</option>
+           <option value="whitepeace" ${r.whitePeace ? "selected" : ""}>White Peace</option>
          </select>`,
     },
     {
@@ -658,7 +864,8 @@
     {
       key: "excluded",
       label: "Exclude",
-      render: (r) => `<input type="checkbox" class="llama-ledger-excluded-check" data-key="${escapeHtml(r.__key)}" ${r.excluded ? "checked" : ""}>`,
+      render: (r) =>
+        `<input type="checkbox" class="llama-ledger-excluded-check" data-key="${escapeHtml(r.__key)}" ${r.excluded ? "checked" : ""}>` + autoExcludeBadge(r.autoExcludeReason),
     },
     { key: "warScore", label: "Score", numeric: true, render: (r) => (typeof r.warScore === "number" ? fmtNum(r.warScore, 2) : "-") },
   ];
@@ -675,7 +882,12 @@
     }
 
     function draw() {
-      const { rows, leaderboard, latestSnapshot } = LlamaScore.computeFromLedger(snapshots, events, overrides);
+      const { rows, leaderboard, latestSnapshot, unscoreableCount } = LlamaScore.computeFromLedger(
+        snapshots,
+        events,
+        overrides,
+        getExcludedPlayers()
+      );
       rows.forEach((r) => {
         r.__key = LlamaScore.overrideKey(r.warNumber, r.country);
       });
@@ -684,11 +896,20 @@
         `Loaded ${llamaSnapshotsLedger.length.toLocaleString()} snapshot(s) and ${llamaEventsLedger.length.toLocaleString()} event(s)` +
         (distinctCampaigns.size > 1 ? ` spanning ${distinctCampaigns.size} campaigns - showing the most recently recorded one` : "") +
         (latestSnapshot ? `: ${latestSnapshot.playthroughName || "campaign"} at ${latestSnapshot.date || "?"}.` : ".") +
-        ` ${rows.length.toLocaleString()} scored player war(s) found.`;
+        ` ${rows.length.toLocaleString()} scored player war(s) found.` +
+        (unscoreableCount
+          ? ` (${unscoreableCount.toLocaleString()} more war(s) disappeared with no recorded state to score them from - ` +
+            `likely logged before a recorder restart could recover them; re-running the recorder while the original saves still exist will fix this going forward.)`
+          : "");
 
       renderLlamaLeaderboardChart(document.getElementById("llamaLeaderboard"), leaderboard);
+      renderLlamaHeadToHead(rows);
 
-      renderSortableTable(document.getElementById("llamaWarsTable"), rows, LLAMA_LEDGER_WAR_COLUMNS, {
+      // Solo/AI-only wars are real data but never score - hidden from the
+      // corrections table by default (see the identical filter in
+      // renderPerSaveLlamaScore above), revealed via the modal's checkbox.
+      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => r.isPvP);
+      renderSortableTable(document.getElementById("llamaWarsTable"), visibleRows, LLAMA_LEDGER_WAR_COLUMNS, {
         defaultSortKey: "endDate",
         onRender: (container) => {
           container.querySelectorAll(".llama-ledger-player-select").forEach((sel) => {
@@ -699,7 +920,10 @@
           });
           container.querySelectorAll(".llama-ledger-win-select").forEach((sel) => {
             sel.addEventListener("change", () => {
-              setOverride(sel.dataset.key, { win: sel.value === "win" });
+              // "whitepeace" is stored as that literal string, not a
+              // boolean - see js/llama-score.js's override.win handling -
+              // null would be indistinguishable from "no override set".
+              setOverride(sel.dataset.key, { win: sel.value === "whitepeace" ? "whitepeace" : sel.value === "win" });
               draw();
             });
           });
@@ -719,6 +943,7 @@
       });
     }
 
+    currentLlamaDraw = draw;
     draw();
   }
 
@@ -732,6 +957,10 @@
     const leaderboardEl = document.getElementById("llamaLeaderboard");
     const warsTableEl = document.getElementById("llamaWarsTable");
     if (llamaSnapshotsLedger && llamaEventsLedger) {
+      // Ledger mode is meant to work standalone (connect the recorder's
+      // folder, or load its files manually, without ever loading a save) -
+      // updateLlamaPanelVisibility()/its caller is what actually reveals
+      // the Llama Score tab in that case, this just renders into it.
       renderLedgerLlamaScore();
     } else if (latestResult) {
       llamaLedgerStatusEl.textContent = "No recorder ledger loaded yet - showing this save's own war data.";
@@ -740,14 +969,60 @@
       llamaLedgerStatusEl.textContent = "No recorder ledger loaded yet.";
       leaderboardEl.innerHTML = "";
       warsTableEl.innerHTML = "";
+      currentLlamaDraw = null;
     }
   }
+
+  // The panel is hidden by default and only shown automatically once real
+  // ledger data is actually on screen (auto-linked, manually connected, or
+  // manually file-picked) - a save with no matching recorder output showing
+  // an empty/near-empty panel every time was more clutter than signal. The
+  // checkbox is the escape hatch for "I know there's nothing auto-linked,
+  // show me the manual tools/per-save fallback anyway."
+  function updateLlamaPanelVisibility() {
+    const shouldShow = llamaAutoLinked || llamaShowToggleEl.checked;
+    const wasHidden = llamaTabBtn.hidden;
+    llamaTabBtn.hidden = !shouldShow;
+    if (!shouldShow && currentTab === "llama") activateTab(latestResult ? "metrics" : "load");
+    // Ledger mode works standalone (connect the recorder folder without
+    // ever loading a save) - if that's what just happened, jump straight to
+    // the newly-available tab instead of leaving the user stranded on the
+    // Load Save screen with no visible sign anything changed.
+    else if (shouldShow && wasHidden && currentTab === "load") activateTab("llama");
+  }
+
+  // One visible place the user can watch the connection actually happen -
+  // a green "Linked!" badge next to the Connect/Disconnect buttons (only
+  // seen if "Manual setup" is open) AND a short mirror of the same message
+  // next to the always-visible "Show Llama Score" checkbox, so linking is
+  // confirmed even with the details collapsed. Pass null/"" to clear both.
+  function setLlamaLinkStatus(message) {
+    if (message) {
+      llamaLinkStatusEl.textContent = "✅ " + message;
+      llamaLinkStatusEl.hidden = false;
+      llamaAutoStatusEl.textContent = "✅ " + message;
+    } else {
+      llamaLinkStatusEl.hidden = true;
+      llamaLinkStatusEl.textContent = "";
+      llamaAutoStatusEl.textContent = "";
+    }
+  }
+
+  llamaShowToggleEl.addEventListener("change", () => {
+    localStorage.setItem(LLAMA_SHOW_TOGGLE_KEY, llamaShowToggleEl.checked ? "1" : "0");
+    updateLlamaPanelVisibility();
+    if (!llamaTabBtn.hidden) renderLlamaScore();
+  });
+  llamaShowToggleEl.checked = localStorage.getItem(LLAMA_SHOW_TOGGLE_KEY) === "1";
 
   function loadLlamaLedgerFile(file, kind) {
     file.text().then((text) => {
       const records = parseJsonl(text);
       if (kind === "snapshots") llamaSnapshotsLedger = records;
       else llamaEventsLedger = records;
+      llamaAutoLinked = true;
+      if (llamaSnapshotsLedger && llamaEventsLedger) setLlamaLinkStatus("Linked! (manually loaded files)");
+      updateLlamaPanelVisibility();
       renderLlamaScore();
     }).catch((err) => {
       llamaLedgerStatusEl.textContent = `Could not read ${file.name}: ${err.message}`;
@@ -759,6 +1034,207 @@
   });
   llamaEventsInput.addEventListener("change", () => {
     if (llamaEventsInput.files[0]) loadLlamaLedgerFile(llamaEventsInput.files[0], "events");
+  });
+
+  llamaWarDetailsBtn.addEventListener("click", () => llamaWarModalEl.showModal());
+  llamaWarModalCloseBtn.addEventListener("click", () => llamaWarModalEl.close());
+  llamaWarModalEl.addEventListener("click", (e) => {
+    if (e.target === llamaWarModalEl) llamaWarModalEl.close(); // backdrop click (see #llamaWarModal::backdrop in style.css)
+  });
+  llamaShowAiWarsEl.addEventListener("change", () => {
+    if (currentLlamaDraw) currentLlamaDraw();
+  });
+
+  // --- Llama score, auto-connected campaign folder (js/ledger-connect.js) ---
+  //
+  // The File System Access API is Chromium-only, so this whole block is a
+  // progressive enhancement over the manual file inputs above, not a
+  // replacement for them - LedgerConnect.supported gates everything here,
+  // and the manual inputs stay usable (and stay the only option) on
+  // Firefox/Safari or if the user declines the folder prompt.
+  function stopLedgerPolling() {
+    if (ledgerPollTimer) clearInterval(ledgerPollTimer);
+    ledgerPollTimer = null;
+  }
+
+  // Re-checks every 20s for new lines appended to the CURRENTLY LINKED
+  // campaign (the recorder polls the save folder every 15s by default - see
+  // llama-log-machine.js's DEFAULT_CONFIG) - compares lastModified first so
+  // an unchanged ledger doesn't trigger a pointless reparse/re-render. This
+  // deliberately keeps watching the same campaign rather than following
+  // whichever is newest (like the old design did) - once a save's specific
+  // campaign is linked (see autoLinkLlamaForCurrentSave), a NEW game started
+  // elsewhere shouldn't silently swap the panel to a different campaign's
+  // data out from under whatever save is actually loaded right now.
+  function startLedgerPolling() {
+    stopLedgerPolling();
+    ledgerPollTimer = setInterval(async () => {
+      if (!ledgerConnection || !ledgerConnection.campaignKey) return;
+      try {
+        const best = await LedgerConnect.findCampaignByKey(ledgerConnection.dataDirHandle, ledgerConnection.campaignKey);
+        if (!best || best.lastModified <= (ledgerConnection.lastModified || 0)) return;
+        await loadCampaignLedger(ledgerConnection.dataDirHandle, best);
+        renderLlamaScore();
+      } catch (err) {
+        // Transient read errors (e.g. the recorder mid-write) shouldn't kill polling.
+      }
+    }, 20000);
+  }
+
+  async function loadCampaignLedger(dataDirHandle, best) {
+    const ledger = await LedgerConnect.readCampaignLedger(best.dirHandle);
+    llamaSnapshotsLedger = ledger.snapshots;
+    llamaEventsLedger = ledger.events;
+    ledgerConnection = { dataDirHandle, campaignKey: best.campaignKey, lastModified: ledger.lastModified };
+  }
+
+  // autosave_<uuid>(.eu5 / _1.eu5 / _2.eu5 / ...) - same pattern
+  // llama-log-machine.js's campaignKeyFromFile() uses to name
+  // data/campaigns/<uuid>/, so a save's own filename is enough to find its
+  // matching recorder output with no manual file picking at all.
+  function campaignKeyFromFilename(name) {
+    const m = String(name || "").match(/^autosave_(.+?)(?:_\d+)?\.eu5$/i);
+    return m ? m[1] : null;
+  }
+
+  async function connectToDataDir(dataDirHandle) {
+    const preferredKey = campaignKeyFromFilename(currentSaveDisplayName);
+    const best = (preferredKey && (await LedgerConnect.findCampaignByKey(dataDirHandle, preferredKey))) || (await LedgerConnect.findLatestCampaign(dataDirHandle));
+    if (!best) {
+      llamaLedgerStatusEl.textContent = "Connected, but no campaigns/ folder with recorded data was found yet.";
+      return;
+    }
+    await loadCampaignLedger(dataDirHandle, best);
+    llamaConnectBtn.hidden = true;
+    llamaDisconnectBtn.hidden = false;
+    llamaManualLoaderEl.hidden = true;
+    llamaAutoLinked = true;
+    setLlamaLinkStatus(`Linked to campaign ${best.campaignKey}`);
+    updateLlamaPanelVisibility();
+    renderLlamaScore();
+    startLedgerPolling();
+  }
+
+  // Runs after every save load (see onParsed) - finds and loads THIS save's
+  // own campaign specifically (not just whichever is newest), with no
+  // manual "Choose File" round trip once a data folder has been connected
+  // once. Deliberately does NOT fall back to "latest campaign" the way the
+  // manual Connect button does: showing a different campaign's data under a
+  // save it doesn't belong to would be worse than showing nothing.
+  async function autoLinkLlamaForCurrentSave() {
+    llamaAutoLinked = false;
+    llamaLinkStatusEl.hidden = true; // "Checking..." (set by the caller) stays in llamaAutoStatusEl until a real outcome replaces it below
+    if (typeof LedgerConnect === "undefined" || !LedgerConnect.supported) {
+      llamaAutoStatusEl.textContent = "Auto-linking needs a Chromium-based browser (Chrome/Edge) - use Manual setup below instead.";
+      updateLlamaPanelVisibility();
+      return;
+    }
+    const key = campaignKeyFromFilename(currentSaveDisplayName);
+    if (!key) {
+      llamaAutoStatusEl.textContent = "This save's filename doesn't look like a recorder-watched autosave - use Manual setup below to load its data.";
+      updateLlamaPanelVisibility();
+      return;
+    }
+    const handle = (ledgerConnection && ledgerConnection.dataDirHandle) || (await LedgerConnect.loadHandle());
+    if (!handle) {
+      llamaAutoStatusEl.textContent = "No recorder folder connected yet - see Manual setup below.";
+      updateLlamaPanelVisibility();
+      return;
+    }
+    const granted = await LedgerConnect.verifyPermission(handle, false);
+    if (!granted) {
+      llamaAutoStatusEl.textContent = "Recorder folder was connected previously but needs re-granting - see Manual setup below.";
+      llamaConnectBtn.hidden = false;
+      llamaConnectBtn.textContent = "Reconnect campaign folder…";
+      llamaConnectBtn.dataset.pending = "1";
+      updateLlamaPanelVisibility();
+      return;
+    }
+    const best = await LedgerConnect.findCampaignByKey(handle, key);
+    if (!best) {
+      llamaAutoStatusEl.textContent = `No recorder data found yet for this save's campaign (${key}).`;
+      updateLlamaPanelVisibility();
+      return;
+    }
+    await loadCampaignLedger(handle, best);
+    llamaConnectBtn.hidden = true;
+    llamaDisconnectBtn.hidden = false;
+    llamaManualLoaderEl.hidden = true;
+    llamaAutoLinked = true;
+    setLlamaLinkStatus(`Linked to campaign ${best.campaignKey}`);
+    updateLlamaPanelVisibility();
+    renderLlamaScore();
+    startLedgerPolling();
+  }
+
+  async function tryAutoReconnect() {
+    if (typeof LedgerConnect === "undefined" || !LedgerConnect.supported) return;
+    llamaConnectBtn.hidden = false;
+    const handle = await LedgerConnect.loadHandle();
+    if (!handle) return;
+    // queryPermission (no prompt) first - most browsers still re-prompt a
+    // remembered handle once per session, so this usually just determines
+    // whether "Reconnect" needs a click or can skip straight to loading.
+    const granted = await LedgerConnect.verifyPermission(handle, false);
+    if (granted) {
+      ledgerConnection = { dataDirHandle: handle, campaignKey: null, lastModified: 0 };
+      llamaConnectBtn.hidden = true;
+      llamaDisconnectBtn.hidden = false;
+      llamaManualLoaderEl.hidden = true;
+      // Don't eagerly load "latest campaign" here - if a save loads shortly
+      // after (the common case), autoLinkLlamaForCurrentSave will target
+      // the RIGHT one. Only reach for a save already loaded before this
+      // async permission check resolved (e.g. a ?save= share link).
+      if (latestResult) {
+        try {
+          await autoLinkLlamaForCurrentSave();
+        } catch (err) {
+          llamaLedgerStatusEl.textContent = `Could not read the connected folder: ${err.message}`;
+        }
+      }
+    } else {
+      llamaConnectBtn.textContent = "Reconnect campaign folder…";
+      llamaConnectBtn.dataset.pending = "1";
+    }
+  }
+
+  llamaConnectBtn.addEventListener("click", async () => {
+    try {
+      let handle;
+      if (llamaConnectBtn.dataset.pending === "1") {
+        handle = await LedgerConnect.loadHandle();
+        const granted = handle && (await LedgerConnect.verifyPermission(handle, true));
+        if (!granted) {
+          llamaLedgerStatusEl.textContent = "Permission to read the campaign folder wasn't granted.";
+          return;
+        }
+      } else {
+        handle = await window.showDirectoryPicker();
+        await LedgerConnect.saveHandle(handle);
+      }
+      delete llamaConnectBtn.dataset.pending;
+      llamaConnectBtn.textContent = "Connect campaign folder…";
+      await connectToDataDir(handle);
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // User closed the folder picker.
+      llamaLedgerStatusEl.textContent = `Could not connect: ${err.message}`;
+    }
+  });
+
+  llamaDisconnectBtn.addEventListener("click", async () => {
+    stopLedgerPolling();
+    ledgerConnection = null;
+    llamaSnapshotsLedger = null;
+    llamaEventsLedger = null;
+    llamaAutoLinked = false;
+    setLlamaLinkStatus(null);
+    await LedgerConnect.clearHandle();
+    llamaDisconnectBtn.hidden = true;
+    llamaConnectBtn.hidden = false;
+    llamaConnectBtn.textContent = "Connect campaign folder…";
+    llamaManualLoaderEl.hidden = false;
+    updateLlamaPanelVisibility();
+    renderLlamaScore();
   });
 
   function renderChartWithRange(container, config) {
@@ -829,7 +1305,6 @@
     const meta = result.metadata || {};
     const realCountries = result.countries.filter((c) => c.countryType === "Real");
     const totalGold = realCountries.reduce((sum, c) => sum + (c.gold || 0), 0);
-    const dlcs = Array.isArray(meta.enabled_dlcs) ? meta.enabled_dlcs : meta.enabled_dlcs ? [meta.enabled_dlcs] : [];
 
     const stats = [
       ["Playthrough", meta.playthrough_name || "-"],
@@ -841,16 +1316,12 @@
       ["World Treasury (sum)", fmtNum(totalGold, 0)],
     ];
 
-    overviewEl.innerHTML =
-      stats
-        .map(
-          ([label, value]) =>
-            `<div class="stat"><span class="label">${label}</span><span class="value">${escapeHtml(String(value))}</span></div>`
-        )
-        .join("") +
-      `<div class="stat wide"><span class="label">DLCs Enabled</span><span class="value">${
-        dlcs.length ? dlcs.map(escapeHtml).join(", ") : "-"
-      }</span></div>`;
+    overviewEl.innerHTML = stats
+      .map(
+        ([label, value]) =>
+          `<div class="stat"><span class="label">${label}</span><span class="value">${escapeHtml(String(value))}</span></div>`
+      )
+      .join("");
   }
 
   function escapeHtml(s) {
@@ -871,6 +1342,8 @@
     { key: "dipScore", label: "DIP", numeric: true, render: (c) => fmtNum(c.dipScore, 2) },
     { key: "milScore", label: "MIL", numeric: true, render: (c) => fmtNum(c.milScore, 2) },
     { key: "locationCount", label: "Locations", numeric: true, render: (c) => fmtNum(c.locationCount, 0) },
+    { key: "totalDevelopment", label: "Development", numeric: true, render: (c) => fmtNum(c.totalDevelopment, 1) },
+    { key: "avgDevelopment", label: "Avg Dev/location", numeric: true, render: (c) => fmtNum(c.avgDevelopment, 2) },
     { key: "gold", label: "Treasury", numeric: true, render: (c) => fmtNum(c.gold, 1) },
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (c) => fmtNum(c.lastMonthGoldIncome, 2) },
     { key: "income", label: "Gross Income", numeric: true, render: (c) => fmtNum(c.income, 1) },
@@ -902,6 +1375,9 @@
     { key: "tag", label: "Tag", render: (p) => `<span class="tag-badge">${escapeHtml((p.country && p.country.tag) || "?")}</span>` },
     { key: "governmentType", label: "Government", render: (p) => escapeHtml((p.country && p.country.governmentType) || "-") },
     { key: "scorePlace", label: "Rank", numeric: true, render: (p) => fmtNum(p.country && p.country.scorePlace, 0) },
+    { key: "locationCount", label: "Locations", numeric: true, render: (p) => fmtNum(p.country && p.country.locationCount, 0) },
+    { key: "totalDevelopment", label: "Development", numeric: true, render: (p) => fmtNum(p.country && p.country.totalDevelopment, 1) },
+    { key: "avgDevelopment", label: "Avg Dev/location", numeric: true, render: (p) => fmtNum(p.country && p.country.avgDevelopment, 2) },
     { key: "gold", label: "Treasury", numeric: true, render: (p) => fmtNum(p.country && p.country.gold, 1) },
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (p) => fmtNum(p.country && p.country.lastMonthGoldIncome, 2) },
     { key: "profit", label: "Profit", numeric: true, render: (p) => fmtNum(p.country && p.country.profit, 1) },
@@ -916,8 +1392,15 @@
     { key: "taxBasePerPop", label: "Tax Base/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.taxBasePerPop, 3) },
     { key: "manpower", label: "Manpower", numeric: true, render: (p) => fmtNum(p.country && p.country.manpower, 2) },
     { key: "manpowerPerPop", label: "Manpower/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.manpowerPerPop, 3) },
+    { key: "sailors", label: "Sailors", numeric: true, render: (p) => fmtNum(p.country && p.country.sailors, 2) },
+    { key: "expectedArmySize", label: "Army Size", numeric: true, render: (p) => fmtNum(p.country && p.country.expectedArmySize, 2) },
+    { key: "expectedNavySize", label: "Navy Size", numeric: true, render: (p) => fmtNum(p.country && p.country.expectedNavySize, 0) },
+    { key: "admScore", label: "ADM", numeric: true, render: (p) => fmtNum(p.country && p.country.admScore, 2) },
+    { key: "dipScore", label: "DIP", numeric: true, render: (p) => fmtNum(p.country && p.country.dipScore, 2) },
+    { key: "milScore", label: "MIL", numeric: true, render: (p) => fmtNum(p.country && p.country.milScore, 2) },
     { key: "stability", label: "Stability", numeric: true, render: (p) => fmtNum(p.country && p.country.stability, 1) },
     { key: "prestige", label: "Prestige", numeric: true, render: (p) => fmtNum(p.country && p.country.prestige, 1) },
+    { key: "greatPowerRank", label: "GP Rank", numeric: true, render: (p) => fmtNum(p.country && p.country.greatPowerRank, 0) },
     {
       key: "__hide",
       label: "",
@@ -927,6 +1410,9 @@
 
   const PLAYER_COUNTRY_SORT_KEYS = [
     "scorePlace",
+    "locationCount",
+    "totalDevelopment",
+    "avgDevelopment",
     "gold",
     "lastMonthGoldIncome",
     "profit",
@@ -936,12 +1422,19 @@
     "taxBasePerPop",
     "manpowerPerPop",
     "manpower",
+    "sailors",
+    "expectedArmySize",
+    "expectedNavySize",
+    "admScore",
+    "dipScore",
+    "milScore",
     "stability",
     "prestige",
+    "greatPowerRank",
   ];
 
   const COUNTRY_METRIC_GROUPS = {
-    key: ["tag", "playerNames", "governmentType", "scorePlace", "locationCount", "gold", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpower"],
+    key: ["tag", "playerNames", "governmentType", "scorePlace", "locationCount", "gold", "lastMonthGoldIncome", "profit", "population", "manpower"],
     economy: [
       "tag",
       "playerNames",
@@ -957,12 +1450,37 @@
       "taxBasePerPop",
     ],
     military: ["tag", "playerNames", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "admScore", "dipScore", "milScore"],
-    demographic: ["tag", "playerNames", "locationCount", "population", "incomePerPop", "taxBasePerPop", "manpowerPerPop", "stability", "prestige", "greatPowerRank"],
+    demographic: [
+      "tag",
+      "playerNames",
+      "locationCount",
+      "totalDevelopment",
+      "avgDevelopment",
+      "population",
+      "incomePerPop",
+      "taxBasePerPop",
+      "manpowerPerPop",
+      "stability",
+      "prestige",
+      "greatPowerRank",
+    ],
+  };
+
+  const PLAYER_METRIC_GROUPS = {
+    key: ["name", "tag", "governmentType", "scorePlace", "gold", "lastMonthGoldIncome", "profit", "population", "manpower", "__hide"],
+    economy: ["name", "tag", "gold", "lastMonthGoldIncome", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
+    military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "admScore", "dipScore", "milScore", "__hide"],
+    demographic: ["name", "tag", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "greatPowerRank", "__hide"],
   };
 
   function countryColumnsForCurrentGroup() {
     const keys = COUNTRY_METRIC_GROUPS[currentMetricGroup] || COUNTRY_METRIC_GROUPS.key;
     return keys.map((key) => COUNTRY_COLUMNS.find((col) => col.key === key)).filter(Boolean);
+  }
+
+  function playerColumnsForCurrentGroup() {
+    const keys = PLAYER_METRIC_GROUPS[currentPlayerMetricGroup] || PLAYER_METRIC_GROUPS.key;
+    return keys.map((key) => PLAYER_COLUMNS.find((col) => col.key === key)).filter(Boolean);
   }
 
   function sortValue(row, col) {
@@ -1029,47 +1547,55 @@
 
   let hiddenNoteEl = null;
 
-  function renderPlayers(result) {
+  function drawPlayerTable(result) {
+    result = result || latestResult;
+    if (!result) return;
     if (!hiddenNoteEl) {
       hiddenNoteEl = document.createElement("div");
       hiddenNoteEl.className = "hidden-players-note";
       playersTableEl.parentNode.insertBefore(hiddenNoteEl, playersTableEl);
     }
 
-    function draw() {
-      const visible = visiblePlayers(result);
-      playerCountEl.textContent = visible.length;
+    const visible = visiblePlayers(result);
+    playerCountEl.textContent = visible.length;
 
-      const hiddenCount = result.players.length - visible.length;
-      hiddenNoteEl.innerHTML = hiddenCount
-        ? `${hiddenCount} player${hiddenCount === 1 ? "" : "s"} hidden. <button class="link-btn" id="showHiddenPlayersBtn">Show</button>`
-        : "";
-      const showBtn = document.getElementById("showHiddenPlayersBtn");
-      if (showBtn) {
-        showBtn.addEventListener("click", () => {
-          setExcludedPlayers(new Set());
-          draw();
-          renderTrends(result);
-        });
-      }
-
-      renderSortableTable(playersTableEl, visible, PLAYER_COLUMNS, {
-        defaultSortKey: "scorePlace",
-        onRender: (container) => {
-          container.querySelectorAll(".hide-player-btn").forEach((btn) => {
-            btn.addEventListener("click", () => {
-              const excluded = getExcludedPlayers();
-              excluded.add(btn.dataset.name);
-              setExcludedPlayers(excluded);
-              draw();
-              renderTrends(result);
-            });
-          });
-        },
+    const hiddenCount = result.players.length - visible.length;
+    hiddenNoteEl.innerHTML = hiddenCount
+      ? `${hiddenCount} player${hiddenCount === 1 ? "" : "s"} hidden. <button class="link-btn" id="showHiddenPlayersBtn">Show</button>`
+      : "";
+    const showBtn = document.getElementById("showHiddenPlayersBtn");
+    if (showBtn) {
+      showBtn.addEventListener("click", () => {
+        setExcludedPlayers(new Set());
+        drawPlayerTable(result);
+        renderTrends(result);
+        if (currentLlamaDraw) currentLlamaDraw();
       });
     }
 
-    draw();
+    const columns = playerColumnsForCurrentGroup();
+    renderSortableTable(playersTableEl, visible, columns, {
+      defaultSortKey: columns.some((col) => col.key === "scorePlace") ? "scorePlace" : columns[0] && columns[0].key,
+      onRender: (container) => {
+        container.querySelectorAll(".hide-player-btn").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const excluded = getExcludedPlayers();
+            excluded.add(btn.dataset.name);
+            setExcludedPlayers(excluded);
+            drawPlayerTable(result);
+            renderTrends(result);
+            // A hidden/departed player should also stop scoring in the
+            // Llama Score tab, not just disappear from this table - see
+            // computeLlamaScores'/computeFromLedger's excludedPlayers param.
+            if (currentLlamaDraw) currentLlamaDraw();
+          });
+        });
+      },
+    });
+  }
+
+  function renderPlayers(result) {
+    drawPlayerTable(result);
   }
 
   let countriesController = null;
@@ -1085,6 +1611,24 @@
     c.incomePerPop = typeof c.lastMonthGoldIncome === "number" && c.population > 0 ? c.lastMonthGoldIncome / c.population : undefined;
     c.taxBasePerPop = typeof c.latestTaxBase === "number" && c.population > 0 ? c.latestTaxBase / c.population : undefined;
     c.manpowerPerPop = typeof c.manpower === "number" && c.population > 0 ? c.manpower / c.population : undefined;
+  }
+
+  function computeCountryLocationMetrics(result) {
+    const byCountry = new Map((result.countries || []).map((c) => [c.number, c]));
+    const totals = new Map();
+    for (const loc of result.locations || []) {
+      if (!loc || typeof loc.owner !== "number") continue;
+      const row = totals.get(loc.owner) || { development: 0, locations: 0 };
+      if (typeof loc.development === "number") row.development += loc.development;
+      row.locations += 1;
+      totals.set(loc.owner, row);
+    }
+    for (const [countryNumber, row] of totals.entries()) {
+      const country = byCountry.get(countryNumber);
+      if (!country) continue;
+      country.totalDevelopment = row.development;
+      country.avgDevelopment = row.locations > 0 ? row.development / row.locations : undefined;
+    }
   }
 
   function filteredCountries() {
@@ -1177,7 +1721,9 @@
     if (!id) return;
     SaveLibrary.remove(id).then(() => {
       refreshSavesLibraryUI();
-      resultsEl.hidden = true;
+      latestResult = null;
+      setResultTabsAvailable(false);
+      activateTab("load");
       uploaderSummaryEl.hidden = true;
       dropzone.hidden = false;
       errorBox.hidden = true;
@@ -1243,7 +1789,8 @@
     const params = new URLSearchParams(location.search);
     const id = params.get("save");
     if (!id) return;
-    pendingShareTab = params.get("tab") === "map" ? "map" : "stats";
+    const requestedTab = params.get("tab");
+    pendingShareTab = VALID_TABS.includes(requestedTab) ? requestedTab : "metrics";
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) {
       showPendingShareNotice(id);
       return;
@@ -1274,6 +1821,8 @@
       .catch(() => {});
   });
 
+  updateLlamaPanelVisibility();
   initFromShareUrl();
   refreshSavesLibraryUI();
+  tryAutoReconnect();
 })();

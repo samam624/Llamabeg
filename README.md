@@ -630,6 +630,56 @@ yet), shown as "in progress" rather than silently scored as a loss. The leaderbo
 (`Charts.renderBarChart`, a small horizontal-bar addition to `js/charts.js`) always
 lists every current player, even ones with zero wars (GP_Score alone still counts).
 
+**Campaign-ledger mode: scoring wars a single save can never see.** A save-by-save
+view has a structural blind spot: EU5 purges a concluded war from `war_manager` once
+it's over, sometimes faster than the autosave interval, so a war can go straight from
+`active` to *gone* with no snapshot ever showing it as concluded (see the binary-parser
+section's `war_manager` writeup). `llama-score-automatic-logging-machine/` is a small
+standalone Node recorder (not part of the browser app) that watches the save folder in
+real time, parses each new autosave with the same `js/clausewitz.js`/
+`js/clausewitz-binary.js` parsers, and appends a compact per-campaign ledger
+(`data/campaigns/<uuid>/{snapshots,war-events}.jsonl`) — so a war that gets purged
+before the next autosave is still caught, because the recorder saw it *while it was
+still active* rather than only checking after the fact. `js/llama-score.js`'s
+`computeFromLedger(snapshots, events, overrides)` scores from this ledger instead of a
+single save's `result.wars`; `js/app.js`'s "Llama Score" panel prefers this mode
+whenever a ledger is loaded (via the manual `.jsonl` file pickers, or `js/ledger-
+connect.js`'s File System Access API folder connection, Chromium-only) and falls back
+to the single-save view otherwise.
+
+**Automatic "player left the campaign" detection**, so an abandoned country's later
+wars don't score for *or* against anyone. The concern this closes off: once a player
+stops playing, their country reverts to AI control, and another player could otherwise
+farm free "wins" off that now-defenseless shell — inflating their score off a fight
+that isn't really PvP anymore. `buildDepartureDates()` (`js/llama-score.js`) scans
+every recorded ledger snapshot in order and flags a country as departed at the first
+later snapshot where it's recorded with zero players, after having genuinely had one.
+**In practice this almost never fires**: a save has no "still connected" flag at
+all — a country's player list is just its last `played_country` entry (see
+"Player-session history" above), which never clears on its own once someone's played
+it, reconnect or not. So a player who simply stops showing up for good (confirmed on a
+real campaign: a player farmed for score across two sessions after departing, with the
+opponent they kept "beating" also still being penalized) is invisible to every
+save/snapshot the recorder ever captures — there's no live-connection signal anywhere
+in the data, recorder running or not.
+
+The actual fix is the existing manual "Hide" button on the Players table
+(`eu5-analyzer-excluded-players` in `localStorage`, `js/app.js`) — now wired into
+`computeLlamaScores`/`computeFromLedger` as an `excludedPlayers` argument. Hiding a
+player: (1) drops their own leaderboard entry entirely, (2) auto-excludes their own war
+rows (`"player-hidden"` reason), and (3) — the part that used to be missed — also
+auto-excludes *their opponents'* rows against them (`"opponent-departed"`, same reason
+string `buildDepartureDates()` uses, now reachable through this path too), via an
+`attributedPlayerFor(country)` lookup on the enemy side of each war. Without step 3, a
+still-active player who'd fought the departed one kept their win/loss score frozen in
+from that fight forever, even after the "phantom" was hidden - hiding the wrong side of
+the matchup didn't undo the damage to the right side. `E`/`A` (enemy/ally counts) and
+`isPvP` themselves are deliberately left alone by this - they reflect who was actually
+fighting at the time, so hiding someone later doesn't retroactively rewrite the war
+score of fights that were legitimate when they happened, only the *newly-phantom*
+ones. Surfaced in the "Exclude" column as a dismissable `auto` badge with the reason in
+its tooltip; a manual per-war override still wins if the automatic read is wrong.
+
 ### Ocean/lake caveat
 
 Sea/lake classification is per-*location*, not aggregated into named bodies of
@@ -643,6 +693,48 @@ feature.
 `js/parse-worker.js` runs the parse in a Web Worker so the page doesn't freeze on
 large files; `js/app.js` falls back to parsing on the main thread if Workers aren't
 available (e.g. some `file://` contexts).
+
+**Tab layout: Load Save / Metrics / Graphs / Llama Score / Map.** Used to be a single
+"Statistics" tab holding the overview stats, both trend charts, the Players/Countries
+tables, Black Death, *and* the Llama Score panel all at once, laid out in a 2-column
+CSS grid only two of those sections were actually coded to span — the rest landed in
+mismatched half-width columns. Split into five tabs (`index.html`'s `#results` nav,
+`js/app.js`'s `tabPanels`/`activateTab`), each a plain single-column flex stack now:
+- **Load Save** — the uploader + "Recent saves" panel, which used to sit permanently
+  above the tabs even after a save was loaded. Now it's its own tab — the *only* one
+  shown pre-load (`setResultTabsAvailable()` keeps Metrics/Graphs/Map hidden until a
+  save actually parses), and once a save loads, the view auto-jumps to Metrics and
+  Load Save just waits in the nav for
+  next time (`onParsed`'s `wasOnLoadTab` check — only auto-navigates away if you were
+  actually on it, so reloading a different save while on e.g. Map doesn't yank you
+  away from what you were looking at).
+- **Metrics** — Overview, Players, Black Death, Countries.
+- **Graphs** — the population/tax-base trend charts.
+- **Llama Score** — unchanged content, just its own tab now instead of a
+  toggle-revealed panel wedged into Statistics. Visibility rule is unchanged (hidden
+  until auto-linked or the "Show Llama Score" checkbox is on, `updateLlamaPanelVisibility`)
+  but now targets the tab *button*'s `hidden` instead of the panel's, and redirects away
+  from itself if it stops being available while active.
+- **Map** — unchanged.
+
+Small icon sprites (`Special:Redirect/file/<Name>.png` from the EU5 wiki, same pattern
+`MAP_MODE_ICONS` in `js/map.js` already used for map-mode buttons) were added to each
+tab button and to the Key/Economy/Military/Demographic metric-tab buttons — each
+filename was checked with a `curl` HEAD request for a real `image/png` response before
+use, since a few obvious guesses (`Black Death.png`, `Statistics.png`, `Chart.png`)
+404. Llama Score uses a 🦙 emoji instead — no EU5 wiki asset fits, and an emoji has no
+broken-link risk.
+
+**Map aspect ratio.** `.map-canvas-wrap` used to be `height: min(76vh, 760px)` at
+whatever width its (now full-width, single-column) container gave it — on a wide
+monitor that's a very short, very wide banner. Now `aspect-ratio: 16/10` with a
+`max-width: 1500px` cap on `.map-body`, closer to an actual monitor's shape.
+
+**Black Death "Lost %" color gradient**, green (least population lost) to red (most),
+scaled to the *loaded save's own* min/max rather than a fixed 0–100% axis — real
+per-country tallies cluster in a fairly narrow band (e.g. 20–40% in one test campaign),
+which would all read as a near-identical color against the full range. Recomputed by
+`renderBlackDeath()` into a shared `blackDeathLossRange` on every render.
 
 **Fixed: unescaped error text passed to `innerHTML`.** `showError()`
 (`js/app.js`) writes its argument straight into `errorBox.innerHTML`, which
@@ -699,7 +791,7 @@ rendering the save as if nothing were wrong.
 client-side/static — see Hosted version in the Roadmap): a link can't hand
 your save's data to someone who's never uploaded it, so this doesn't attempt
 real cross-device sharing. What it does do is keep the URL
-(`?save=<id>&tab=<stats|map>`) in sync with whatever's currently loaded, via
+(`?save=<id>&tab=<load|metrics|graphs|llama|map>`) in sync with whatever's currently loaded, via
 `history.replaceState`, and on load: if that id is in *this* browser's
 library (the case that matters most - reopening a bookmark, or a link you
 sent yourself on the same machine), it restores instantly instead of

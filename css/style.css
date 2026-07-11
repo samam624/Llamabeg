@@ -25,7 +25,25 @@ body {
 
 .app-header {
   padding: 2rem 1.5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
   text-align: center;
+}
+
+.app-logo {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: rgba(91, 157, 217, 0.08);
+  border: 1px solid var(--panel-border);
+}
+
+.app-header-text {
+  text-align: left;
 }
 
 .app-header h1 {
@@ -51,24 +69,22 @@ main {
 }
 
 .tab-panel:not([hidden]) {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(420px, 0.7fr);
+  display: flex;
+  flex-direction: column;
   gap: 1.25rem;
-}
-
-#overview,
-#statsTab > .panel:first-of-type,
-#statsTab > .panel:nth-of-type(2) {
-  grid-column: 1 / -1;
 }
 
 .app-tabs {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
   border-bottom: 1px solid var(--panel-border);
 }
 
 .app-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0.65rem 1rem;
   border: 1px solid transparent;
   border-bottom: none;
@@ -79,6 +95,22 @@ main {
   font-size: 0.9rem;
 }
 
+.app-tab[hidden] {
+  display: none;
+}
+
+.tab-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.tab-icon-emoji {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
 .app-tab:hover {
   color: var(--text);
 }
@@ -87,10 +119,6 @@ main {
   background: var(--panel-bg);
   border-color: var(--panel-border);
   color: var(--accent);
-}
-
-.map-panel {
-  grid-column: 1 / -1;
 }
 
 .panel {
@@ -257,12 +285,22 @@ main {
 }
 
 .metric-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   padding: 0.35rem 0.7rem;
   border-radius: 6px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text-dim);
   cursor: pointer;
+}
+
+.metric-tab-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  flex: 0 0 auto;
 }
 
 .metric-tab.active {
@@ -343,6 +381,15 @@ td.num {
   margin: 0 0 0.75rem;
 }
 
+/* The [hidden] attribute and .ledger-loader{display:flex} have equal
+   selector specificity, and this stylesheet loads after the UA sheet, so
+   without this override .ledger-loader's `display:flex` silently wins and
+   `hidden` stops hiding it (confirmed live: app.js's connect flow sets
+   .hidden = true correctly, but the box stayed visible on screen). */
+.ledger-loader[hidden] {
+  display: none;
+}
+
 .ledger-loader {
   display: flex;
   flex-wrap: wrap;
@@ -358,6 +405,52 @@ td.num {
   color: var(--text-dim);
 }
 
+.ledger-connect {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.formula-note {
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.formula-note summary {
+  cursor: pointer;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+
+.formula-note dl {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.formula-note dt {
+  color: var(--text);
+  font-weight: 600;
+  margin-top: 0.6rem;
+}
+
+.formula-note dt:first-child {
+  margin-top: 0;
+}
+
+.formula-note dd {
+  margin: 0.2rem 0 0;
+  line-height: 1.4;
+}
+
+.formula-note code {
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
 .link-btn {
   background: none;
   border: none;
@@ -366,6 +459,83 @@ td.num {
   padding: 0;
   font-size: inherit;
   text-decoration: underline;
+}
+
+.llama-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text);
+  margin-bottom: 1rem;
+}
+
+#llamaShowToggleRow {
+  margin-top: 1rem;
+}
+
+.llama-toggle-row input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.llama-toggle-row .panel-note {
+  margin: 0;
+}
+
+.llama-link-status {
+  color: #6fcf97;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.info-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  cursor: help;
+  flex-shrink: 0;
+}
+
+.info-badge:hover,
+.info-badge:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.llama-connect-hint {
+  margin-top: -0.35rem;
+}
+
+#llamaWarModal {
+  background: var(--panel-bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  width: min(95vw, 1100px);
+  max-height: 85vh;
+}
+
+#llamaWarModal::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+#llamaWarModal .modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+#llamaWarModal .modal-header h3 {
+  margin: 0;
 }
 
 .hide-player-btn {
@@ -400,6 +570,46 @@ td.num {
   color: #fff;
   font-weight: 600;
   font-size: 0.78rem;
+}
+
+/* Player Wars (head-to-head) table - js/app.js's renderLlamaHeadToHead() */
+.h2h-side {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.h2h-side li {
+  white-space: nowrap;
+}
+
+.h2h-side li + li {
+  margin-top: 0.2rem;
+}
+
+.h2h-score-positive {
+  color: var(--good);
+  font-weight: 600;
+}
+
+.h2h-score-negative {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.h2h-score-neutral {
+  color: var(--text-dim);
+}
+
+.h2h-result-attacker,
+.h2h-result-defender {
+  color: var(--good);
+  font-weight: 600;
+}
+
+.h2h-result-whitepeace {
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 .map-toolbar {
@@ -448,7 +658,9 @@ td.num {
   overflow: hidden;
   background: #0c1015;
   min-width: 0;
-  height: min(76vh, 760px);
+  aspect-ratio: 16 / 10;
+  height: auto;
+  max-height: min(80vh, 820px);
 }
 
 .map-body {
@@ -457,6 +669,8 @@ td.num {
   grid-template-columns: minmax(0, 1fr);
   gap: 0.9rem;
   align-items: stretch;
+  max-width: 1500px;
+  margin: 0 auto;
 }
 
 .map-body.has-country {
@@ -553,6 +767,37 @@ td.num {
   text-transform: capitalize;
 }
 
+.location-context-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.75rem;
+}
+
+.location-context-pill {
+  min-width: 0;
+  padding: 0.5rem 0.55rem;
+  border: 1px solid rgba(42, 50, 64, 0.9);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.location-context-pill span {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.location-context-pill strong {
+  display: block;
+  margin-top: 0.18rem;
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
 .location-detail-close {
   width: 1.65rem;
   height: 1.65rem;
@@ -632,6 +877,131 @@ td.num {
 
 .location-detail-section tbody td {
   padding: 0.3rem 0.35rem;
+}
+
+.location-detail-section tr.demographic-row {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--demographic-color) 14%, transparent), transparent 55%);
+}
+
+.location-detail-section tr.demographic-row td:first-child {
+  box-shadow: inset 3px 0 var(--demographic-color);
+}
+
+.demographic-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: color-mix(in srgb, var(--demographic-color) 78%, #ffffff);
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.demographic-swatch {
+  display: inline-block;
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 2px;
+  background: var(--demographic-color);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+  flex: 0 0 auto;
+}
+
+.road-assets-head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.45rem;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.road-assets-head img,
+.road-chip img {
+  width: 1.1rem;
+  height: 1.1rem;
+  object-fit: contain;
+}
+
+.road-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.road-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.45rem;
+  border: 1px solid rgba(111, 145, 178, 0.45);
+  border-radius: 5px;
+  background: rgba(91, 157, 217, 0.08);
+  color: var(--text);
+  font-size: 0.78rem;
+  text-transform: capitalize;
+}
+
+.road-chip.empty {
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.road-chip strong {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.building-detail-section {
+  padding-top: 0.7rem;
+  border-top: 1px solid rgba(42, 50, 64, 0.9);
+}
+
+.building-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.55rem;
+}
+
+.building-pop-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.85rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--demographic-color) 42%, var(--panel-border));
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+  color: color-mix(in srgb, var(--demographic-color) 72%, #ffffff);
+  cursor: pointer;
+  font-size: 0.75rem;
+  text-transform: capitalize;
+}
+
+.building-pop-tab:hover,
+.building-pop-tab.active {
+  background: color-mix(in srgb, var(--demographic-color) 16%, transparent);
+  border-color: var(--demographic-color);
+  color: #fff;
+}
+
+.building-pop-tab strong {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.building-tab-panel[hidden] {
+  display: none;
+}
+
+.building-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text);
+  font-weight: 600;
+  text-transform: capitalize;
 }
 
 .demographic-chart {
@@ -783,10 +1153,38 @@ td.num {
   margin-bottom: 0.5rem;
 }
 
-.trend-chart {
+.trend-chart,
+.bar-chart {
   width: 100%;
   height: auto;
   display: block;
+}
+
+/* Llama Score leaderboard: collapsed by default to one plain bar per
+   player; hovering swaps it for the GP/War segment breakdown via a pure
+   CSS crossfade (see Charts.renderStackedBarChart) - no JS mouse-tracking
+   needed since both layers are always in the DOM, just opacity-toggled. */
+.llama-score-bar .bar-total-shape {
+  opacity: 1;
+  transition: opacity 0.12s ease;
+}
+
+.llama-score-bar .bar-segments-shape {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.llama-score-bar:hover .bar-total-shape {
+  opacity: 0;
+}
+
+.llama-score-bar:hover .bar-segments-shape {
+  opacity: 1;
+}
+
+.chart-hover-hint {
+  margin-top: 0.5rem;
+  margin-bottom: 0;
 }
 
 .chart-legend {

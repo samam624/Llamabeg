@@ -4,57 +4,88 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EU5 Save Analyzer</title>
+  <link rel="icon" href="assets/llama-logo.png" onerror="this.remove()" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
   <header class="app-header">
-    <h1>EU5 Save Analyzer</h1>
-    <p class="subtitle">Drop in an Europa Universalis V save (compressed or melted) to see players, countries, and world stats.</p>
+    <img class="app-logo" src="assets/llama-logo.png" alt="" onerror="this.style.display='none'" />
+    <div class="app-header-text">
+      <h1>EU5 Save Analyzer</h1>
+      <p class="subtitle">Drop in an Europa Universalis V save (compressed or melted) to see players, countries, and world stats.</p>
+    </div>
   </header>
 
   <main>
-    <section id="uploader" class="panel">
-      <div id="uploaderSummary" class="uploader-summary" hidden>
-        <span id="uploaderSummaryText"></span>
-        <button type="button" id="changeFileBtn" class="link-btn">Load a different save</button>
-      </div>
-      <label for="fileInput" id="dropzone" class="dropzone">
-        <span id="dropzoneText">Click to choose a .eu5 save file, or drag one here</span>
-        <input type="file" id="fileInput" accept=".eu5" hidden />
-      </label>
-      <div id="status" class="status" hidden>
-        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
-        <span id="statusText"></span>
-      </div>
-      <div id="errorBox" class="error-box" hidden></div>
-      <div id="pendingShareNotice" class="pending-share-notice" hidden></div>
-    </section>
-
-    <section id="savesLibraryPanel" class="panel" hidden>
-      <h2>Recent saves</h2>
-      <div id="savesLibraryTable" class="table-wrap"></div>
-    </section>
-
-    <section id="results" hidden>
+    <section id="results">
       <nav class="app-tabs" aria-label="Result sections">
-        <button type="button" class="app-tab active" data-tab="stats">Statistics</button>
-        <button type="button" class="app-tab" data-tab="map">Map</button>
+        <button type="button" class="app-tab active" data-tab="load">
+          <span class="tab-icon-emoji" aria-hidden="true">&#128190;</span>
+          Load Save
+        </button>
+        <button type="button" class="app-tab" data-tab="metrics" hidden>
+          <img class="tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Select%20country.png" alt="" />
+          Metrics
+        </button>
+        <button type="button" class="app-tab" data-tab="graphs" hidden>
+          <img class="tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Development.png" alt="" />
+          Graphs
+        </button>
+        <button type="button" class="app-tab" id="llamaTabBtn" data-tab="llama" hidden>
+          <span class="tab-icon-emoji" aria-hidden="true">&#129386;</span>
+          Llama Score
+        </button>
+        <button type="button" class="app-tab" data-tab="map" hidden>
+          <img class="tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Region.png" alt="" />
+          Map
+        </button>
         <button type="button" id="copyLinkBtn" class="link-btn copy-link-btn">Copy link</button>
       </nav>
 
-      <section id="statsTab" class="tab-panel">
+      <div id="llamaShowToggleRow" class="llama-toggle-row">
+        <label><input type="checkbox" id="llamaShowToggle"> Show Llama Score</label>
+        <span id="llamaAutoStatus" class="panel-note"></span>
+      </div>
+
+      <section id="loadTab" class="tab-panel">
+        <section id="uploader" class="panel">
+          <div id="uploaderSummary" class="uploader-summary" hidden>
+            <span id="uploaderSummaryText"></span>
+            <button type="button" id="changeFileBtn" class="link-btn">Load a different save</button>
+          </div>
+          <label for="fileInput" id="dropzone" class="dropzone">
+            <span id="dropzoneText">Click to choose a .eu5 save file, or drag one here</span>
+            <input type="file" id="fileInput" accept=".eu5" hidden />
+          </label>
+          <div id="status" class="status" hidden>
+            <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+            <span id="statusText"></span>
+          </div>
+          <div id="errorBox" class="error-box" hidden></div>
+          <div id="pendingShareNotice" class="pending-share-notice" hidden></div>
+        </section>
+
+        <section id="savesLibraryPanel" class="panel" hidden>
+          <h2>Recent saves</h2>
+          <div id="savesLibraryTable" class="table-wrap"></div>
+        </section>
+      </section>
+
+      <section id="metricsTab" class="tab-panel" hidden>
         <section id="overview" class="panel"></section>
 
         <section class="panel">
-          <h2>Trends</h2>
-          <div class="trends-grid">
-            <div id="populationChart" class="trend-chart-wrap"></div>
-            <div id="taxBaseChart" class="trend-chart-wrap"></div>
-          </div>
-        </section>
-
-        <section class="panel">
           <h2>Players (<span id="playerCount">0</span>)</h2>
+          <div id="playerMetricTabs" class="metric-tabs" aria-label="Player metric groups">
+            <button type="button" class="metric-tab active" data-metrics="key">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Great%20power.png" alt="" />Key</button>
+            <button type="button" class="metric-tab" data-metrics="economy">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20economy.png" alt="" />Economy</button>
+            <button type="button" class="metric-tab" data-metrics="military">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20military.png" alt="" />Military</button>
+            <button type="button" class="metric-tab" data-metrics="demographic">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20demography.png" alt="" />Demographic</button>
+          </div>
           <div id="playersTable" class="table-wrap"></div>
         </section>
 
@@ -64,35 +95,93 @@
           <div id="blackDeathTable" class="table-wrap"></div>
         </section>
 
-        <section class="panel" id="llamaScorePanel">
-          <h2>Llama Score</h2>
-          <p class="panel-note">
-            Load one campaign's <code>snapshots.jsonl</code> + <code>war-events.jsonl</code> from
-            <code>llama-score-automatic-logging-machine/data/campaigns/&lt;campaign&gt;/</code>. Finished player wars are scored from
-            recorded win/loss inference, including land-transfer peace results.
-          </p>
-          <div class="ledger-loader">
-            <label>Snapshots <input type="file" id="llamaSnapshotsInput" accept=".jsonl,.txt,application/jsonl"></label>
-            <label>War events <input type="file" id="llamaEventsInput" accept=".jsonl,.txt,application/jsonl"></label>
-          </div>
-          <p id="llamaLedgerStatus" class="panel-note">No recorder ledger loaded yet.</p>
-          <div id="llamaLeaderboard"></div>
-          <h3>Scored Wars</h3>
-          <div id="llamaWarsTable" class="table-wrap"></div>
-        </section>
-
         <section class="panel">
           <h2>Countries (<span id="countryCount">0</span>)</h2>
           <div id="metricTabs" class="metric-tabs" aria-label="Metric groups">
-            <button type="button" class="metric-tab active" data-metrics="key">Key</button>
-            <button type="button" class="metric-tab" data-metrics="economy">Economy</button>
-            <button type="button" class="metric-tab" data-metrics="military">Military</button>
-            <button type="button" class="metric-tab" data-metrics="demographic">Demographic</button>
+            <button type="button" class="metric-tab active" data-metrics="key">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Great%20power.png" alt="" />Key</button>
+            <button type="button" class="metric-tab" data-metrics="economy">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20economy.png" alt="" />Economy</button>
+            <button type="button" class="metric-tab" data-metrics="military">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20military.png" alt="" />Military</button>
+            <button type="button" class="metric-tab" data-metrics="demographic">
+              <img class="metric-tab-icon" src="https://eu5.paradoxwikis.com/Special:Redirect/file/Tab%20demography.png" alt="" />Demographic</button>
           </div>
           <input type="search" id="countrySearch" class="search-box" placeholder="Filter by tag or government..." />
           <div id="countriesTable" class="table-wrap"></div>
         </section>
       </section>
+
+      <section id="graphsTab" class="tab-panel" hidden>
+        <section class="panel">
+          <h2>Trends</h2>
+          <div class="trends-grid">
+            <div id="populationChart" class="trend-chart-wrap"></div>
+            <div id="taxBaseChart" class="trend-chart-wrap"></div>
+          </div>
+        </section>
+      </section>
+
+      <section id="llamaTab" class="tab-panel" hidden>
+        <section class="panel" id="llamaScorePanel">
+          <h2>Llama Score</h2>
+          <p class="panel-note">
+            Finished player wars are scored from the recorder's win/loss inference, including land-transfer peace results. Loading a
+            save whose recorder data has already been connected once auto-tracks its campaign - no file picking needed.
+          </p>
+          <p id="llamaLedgerStatus" class="panel-note">No recorder ledger loaded yet.</p>
+          <details class="formula-note" id="llamaManualSetup">
+            <summary>Manual setup / troubleshooting</summary>
+            <div class="ledger-connect">
+              <button type="button" id="llamaConnectBtn" class="link-btn" hidden>Connect campaign folder&hellip;</button>
+              <span
+                class="info-badge"
+                tabindex="0"
+                title="In the folder picker, choose the folder named &quot;data&quot; that's directly inside &quot;llama-score-automatic-logging-machine&quot;. Do NOT pick a specific campaign's folder (the long id folder inside data/campaigns), and don't pick llama-score-automatic-logging-machine itself - one level too high or too low and nothing will be found. The app looks for a campaigns subfolder inside whatever you select."
+                >&#9432;</span
+              >
+              <button type="button" id="llamaDisconnectBtn" class="link-btn" hidden>Disconnect</button>
+              <span id="llamaLinkStatus" class="llama-link-status" hidden>&#9989; Linked!</span>
+            </div>
+            <p class="panel-note llama-connect-hint">
+              Pick the recorder's <code>data</code> folder (the one directly inside <code>llama-score-automatic-logging-machine</code>) &mdash;
+              not <code>llama-score-automatic-logging-machine</code> itself, and not one specific campaign's folder inside <code>data/campaigns</code>.
+            </p>
+            <div id="llamaManualLoader" class="ledger-loader">
+              <label>Snapshots <input type="file" id="llamaSnapshotsInput" accept=".jsonl,.txt,application/jsonl"></label>
+              <label>War events <input type="file" id="llamaEventsInput" accept=".jsonl,.txt,application/jsonl"></label>
+            </div>
+          </details>
+          <details class="formula-note">
+            <summary>How are these scores calculated?</summary>
+            <dl>
+              <dt>GP Score</dt>
+              <dd><code>(27 &minus; Great&nbsp;Power&nbsp;Rank + 1) &times; 75</code>, floored at 0 for rank 28+. Rank 1 (strongest) scores highest; only the top 27 ranked countries score anything.</dd>
+              <dt>War Score</dt>
+              <dd>Per finished war: reward for winning against more <code>Enemies</code> with fewer <code>Allies</code> to share credit with; penalty for losing scaled the same way. A war with no real combatant on either side (a hired condottieri contract) uses a flat <code>&plusmn;2</code> instead.</dd>
+              <dt>Llama Points</dt>
+              <dd><code>Llama&nbsp;Points = (GP&nbsp;Score &divide; 100) + &sum; War&nbsp;Score</code> across every one of the player's scored wars this campaign.</dd>
+              <dt>White Peace</dt>
+              <dd>When nothing in the data points to a winner either way, the war is scored as a flat <code>0</code> for both sides rather than guessing - shown separately below from wars that were actually decided.</dd>
+            </dl>
+          </details>
+          <div id="llamaLeaderboard"></div>
+          <p id="llamaWhitePeaceStats" class="panel-note"></p>
+          <h3>Player Wars</h3>
+          <p class="panel-note">One row per war between players - who fought whom, who won, and how much score each side gained or lost.</p>
+          <div id="llamaHeadToHeadTable" class="table-wrap"></div>
+          <button type="button" id="llamaWarDetailsBtn" class="link-btn">Edit war corrections&hellip;</button>
+        </section>
+      </section>
+
+      <dialog id="llamaWarModal">
+        <div class="modal-header">
+          <h3>Scored wars &mdash; detail &amp; corrections</h3>
+          <button type="button" id="llamaWarModalClose" class="link-btn">Close</button>
+        </div>
+        <label class="llama-toggle-row"><input type="checkbox" id="llamaShowAiWars"> Show AI-only wars (reference data, never scored)</label>
+        <div id="llamaWarsTable" class="table-wrap"></div>
+      </dialog>
 
       <section id="mapTab" class="tab-panel" hidden>
         <section class="panel map-panel">
@@ -113,6 +202,7 @@
   <script src="js/map.js"></script>
   <script src="js/charts.js"></script>
   <script src="js/llama-score.js"></script>
+  <script src="js/ledger-connect.js"></script>
   <script src="js/save-library.js"></script>
   <script src="js/app.js"></script>
 </body>
