@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Llama Score Dashboard</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo-frame"><img src="../assets/llama-logo-avatar.png" alt="" class="logo" /></div>
+      <div>
+        <h1>Llama Score Dashboard</h1>
+        <p id="campaignLine" class="subtitle">Waiting for a campaign...</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="statusBadge" class="status-badge status-ok">Starting...</span>
+      <button id="campaignsBtn" class="btn-secondary" title="Browse or pick a different campaign to view">Campaign</button>
+      <button id="settingsBtn" class="btn-secondary" title="Change watched save folder / data folder">Settings</button>
+    </div>
+  </header>
+
+  <nav class="mode-tabs">
+    <button class="mode-tab active" data-mode="pvp">PVP</button>
+    <button class="mode-tab" data-mode="pve">PVE</button>
+  </nav>
+
+  <main>
+    <template id="modeSectionTemplate">
+      <section class="stat-row">
+        <div class="stat-tile">
+          <div class="stat-value" data-field="statOngoing">0</div>
+          <div class="stat-label">Ongoing wars</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value" data-field="statConcluded">0</div>
+          <div class="stat-label">Concluded wars scored</div>
+        </div>
+        <div class="stat-tile">
+          <div class="stat-value" data-field="statWhitePeace">0</div>
+          <div class="stat-label">White peaces</div>
+        </div>
+        <div class="stat-tile stat-tile-muted">
+          <div class="stat-value" data-field="statUnscoreable">0</div>
+          <div class="stat-label">Unscoreable (lost to recorder gaps)</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Ongoing Wars</h2>
+        <div data-field="ongoingWarsTable" class="table-wrap"><p class="note">No ongoing wars.</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Concluded Wars</h2>
+          <label class="check-label"><input type="checkbox" data-field="hideVerified" /> Hide checked-off wars</label>
+        </div>
+        <p data-field="whitePeaceNote" class="note"></p>
+        <p class="note">Check a war off once you've confirmed the outcome against your own memory of the game - your checks are saved on this PC.</p>
+        <div data-field="concludedWarsTable" class="table-wrap"><p class="note">No concluded wars scored yet.</p></div>
+      </section>
+
+      <section class="panel">
+        <h2 data-field="leaderboardHeading">Llama Points Leaderboard</h2>
+        <div data-field="leaderboardTable" class="table-wrap"><p class="note">No players found yet.</p></div>
+      </section>
+    </template>
+
+    <div id="pvpSection" class="mode-section"></div>
+    <div id="pveSection" class="mode-section hidden"></div>
+
+    <section class="panel panel-collapsible">
+      <div class="panel-header" id="logToggle">
+        <h2>Recorder Log</h2>
+        <span class="chevron">▸</span>
+      </div>
+      <pre id="logPane" class="log-pane hidden"></pre>
+    </section>
+  </main>
+
+  <dialog id="campaignsDialog">
+    <div class="dialog-body">
+      <h2>Campaigns</h2>
+      <p class="note">
+        "Auto (Latest)" always follows whatever the recorder is currently watching live - this is the default. Pick a specific campaign below to
+        browse its history instead; this only changes what this window shows, it doesn't stop the recorder tracking the live game in the
+        background. Picking a campaign is session-only - relaunching the app goes back to Auto.
+      </p>
+      <div id="campaignsListWrap" class="table-wrap"><p class="note">Loading...</p></div>
+      <div class="dialog-actions">
+        <button type="button" id="campaignsClose" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <h2>Settings</h2>
+      <label class="field">
+        <span>EU5 save folder (watched for new autosaves)</span>
+        <div class="field-row">
+          <input type="text" id="saveDirInput" />
+          <button type="button" id="pickSaveDir" class="btn-secondary">Browse...</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>Ledger data folder (shared with the web app's "Connect campaign folder...")</span>
+        <div class="field-row">
+          <input type="text" id="dataDirInput" />
+          <button type="button" id="pickDataDir" class="btn-secondary">Browse...</button>
+        </div>
+      </label>
+      <p class="note">Don't run the standalone recorder CLI at the same time as this app against the same data folder - both would write to the same ledger files at once.</p>
+      <div class="dialog-actions">
+        <button type="button" id="settingsCancel" class="btn-secondary">Cancel</button>
+        <button type="submit" id="settingsSave" class="btn-primary">Save &amp; restart watcher</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

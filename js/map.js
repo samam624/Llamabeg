@@ -14,7 +14,6 @@
   const OUTSIDE_MAP_COLOR = [12, 16, 21];
   const MAX_RENDER_DPR = 1.5;
   const LOCATION_BOUNDARY_MIN_SCALE = 0.33;
-  const FAST_RENDER_BORDER_MIN_SCALE = 0.55;
   const PLAYER_LABEL_FONT = "'Cinzel', 'Trajan Pro', 'Times New Roman', Georgia, serif";
   const WIKI_FILE_BASE = "https://eu5.paradoxwikis.com/Special:Redirect/file/";
   const wikiIcon = (name) => WIKI_FILE_BASE + encodeURIComponent(name);
@@ -53,6 +52,17 @@
     return String(value).replace(/_/g, " ");
   }
 
+  function titleCaseName(value) {
+    if (value === undefined || value === null || value === "") return "";
+    return fmtPlainName(value)
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\b[\p{L}\p{N}][\p{L}\p{N}'-]*/gu, (word) => {
+        if (/^[A-Z0-9]{2,}$/.test(word)) return word;
+        return word.charAt(0).toUpperCase() + word.slice(1);
+      });
+  }
+
   function fmtPercent(value, digits) {
     if (value === undefined || value === null || Number.isNaN(value)) return "&mdash;";
     return fmtNum(Number(value) * 100, digits) + "%";
@@ -65,7 +75,7 @@
 
   function humanize(value) {
     if (value === undefined || value === null || value === "") return "&mdash;";
-    return escapeHtml(String(value).replace(/_/g, " "));
+    return escapeHtml(titleCaseName(value));
   }
 
   function sortedEntries(obj) {
@@ -251,13 +261,13 @@
 
     function definitionName(def, fallbackPrefix, id) {
       const raw = def && (def.name || def.key || def.definition);
-      return raw ? raw.replace(/_/g, " ") : `${fallbackPrefix} #${id}`;
+      return raw ? titleCaseName(raw) : `${fallbackPrefix} #${id}`;
     }
 
     function marketName(marketId) {
       const market = marketByNumber.get(marketId);
       const center = market && locationsMeta[market.center];
-      if (center && center.name) return `${fmtPlainName(center.name)} Market`;
+      if (center && center.name) return `${titleCaseName(center.name)} Market`;
       return marketId === undefined || marketId === null ? null : `Market #${marketId}`;
     }
 
@@ -349,7 +359,7 @@
           const root = modePlayerRealmRoot(loc.owner);
           const rootCountry = root && countryByNumber.get(root);
           if (!rootCountry) return `${country.tag} (AI)`;
-          return loc.owner === root ? `${country.tag} - ${rootCountry.players.join(", ")}` : `${country.tag} (${rootCountry.tag} subject)`;
+          return loc.owner === root ? `${country.tag} - ${rootCountry.players.map(titleCaseName).join(", ")}` : `${country.tag} (${rootCountry.tag} Subject)`;
         },
         legend: () =>
           categoricalLegend(
@@ -357,7 +367,7 @@
             (owner) => countryColor(owner),
             (owner) => {
               const c = countryByNumber.get(owner);
-              return `${c.tag} - ${c.players.join(", ")}`;
+              return `${c.tag} - ${c.players.map(titleCaseName).join(", ")}`;
             },
             20
           ),
@@ -371,7 +381,7 @@
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
-          return loc && typeof loc.development === "number" ? `Development: ${loc.development.toFixed(1)} points` : null;
+          return loc && typeof loc.development === "number" ? `Development: ${loc.development.toFixed(1)}` : null;
         },
         legend: () => gradientLegend((mapState.metricMaxes && mapState.metricMaxes.development) || 1, (v) => v.toFixed(0) + " pts", "development"),
       },
@@ -436,25 +446,16 @@
         colorFor(id) {
           const loc = locByNumber.get(id);
           if (!loc || !loc.rawMaterial) return NO_DATA_COLOR;
-          if (mapState.focusTradeGood) {
-            if (loc.rawMaterial !== mapState.focusTradeGood) return NON_PLAYER_MUTED;
-            const max = (mapState.metricMaxes && mapState.metricMaxes.tradeGood) || 1;
-            return typeof loc.maxRawMaterialWorkers === "number" ? heatColor(loc.maxRawMaterialWorkers / max, "development") : colorForString(loc.rawMaterial);
-          }
+          if (mapState.focusTradeGood && loc.rawMaterial !== mapState.focusTradeGood) return NON_PLAYER_MUTED;
           return colorForString(loc.rawMaterial);
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
           if (!loc || !loc.rawMaterial) return null;
-          const name = loc.rawMaterial.replace(/_/g, " ");
-          return mapState.focusTradeGood === loc.rawMaterial && typeof loc.maxRawMaterialWorkers === "number"
-            ? `${name}: ${fmtNum(loc.maxRawMaterialWorkers, 0)} max workers`
-            : name;
+          const name = titleCaseName(loc.rawMaterial);
+          return typeof loc.maxRawMaterialWorkers === "number" ? `${name}: ${fmtNum(loc.maxRawMaterialWorkers, 0)} RGO capacity` : name;
         },
         legend: () => {
-          if (mapState.focusTradeGood) {
-            return gradientLegend((mapState.metricMaxes && mapState.metricMaxes.tradeGood) || 1, (v) => fmtNum(v, 0) + " workers", "development");
-          }
           return categoricalLegend(
             (loc) => loc.rawMaterial || null,
             (material) => colorForString(material),
@@ -614,7 +615,7 @@
     if (canvas.width !== destW) canvas.width = destW;
     if (canvas.height !== destH) canvas.height = destH;
 
-    const { lutR, lutG, lutB, borderR, borderG, borderB, isWater, isSea, isLake, playerRealmLUT, neutralEnclosedRealmLUT, playerLabels } = luts;
+    const { lutR, lutG, lutB, borderR, borderG, borderB, isWater, isSea, isLake, ownerLUT, playerRealmLUT, neutralEnclosedRealmLUT, playerLabels, tradeGoodLabels } = luts;
     const s = view.scale * dpr;
     const ox = view.offX * dpr;
     const oy = view.offY * dpr;
@@ -675,7 +676,7 @@
 
         const id = idGrid[rowBase + srcX];
         srcIdAt[di] = id;
-        destRealm[di] = playerRealmLUT[id];
+        destRealm[di] = ownerLUT[id];
         inMap[di] = 1;
         if (box === 1) {
           out[i] = lutR[id];
@@ -709,7 +710,7 @@
     }
 
     const COAST_SHADE = 0.6;
-    const drawDetailedBorders = (!fast || s >= FAST_RENDER_BORDER_MIN_SCALE) && s >= LOCATION_BOUNDARY_MIN_SCALE;
+    const drawDetailedBorders = !fast && s >= LOCATION_BOUNDARY_MIN_SCALE;
     if (drawDetailedBorders) {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
@@ -730,6 +731,33 @@
       }
     }
 
+    if (s >= 0.08) {
+      for (let dy = 0; dy < destH; dy++) {
+        const destRow = dy * destW;
+        const hasDown = dy + 1 < destH;
+        for (let dx = 0; dx < destW; dx++) {
+          const di = destRow + dx;
+          if (!inMap[di]) continue;
+          const id = srcIdAt[di];
+          if (isWater[id]) continue;
+          const ownerHere = ownerLUT[id];
+          if (!ownerHere) continue;
+          const hasRight = dx + 1 < destW && inMap[di + 1];
+          const hasDownPixel = hasDown && inMap[di + destW];
+          const rightId = hasRight ? srcIdAt[di + 1] : id;
+          const downId = hasDownPixel ? srcIdAt[di + destW] : id;
+          const rightOwner = hasRight && !isWater[rightId] ? ownerLUT[rightId] : ownerHere;
+          const downOwner = hasDownPixel && !isWater[downId] ? ownerLUT[downId] : ownerHere;
+          if (ownerHere !== rightOwner || ownerHere !== downOwner) {
+            const i = di * 4;
+            out[i] = Math.round(out[i] * 0.42);
+            out[i + 1] = Math.round(out[i + 1] * 0.42);
+            out[i + 2] = Math.round(out[i + 2] * 0.42);
+          }
+        }
+      }
+    }
+
     // 1px-precise (in dest space) player-realm boundary / coastline pass -
     // thickened into a solid line below via the same 2-pass box dilation as
     // before, just over the much smaller viewport buffer. Comparing realm
@@ -740,7 +768,7 @@
     // and no border was drawn between them - the bug behind "border between
     // players still not working".
     let hasPlayerBoundary = false;
-    if (!fast || s >= FAST_RENDER_BORDER_MIN_SCALE) {
+    if (!fast) {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
         const hasDown = dy + 1 < destH;
@@ -750,7 +778,7 @@
           const hasRight = dx + 1 < destW;
           const id = srcIdAt[di];
           const water = isWater[id];
-          const ownedHere = destRealm[di];
+          const ownedHere = playerRealmLUT[id];
           const rightInMap = hasRight && inMap[di + 1];
           const downInMap = hasDown && inMap[di + destW];
           const idRight = rightInMap ? srcIdAt[di + 1] : id;
@@ -761,8 +789,8 @@
           const downLake = downInMap ? isLake[idDown] : 0;
           const rightWater = rightInMap ? isWater[idRight] : water;
           const downWater = downInMap ? isWater[idDown] : water;
-          const ownedRight = rightInMap ? destRealm[di + 1] : ownedHere;
-          const ownedDown = downInMap ? destRealm[di + destW] : ownedHere;
+          const ownedRight = rightInMap ? playerRealmLUT[idRight] : ownedHere;
+          const ownedDown = downInMap ? playerRealmLUT[idDown] : ownedHere;
           // neutralEnclosedRealmLUT defaults to 0 for EVERY id that isn't an
           // actually-enclosed wasteland pocket (ordinary AI-owned land included) -
           // so comparing it against `ownedHere`/`ownedRight` without also requiring
@@ -832,7 +860,7 @@
       // radius isn't wide enough to bridge those gaps - the "spotty"
       // border reported at regional/zoomed-out views. Scale the dilation
       // radius up with `box` so it still reliably bridges the gaps.
-      const T = Math.max(1, Math.round((1.5 + (box > 1 ? box - 1 : 0)) * dpr)); // -> a solid ~(2*T+1) SCREEN-px line, zoom-independent
+      const T = Math.max(1, Math.round((1.5 + (box > 1 ? box - 1 : 0)) * dpr));
       for (let y = 0; y < destH; y++) {
         const rowStart = y * destW;
         let count = 0;
@@ -924,6 +952,24 @@
       }
       ctx.restore();
     }
+
+    if (!fast && tradeGoodLabels && tradeGoodLabels.length && view.scale > 0.28) {
+      ctx.save();
+      ctx.font = `700 ${Math.round(11 * dpr)}px ${PLAYER_LABEL_FONT}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = Math.max(3, 3 * dpr);
+      ctx.strokeStyle = "rgba(5, 7, 10, 0.88)";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+      for (const label of tradeGoodLabels) {
+        const x = label.x * s + ox;
+        const y = label.y * s + oy;
+        if (x < -40 || y < -20 || x > destW + 40 || y > destH + 20) continue;
+        ctx.strokeText(label.text, x, y);
+        ctx.fillText(label.text, x, y);
+      }
+      ctx.restore();
+    }
   }
 
   // A location's own `owner` field can be legitimately blank in the save
@@ -982,7 +1028,47 @@
     const labels = [];
     for (const [countryNumber, { x, y }] of points.entries()) {
       const country = countryByNumber.get(countryNumber);
-      labels.push({ x, y, text: country.players.join(", ") });
+      labels.push({ x, y, text: country.players.map(titleCaseName).join(", ") });
+    }
+    return labels;
+  }
+
+  function computeTradeGoodLabels(idGrid, locByNumber, locationsMeta) {
+    const targetIds = new Set();
+    for (const loc of locByNumber.values()) {
+      if (loc && loc.rawMaterial && typeof loc.maxRawMaterialWorkers === "number" && loc.maxRawMaterialWorkers > 0) {
+        const meta = locationsMeta[loc.number];
+        if (meta && meta.type !== "sea" && meta.type !== "lake") targetIds.add(loc.number);
+      }
+    }
+    if (!targetIds.size) return [];
+
+    const sampleStep = 18;
+    const footprints = new Map();
+    function touch(id, x, y) {
+      let fp = footprints.get(id);
+      if (!fp) {
+        fp = { sumX: 0, sumY: 0, n: 0 };
+        footprints.set(id, fp);
+      }
+      fp.sumX += x;
+      fp.sumY += y;
+      fp.n++;
+    }
+
+    for (let y = 0; y < MAP_H; y += sampleStep) {
+      const row = y * MAP_W;
+      for (let x = 0; x < MAP_W; x += sampleStep) {
+        const id = idGrid[row + x];
+        if (targetIds.has(id)) touch(id, x, y);
+      }
+    }
+
+    const labels = [];
+    for (const [id, fp] of footprints.entries()) {
+      const loc = locByNumber.get(id);
+      if (!loc || !fp.n) continue;
+      labels.push({ x: fp.sumX / fp.n, y: fp.sumY / fp.n, material: loc.rawMaterial, text: fmtNum(loc.maxRawMaterialWorkers, 0) });
     }
     return labels;
   }
@@ -1031,17 +1117,17 @@
     details.className = "location-details";
     details.hidden = true;
     details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
-    canvasWrap.appendChild(canvas);
-    canvasWrap.appendChild(tooltip);
-    mapBody.appendChild(countryDetails);
-    mapBody.appendChild(canvasWrap);
-    mapBody.appendChild(details);
-    mapBody.appendChild(leaderLine);
     const legendEl = document.createElement("div");
     legendEl.className = "map-legend";
-    container.appendChild(toolbar);
+    canvasWrap.appendChild(canvas);
+    canvasWrap.appendChild(tooltip);
+    mapBody.appendChild(canvasWrap);
+    mapBody.appendChild(toolbar);
+    mapBody.appendChild(legendEl);
+    mapBody.appendChild(countryDetails);
+    mapBody.appendChild(details);
+    mapBody.appendChild(leaderLine);
     container.appendChild(mapBody);
-    container.appendChild(legendEl);
 
     const ctx = canvas.getContext("2d");
     const mapState = { vassalShading: true, focusCountry: 0, focusTradeGood: null };
@@ -1059,11 +1145,12 @@
     const cultureByNumber = new Map((result.cultures || []).map((c) => [c.number, c]));
     const religionByNumber = new Map((result.religions || []).map((r) => [r.number, r]));
     const playerLabels = computePlayerLabels(idGrid, countryByNumber);
+    const tradeGoodLabels = computeTradeGoodLabels(idGrid, locByNumber, locationsMeta);
 
     function countryLabel(countryNumber) {
       const country = countryByNumber.get(countryNumber);
       if (!country) return countryNumber ? `#${countryNumber}` : null;
-      const playerText = country.players && country.players.length ? ` - ${country.players.join(", ")}` : "";
+      const playerText = country.players && country.players.length ? ` - ${country.players.map(titleCaseName).join(", ")}` : "";
       return `${country.tag || "?"} (#${country.number})${playerText}`;
     }
 
@@ -1484,7 +1571,7 @@
       if (!country) return "";
       const rows = countryOwnedLocations(countryNumber);
       const capitalMeta = country.capital && locationsMeta[country.capital];
-      const playerText = country.players && country.players.length ? country.players.join(", ") : "AI";
+      const playerText = country.players && country.players.length ? country.players.map(titleCaseName).join(", ") : "AI";
       const totalPop = sumField(rows, "population");
       const totalDev = sumField(rows, "development");
       const totalTax = sumField(rows, "tax");
@@ -1497,7 +1584,7 @@
         detailStat("Locations", fmtNum(rows.length, 0)),
         detailStat("Capital", capitalMeta ? humanize(capitalMeta.name) : fmtMaybeId(country.capital, "Location")),
         detailStat("Population", fmtPopulation(displayedPopulation)),
-        detailStat("Development", typeof totalDev === "number" ? fmtNum(totalDev, 1) + " points" : "&mdash;"),
+        detailStat("Development", typeof totalDev === "number" ? fmtNum(totalDev, 1) : "&mdash;"),
         detailStat("Avg Development", typeof totalDev === "number" && rows.length ? fmtNum(totalDev / rows.length, 2) + " / location" : "&mdash;"),
         detailStat("Tax Base", typeof totalTax === "number" ? fmtNum(totalTax, 3) + " tax" : "&mdash;"),
         detailStat("Avg Control", fmtPercent(avgField(rows, "control"), 1)),
@@ -1513,7 +1600,7 @@
         <div class="location-detail-head">
           <div>
             <h3>${escapeHtml(country.tag || `Country #${countryNumber}`)}</h3>
-            <div class="location-detail-sub">${escapeHtml(playerText)} - Country #${countryNumber}</div>
+            <div class="location-detail-sub">${escapeHtml(playerText === "AI" ? playerText : titleCaseName(playerText))} - Country #${countryNumber}</div>
           </div>
           <button type="button" class="location-detail-close country-detail-close" title="Clear country focus">x</button>
         </div>
@@ -1543,7 +1630,7 @@
       const stats = [
         detailStat("Overlord", overlord ? escapeHtml(overlord) : "&mdash;"),
         detailStat("Rank", humanize(loc.rank)),
-        detailStat("Development", typeof loc.development === "number" ? fmtNum(loc.development, 2) + " points" : "&mdash;"),
+        detailStat("Development", typeof loc.development === "number" ? fmtNum(loc.development, 2) : "&mdash;"),
         detailStat("Population", fmtPopulation(loc.population)),
         detailStat("Pop Groups", fmtNum(loc.popCount, 0)),
         detailStat("Tax Base", typeof loc.tax === "number" ? fmtNum(loc.tax, 4) + " tax" : "&mdash;"),
@@ -1584,8 +1671,8 @@
       return `
         <div class="location-detail-head">
           <div>
-            <h3>${escapeHtml(meta.name || `Location #${id}`)}</h3>
-            <div class="location-detail-sub">Location #${id} - ${escapeHtml(type)}</div>
+            <h3>${escapeHtml(meta.name ? titleCaseName(meta.name) : `Location #${id}`)}</h3>
+            <div class="location-detail-sub">Location #${id} - ${escapeHtml(titleCaseName(type))}</div>
           </div>
           <button type="button" class="location-detail-close" title="Close location details">x</button>
         </div>
@@ -1606,9 +1693,26 @@
       `;
     }
 
+    function hideLeaderLine() {
+      leaderLine.hidden = true;
+      leaderLine.style.display = "none";
+      const line = leaderLine.querySelector(".map-leader-line-path");
+      const dot = leaderLine.querySelector(".map-leader-line-dot");
+      if (line) {
+        line.setAttribute("x1", "0");
+        line.setAttribute("y1", "0");
+        line.setAttribute("x2", "0");
+        line.setAttribute("y2", "0");
+      }
+      if (dot) {
+        dot.setAttribute("cx", "0");
+        dot.setAttribute("cy", "0");
+      }
+    }
+
     function updateLeaderLine() {
-      if (!selectedLocationId || !selectedSourcePoint) {
-        leaderLine.hidden = true;
+      if (!selectedLocationId || !selectedSourcePoint || details.hidden) {
+        hideLeaderLine();
         return;
       }
       const bodyRect = mapBody.getBoundingClientRect();
@@ -1619,10 +1723,11 @@
       const canvasX = x - (canvasRect.left - bodyRect.left);
       const canvasY = y - (canvasRect.top - bodyRect.top);
       if (canvasX < 0 || canvasY < 0 || canvasX > canvasRect.width || canvasY > canvasRect.height) {
-        leaderLine.hidden = true;
+        hideLeaderLine();
         return;
       }
       leaderLine.hidden = false;
+      leaderLine.style.display = "";
       leaderLine.setAttribute("viewBox", `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
       const line = leaderLine.querySelector(".map-leader-line-path");
       const dot = leaderLine.querySelector(".map-leader-line-dot");
@@ -1641,7 +1746,7 @@
     function clearLocationDetails() {
       selectedLocationId = 0;
       selectedSourcePoint = null;
-      leaderLine.hidden = true;
+      hideLeaderLine();
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       updateMapBodyClasses();
@@ -1652,6 +1757,22 @@
       selectedCountryId = 0;
       mapState.focusCountry = 0;
       updateMetricScale(0);
+      countryDetails.hidden = true;
+      countryDetails.innerHTML = "";
+      updateMapBodyClasses();
+      redraw();
+    }
+
+    function clearMapFocus() {
+      selectedLocationId = 0;
+      selectedSourcePoint = null;
+      selectedCountryId = 0;
+      mapState.focusCountry = 0;
+      mapState.focusTradeGood = null;
+      updateMetricScale(0);
+      hideLeaderLine();
+      details.hidden = true;
+      details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       countryDetails.hidden = true;
       countryDetails.innerHTML = "";
       updateMapBodyClasses();
@@ -1736,6 +1857,7 @@
     const isWaterLUT = new Uint8Array(maxId + 1);
     const isNeutralLandLUT = new Uint8Array(maxId + 1);
     const playerRealmLUT = new Uint32Array(maxId + 1);
+    const ownerLUT = new Uint32Array(maxId + 1);
     for (let id = 0; id <= maxId; id++) {
       const loc = locByNumber.get(id);
       const meta = locationsMeta[id];
@@ -1747,6 +1869,7 @@
       isWaterLUT[id] = water ? 1 : 0;
       isNeutralLandLUT[id] = meta && !water && (!loc || !loc.owner) ? 1 : 0;
       playerRealmLUT[id] = loc && loc.owner && !water ? playerRealmRoot(loc.owner) : 0;
+      ownerLUT[id] = loc && loc.owner && !water ? loc.owner : 0;
     }
     const neutralEnclosedRealmLUT = computeNeutralEnclosedRealms(idGrid, maxId, isWaterLUT, isNeutralLandLUT, playerRealmLUT);
 
@@ -1787,9 +1910,14 @@
         isWater: isWaterLUT,
         isSea: isSeaLUT,
         isLake: isLakeLUT,
+        ownerLUT,
         playerRealmLUT,
         neutralEnclosedRealmLUT,
         playerLabels,
+        tradeGoodLabels:
+          currentMode === modes.trade && mapState.focusTradeGood
+            ? tradeGoodLabels.filter((label) => label.material === mapState.focusTradeGood)
+            : null,
       };
     }
 
@@ -2012,6 +2140,18 @@
     redraw();
     const abortController = new AbortController();
     setupPanZoom(canvasWrap, canvas, tooltip, idGrid, locationsMeta, () => currentMode, view, fit, scheduleRender, showLocationDetails, abortController.signal);
+    window.addEventListener(
+      "keydown",
+      (e) => {
+        if (e.key !== "Escape") return;
+        const target = e.target;
+        if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "")) return;
+        if (!selectedLocationId && !selectedCountryId && !mapState.focusCountry && !mapState.focusTradeGood) return;
+        e.preventDefault();
+        clearMapFocus();
+      },
+      { signal: abortController.signal }
+    );
 
     // The canvas backing store now matches the wrap's own CSS box (not a
     // fixed 16384x8192), so unlike before, a container resize needs a
@@ -2145,7 +2285,8 @@
       tooltip.hidden = false;
       tooltip.style.left = hit.screenX + 12 + "px";
       tooltip.style.top = hit.screenY + 12 + "px";
-      tooltip.textContent = extra ? `${meta.name} - ${extra}` : meta.name;
+      const name = titleCaseName(meta.name);
+      tooltip.textContent = extra ? `${name} - ${extra}` : name;
     });
     canvas.addEventListener("click", (e) => {
       if (dragMoved) return;

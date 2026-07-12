@@ -1,0 +1,55 @@
+{
+  "name": "llama-score-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop dashboard for the EU5 Llama Score recorder - live ongoing/concluded player war status.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "prepare-vendor": "node scripts/prepare-vendor.js",
+    "dist": "npm run prepare-vendor && electron-packager . \"Llama Score Dashboard\" --platform=win32 --arch=x64 --out=release --overwrite --icon=assets/llama-logo.ico --ignore=\"^/release\" --ignore=\"^/(?!main.js|preload.js|renderer|package.json|vendor|assets)\""
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-packager": "^17.1.2"
+  },
+  "build": {
+    "appId": "com.samca.llamascoredashboard",
+    "productName": "Llama Score Dashboard",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json",
+      {
+        "from": "../js",
+        "to": "vendor/js",
+        "filter": [
+          "llama-score.js",
+          "clausewitz.js",
+          "clausewitz-binary.js",
+          "eu5-fixed-ids.js"
+        ]
+      },
+      {
+        "from": "../llama-score-automatic-logging-machine",
+        "to": "vendor/llama-score-automatic-logging-machine",
+        "filter": [
+          "llama-log-machine.js",
+          "parse-worker.js"
+        ]
+      }
+    ],
+    "win": {
+      "target": "portable"
+    }
+  },
+  "allowScripts": {
+    "electron@32.3.3": true
+  }
+}

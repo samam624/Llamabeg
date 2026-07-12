@@ -23,6 +23,10 @@ body {
   min-height: 100vh;
 }
 
+body.map-view-active {
+  overflow: hidden;
+}
+
 .app-header {
   padding: 2rem 1.5rem 1rem;
   display: flex;
@@ -32,14 +36,25 @@ body {
   text-align: center;
 }
 
-.app-logo {
+.app-logo-frame {
   width: 56px;
   height: 56px;
-  object-fit: contain;
-  border-radius: 50%;
   flex: 0 0 auto;
+  border-radius: 50%;
+  overflow: hidden;
   background: rgba(91, 157, 217, 0.08);
   border: 1px solid var(--panel-border);
+}
+.app-logo {
+  /* Source asset (assets/llama-logo-avatar.png) is pre-cropped to a
+     face-centered square, so a plain cover fit is enough - no
+     object-position/transform math needed (that compounds unpredictably:
+     object-position crops relative to the ORIGINAL image, but a transform
+     on top of it re-origins against the ALREADY-cropped rendered box, which
+     is what made earlier attempts land off-center). */
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .app-header-text {
@@ -58,6 +73,52 @@ body {
   font-size: 0.95rem;
 }
 
+.app-download-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 0 0 auto;
+  padding: 0.55rem 0.9rem;
+  border-radius: 10px;
+  border: 1px solid var(--accent-dim);
+  background: rgba(91, 157, 217, 0.1);
+  color: var(--text);
+  text-decoration: none;
+  text-align: left;
+  font-size: 1.4rem;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.app-download-btn:hover {
+  background: rgba(91, 157, 217, 0.2);
+  border-color: var(--accent);
+}
+
+.app-download-btn-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.app-download-btn-text strong {
+  font-size: 0.95rem;
+  color: var(--accent);
+}
+
+.app-download-btn-text small {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+@media (max-width: 720px) {
+  .app-header {
+    flex-wrap: wrap;
+  }
+  .app-download-btn {
+    margin: 0 auto;
+  }
+}
+
 main {
   width: 100%;
   max-width: none;
@@ -66,6 +127,97 @@ main {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+}
+
+body.map-view-active .app-header,
+body.map-view-active footer,
+body.map-view-active #llamaShowToggleRow {
+  display: none;
+}
+
+body.map-view-active main {
+  height: 100vh;
+  padding: 0;
+  overflow: hidden;
+}
+
+body.map-view-active #results,
+body.map-view-active #mapTab,
+body.map-view-active .map-panel,
+body.map-view-active #mapContainer {
+  min-height: 0;
+}
+
+body.map-view-active #results {
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+}
+
+body.map-view-active .app-tabs {
+  position: absolute;
+  top: 0.75rem;
+  left: 1rem;
+  z-index: 30;
+  width: min(37rem, calc(45vw - 1.5rem));
+  max-width: calc(100vw - 2rem);
+  padding: 0.25rem;
+  border: 1px solid rgba(42, 50, 64, 0.9);
+  border-radius: 8px;
+  background: rgba(12, 16, 21, 0.86);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(12px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+body.map-view-active .app-tab {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+}
+
+body.map-view-active .app-tab.active {
+  border-color: rgba(91, 157, 217, 0.55);
+  background: rgba(91, 157, 217, 0.16);
+}
+
+body.map-view-active .copy-link-btn {
+  margin-left: 0.25rem;
+  padding: 0.45rem 0.65rem;
+}
+
+body.map-view-active #mapTab:not([hidden]) {
+  display: block;
+  height: 100vh;
+}
+
+body.map-view-active .map-panel {
+  height: 100vh;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #0c1015;
+}
+
+body.map-view-active .map-toolbar {
+  top: 0.75rem;
+  right: 1rem;
+  left: calc(min(37rem, calc(45vw - 1.5rem)) + 1.75rem);
+  width: auto;
+  min-height: 2.35rem;
+  padding: 0.25rem;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+body.map-view-active .location-details {
+  top: 4.4rem;
+  bottom: 1rem;
+  max-height: none;
 }
 
 .tab-panel:not([hidden]) {
@@ -240,14 +392,21 @@ main {
 
 #overview {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 1rem 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
 }
 
 .stat {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 4.25rem;
+  padding: 0.9rem 1.1rem;
+  border-right: 1px solid rgba(42, 50, 64, 0.76);
+  border-bottom: 1px solid rgba(42, 50, 64, 0.76);
 }
 
 .stat .label {
@@ -260,6 +419,7 @@ main {
 .stat .value {
   font-size: 1.15rem;
   font-weight: 600;
+  line-height: 1.2;
 }
 
 .stat.wide {
@@ -309,16 +469,41 @@ main {
   background: rgba(91, 157, 217, 0.08);
 }
 
+.llama-mode-tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+}
+
+.llama-mode-tab {
+  padding: 0.35rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--panel-border);
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.llama-mode-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(91, 157, 217, 0.08);
+}
+
 .table-wrap {
   overflow-x: auto;
   max-height: 520px;
   overflow-y: auto;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
+  background: rgba(20, 24, 31, 0.42);
 }
 
 table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.85rem;
   white-space: nowrap;
@@ -328,13 +513,20 @@ thead th {
   position: sticky;
   top: 0;
   background: #232b38;
-  text-align: left;
-  padding: 0.55rem 0.75rem;
+  text-align: center;
+  padding: 0.6rem 0.75rem;
   cursor: pointer;
   user-select: none;
   color: var(--text-dim);
   font-weight: 600;
   border-bottom: 1px solid var(--panel-border);
+  border-right: 1px solid rgba(42, 50, 64, 0.75);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+thead th:first-child {
+  text-align: left;
 }
 
 thead th:hover {
@@ -352,8 +544,17 @@ thead th .arrow {
 }
 
 tbody td {
-  padding: 0.45rem 0.75rem;
+  padding: 0.52rem 0.75rem;
   border-bottom: 1px solid var(--panel-border);
+  border-right: 1px solid rgba(42, 50, 64, 0.48);
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+tbody td:first-child {
+  text-align: left;
 }
 
 tbody tr:hover {
@@ -365,8 +566,18 @@ tbody tr.is-player td:first-child {
 }
 
 td.num {
-  text-align: right;
+  text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+td.metric-heat {
+  background: linear-gradient(
+    90deg,
+    hsla(calc(var(--metric-score) * 118), 54%, 26%, 0.46),
+    hsla(calc(var(--metric-score) * 118), 54%, 22%, 0.22)
+  );
+  color: hsl(calc(var(--metric-score) * 118), 72%, 78%);
+  font-weight: 650;
 }
 
 .hidden-players-note {
@@ -612,11 +823,31 @@ td.num {
   font-style: italic;
 }
 
+.llama-confidence-high { color: var(--good); }
+.llama-confidence-medium { color: #e0c34c; }
+.llama-confidence-low { color: var(--bad); }
+
 .map-toolbar {
+  position: absolute;
+  left: 1rem;
+  top: 1rem;
+  z-index: 12;
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
   flex-wrap: wrap;
+  gap: 0.35rem;
+  width: min(720px, calc(100% - 2rem));
+  padding: 0.7rem;
+  border: 1px solid rgba(42, 50, 64, 0.92);
+  border-radius: 8px;
+  background: rgba(12, 16, 21, 0.82);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(12px);
+}
+
+body.map-view-active .map-toolbar .map-mode-btn {
+  flex: 0 0 auto;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
 }
 
 .map-mode-btn {
@@ -631,6 +862,17 @@ td.num {
   font-size: 0.85rem;
   cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
+}
+
+.map-toolbar .map-mode-btn {
+  width: auto;
+  justify-content: flex-start;
+  background: rgba(20, 24, 31, 0.72);
+}
+
+.map-mode-btn[hidden],
+.map-trade-focus-btn[hidden] {
+  display: none;
 }
 
 .map-mode-icon {
@@ -652,37 +894,30 @@ td.num {
 }
 
 .map-canvas-wrap {
-  position: relative;
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
+  position: absolute;
+  inset: 0;
+  border: 0;
+  border-radius: 0;
   overflow: hidden;
   background: #0c1015;
   min-width: 0;
-  aspect-ratio: 16 / 10;
-  height: auto;
-  max-height: min(80vh, 820px);
+  width: 100%;
+  height: 100%;
 }
 
 .map-body {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 0.9rem;
-  align-items: stretch;
-  max-width: 1500px;
-  margin: 0 auto;
+  width: 100%;
+  height: min(82vh, 840px);
+  min-height: 520px;
+  overflow: hidden;
+  background: #0c1015;
 }
 
-.map-body.has-country {
-  grid-template-columns: 340px minmax(0, 1fr);
-}
-
-.map-body.has-location {
-  grid-template-columns: minmax(0, 1fr) 420px;
-}
-
-.map-body.has-country.has-location {
-  grid-template-columns: 340px minmax(0, 1fr) 420px;
+body.map-view-active .map-body,
+body.map-view-active #mapContainer {
+  height: 100vh;
+  min-height: 0;
 }
 
 .map-canvas-wrap canvas {
@@ -697,7 +932,7 @@ td.num {
 }
 
 .map-reset-btn {
-  margin-left: auto;
+  margin-top: 0.2rem;
 }
 
 .map-vassal-toggle {
@@ -708,6 +943,7 @@ td.num {
   color: var(--text-dim);
   cursor: pointer;
   user-select: none;
+  padding: 0.35rem 0.15rem 0;
 }
 
 .map-tooltip {
@@ -724,15 +960,31 @@ td.num {
 
 .location-details,
 .country-details {
-  position: relative;
-  z-index: 2;
+  position: absolute;
+  z-index: 14;
   min-width: 0;
-  max-height: min(76vh, 760px);
+  max-height: none;
   overflow: auto;
-  background: rgba(20, 24, 31, 0.78);
-  border: 1px solid var(--panel-border);
+  background: rgba(12, 16, 21, 0.86);
+  border: 1px solid rgba(42, 50, 64, 0.95);
   border-radius: 8px;
   padding: 0.85rem;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(12px);
+}
+
+.country-details {
+  left: 1rem;
+  top: 4.4rem;
+  bottom: 1rem;
+  width: min(380px, calc(50vw - 2rem));
+}
+
+.location-details {
+  top: 4.4rem;
+  right: 1rem;
+  bottom: 1rem;
+  width: min(380px, calc(50vw - 2rem));
 }
 
 .location-details[hidden],
@@ -1060,13 +1312,31 @@ td.num {
 }
 
 .map-legend {
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  z-index: 11;
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
-  margin-top: 0.75rem;
+  width: min(620px, calc(100vw - 2rem));
+  max-height: 18vh;
+  margin: 0;
+  overflow: auto;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(42, 50, 64, 0.9);
+  border-radius: 8px;
+  background: rgba(12, 16, 21, 0.78);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
   font-size: 0.8rem;
   color: var(--text-dim);
   align-items: center;
+  transform: translateX(-50%);
+  backdrop-filter: blur(12px);
+}
+
+.map-body.has-country .map-legend {
+  display: none;
 }
 
 .map-legend-item {
@@ -1106,26 +1376,109 @@ td.num {
 }
 
 .map-loading {
+  display: grid;
+  place-items: center;
+  min-height: 520px;
   padding: 2rem;
   text-align: center;
   color: var(--text-dim);
 }
 
+body.map-view-active .map-loading {
+  height: 100vh;
+}
+
+@media (max-width: 1250px) {
+  body.map-view-active .app-tabs {
+    right: 1rem;
+    width: auto;
+  }
+
+  body.map-view-active .map-toolbar {
+    top: 3.65rem;
+    left: 1rem;
+  }
+
+  body.map-view-active .location-details,
+  .country-details {
+    top: 7.25rem;
+  }
+}
+
+@media (max-width: 800px) {
+  body.map-view-active .app-tabs {
+    top: 0.5rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    overflow-x: auto;
+  }
+
+  body.map-view-active .map-toolbar,
+  .map-toolbar {
+    top: 3.7rem;
+    right: 0.75rem;
+    left: 0.75rem;
+    bottom: auto;
+    width: auto;
+    max-height: 26vh;
+    overflow: auto;
+  }
+
+  body.map-view-active .location-details,
+  .location-details {
+    inset: auto 0.75rem 0.75rem;
+    width: auto;
+    max-height: 56vh;
+  }
+
+  .country-details {
+    top: auto;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    width: auto;
+    max-height: 40vh;
+  }
+
+  .map-legend {
+    right: 0.75rem;
+    bottom: 0.75rem;
+    left: 0.75rem;
+    width: auto;
+    transform: none;
+  }
+
+  .map-body.has-location .map-toolbar,
+  .map-body.has-location .map-legend,
+  .map-body.has-country .country-details {
+    display: none;
+  }
+}
+
 .trends-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 1rem;
 }
 
 .trend-chart-wrap {
   position: relative;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgba(42, 50, 64, 0.85);
+  border-radius: 8px;
+  background: rgba(20, 24, 31, 0.62);
 }
 
 .chart-range-controls {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 0.65rem;
+  margin-bottom: 0.75rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid rgba(42, 50, 64, 0.72);
+  border-radius: 6px;
+  background: rgba(12, 16, 21, 0.32);
   color: var(--text-dim);
   font-size: 0.8rem;
 }
@@ -1137,7 +1490,7 @@ td.num {
 }
 
 .chart-range-controls input {
-  width: 150px;
+  width: clamp(90px, 10vw, 150px);
   accent-color: var(--accent);
 }
 
@@ -1148,9 +1501,10 @@ td.num {
 }
 
 .chart-title {
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  margin-bottom: 0.5rem;
+  font-size: 0.95rem;
+  color: var(--text);
+  margin-bottom: 0.7rem;
+  font-weight: 650;
 }
 
 .trend-chart,
@@ -1158,6 +1512,11 @@ td.num {
   width: 100%;
   height: auto;
   display: block;
+}
+
+.trend-chart {
+  border-radius: 6px;
+  background: rgba(12, 16, 21, 0.2);
 }
 
 /* Llama Score leaderboard: collapsed by default to one plain bar per

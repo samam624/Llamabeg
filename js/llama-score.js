@@ -96,6 +96,58 @@
     return set;
   }
 
+  // PVE-mode-only: a fight against one AI empire can drag in several of its
+  // own vassals/subjects as extra call-in participants on the same side,
+  // which used to inflate E (or A, if the player's own vassals joined)
+  // purely by participant COUNT - fighting "the Ottomans + 3 vassals" scored
+  // very differently from fighting just "the Ottomans", even though it's
+  // really the same one fight against the same one empire. Confirmed this
+  // is what the user meant by "point swing" getting muddied by vassals
+  // fighting alongside their overlord - not the win/loss economic signal
+  // (which already only looks at the war's original declared belligerents,
+  // see economicOutcomeSignal's principal/coalition split), but the E/A
+  // participant counts that directly drive warScoreFor(). Drops a country
+  // from the set ONLY if its own overlord (per `overlordOf`, built from
+  // `result.dependencies`/each country's `.overlord` field) is ALSO present
+  // - a vassal fighting a war entirely on its own (its overlord isn't part
+  // of this war at all) is a real, independent belligerent and is left
+  // alone. `presentList` (optional) checks overlord presence against a
+  // DIFFERENT list than the one being filtered - needed for the Allies
+  // count specifically, whose input list already excludes the row's own
+  // country ("allies excluding self") - if THAT country is itself the
+  // overlord, checking presence against the self-excluded list alone would
+  // never find it, silently failing to filter its own vassals out. Passing
+  // the war side's FULL country list (self included) as `presentList` fixes
+  // this; the enemy side has no such self-exclusion, so its call site
+  // doesn't need to pass one.
+  function excludeSubjectsOfPresentOverlords(countryList, overlordOf, presentList) {
+    if (!overlordOf) return countryList;
+    const present = new Set(presentList || countryList);
+    return countryList.filter((c) => {
+      const overlord = overlordOf(c);
+      return !(typeof overlord === "number" && present.has(overlord));
+    });
+  }
+
+  // Builds the {number, tag} list a PvE war's UI-facing side uses (see
+  // aiSidePlaceholders in summarizeWars) - sorted biggest-nation-first
+  // (by locationCount, where known) so "the war leader" means something
+  // real rather than whatever arbitrary order a Set happened to iterate in.
+  // No true "leader" field exists in the data beyond this - a PvE fight can
+  // genuinely be several independent AI nations coalitioned together, not
+  // one empire with subjects (already handled separately by
+  // excludeSubjectsOfPresentOverlords), so "biggest by territory" is a
+  // reasonable stand-in, not a claim that EU5 itself designates one.
+  function labelAndSortByLocationCount(countryNumbers, countryInfoOf) {
+    return countryNumbers
+      .map((c) => {
+        const info = countryInfoOf(c);
+        return { number: c, tag: countryLabel(info, "#" + c), locationCount: (info && info.locationCount) || 0 };
+      })
+      .sort((a, b) => b.locationCount - a.locationCount)
+      .map((e) => ({ number: e.number, tag: e.tag }));
+  }
+
   // GP Score: built from `great_power_rank` (a per-country world-standing
   // rank present from game start in every save checked), NOT the ADM/DIP/MIL
   // rank sum this module used to use - those turned out to barely
@@ -133,9 +185,20 @@
   // EXCLUDED_PLAYERS_KEY) - a save has no "still connected" flag (see
   // player_session_handling memory), so a departed player who was never
   // replaced keeps scoring wars forever unless the user says otherwise here.
-  function computeLlamaScores(result, overrides, excludedPlayers) {
+  // `mode` ("pvp", the default, or "pve") picks which side of the same
+  // isPvP split actually scores: "pvp" (unchanged original behavior) only
+  // scores a war whose enemy side ever had a real player on it; "pve" is the
+  // mirror image - only scores a war whose enemy side was NEVER anyone but
+  // AI, using the SAME warScoreFor() formula, so a player's PvE performance
+  // is comparable on the same points scale as their PvP performance. This
+  // also doubles as a way to sanity-check the PvP scoring logic itself,
+  // since both modes share every line of code below except which side of
+  // the isPvP flag counts as "in scope" - a bug in one is very likely a bug
+  // in both.
+  function computeLlamaScores(result, overrides, excludedPlayers, mode) {
     overrides = overrides || {};
     excludedPlayers = excludedPlayers || new Set();
+    mode = mode === "pve" ? "pve" : "pvp";
     const wars = result.wars || [];
     const candidatesByCountry = buildPlayerCandidatesByCountry(result.playerSessions);
     const currentPlayerByCountry = new Map(
@@ -145,6 +208,12 @@
     function isKnownPlayer(c) {
       return candidatesByCountry.has(c) || currentPlayerByCountry.has(c);
     }
+    // See excludeSubjectsOfPresentOverlords()'s comment - PVE mode only.
+    const overlordByCountry = new Map();
+    for (const dep of result.dependencies || []) {
+      if (typeof dep.overlord === "number" && typeof dep.subject === "number") overlordByCountry.set(dep.subject, dep.overlord);
+    }
+    const overlordOf = (c) => overlordByCountry.get(c);
 
     const rows = [];
     for (const war of wars) {
@@ -166,6 +235,9 @@
         const enemyEverPlayer = enemyCountriesAll.filter(isKnownPlayer);
         const allyCountriesAll = sideCountryList(war.participants, participant.side, country);
         const allyEverPlayer = allyCountriesAll.filter(isKnownPlayer);
+        // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
+        // `presentList` param comment for why this is needed for A.
+        const allySideFull = sideCountryList(war.participants, participant.side);
 
         // Same PvP-only gate as computeFromLedger below: a war only scores
         // if the enemy side has at least one country ever known to be
@@ -179,8 +251,32 @@
         // (and therefore its score) rewritten just because that player
         // later got hidden.
         const isPvP = enemyEverPlayer.length > 0;
-        const E = isPvP ? enemyEverPlayer.length : enemyCountriesAll.length;
-        const A = isPvP ? allyEverPlayer.length : allyCountriesAll.length;
+        const matchesMode = mode === "pve" ? !isPvP : isPvP;
+        // Keyed off the row's own true isPvP nature, NOT the requested
+        // `mode` - a war is either really PvP or really PvE regardless of
+        // which tab you're currently looking at it from, so its E/A numbers
+        // must stay the same either way (this used to key off `mode`
+        // instead, which meant the exact same war could show DIFFERENT E/A
+        // depending on whether you viewed it as a scored row under one mode
+        // or an excluded reference row under the other - confirmed as a
+        // real bug via an end-to-end test with a real 30-country vassal
+        // cluster, not just reasoning about it). PvP counts ONLY ever-player
+        // enemies/allies (an AI call-in shouldn't dilute/inflate a PvP
+        // score). PvE's enemy side is by definition all-AI, so E is the
+        // full enemy country count instead - minus any vassal/subject whose
+        // own overlord is fighting alongside it on the same side (see
+        // excludeSubjectsOfPresentOverlords) so "the Ottomans + 3 vassals"
+        // reads as one fight against one empire, not four separate
+        // enemies; A gets the same subject-filtering treatment (the
+        // player's own vassals joining their PvE conquest shouldn't count
+        // as extra "allies" diluting the score either).
+        // Kept as the actual lists (not just their .length) so a PvE row can
+        // show WHO the enemy/allies were - see the identical comment in
+        // computeFromLedger below for why.
+        const enemyList = isPvP ? enemyEverPlayer : excludeSubjectsOfPresentOverlords(enemyCountriesAll, overlordOf);
+        const allyList = isPvP ? allyEverPlayer : excludeSubjectsOfPresentOverlords(allyCountriesAll, overlordOf, allySideFull);
+        const E = enemyList.length;
+        const A = allyList.length;
 
         function attributedPlayerForCountry(c) {
           const cands = candidatesByCountry.get(c) || [];
@@ -191,14 +287,18 @@
         // manual Hide list is a reliable, date-independent signal: if every
         // once-player enemy in this war is now a hidden/departed player,
         // the fight is against a phantom by the time anyone's looking at
-        // it, and shouldn't move anyone's score either direction.
+        // it, and shouldn't move anyone's score either direction. Only
+        // meaningful in PvP mode - a PvE war's opponent is AI and never
+        // "departs".
         const enemyActivePlayer = enemyEverPlayer.filter((c) => !excludedPlayers.has(attributedPlayerForCountry(c)));
         const active = !war.concluded;
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !isPvP
-            ? "vs-ai"
-            : enemyActivePlayer.length === 0
+          : !matchesMode
+            ? mode === "pve"
+              ? "vs-player"
+              : "vs-ai"
+            : mode === "pvp" && enemyActivePlayer.length === 0
               ? "opponent-departed"
               : null;
         const hasOverrideExcluded = typeof override.excluded === "boolean";
@@ -229,6 +329,8 @@
           active,
           E,
           A,
+          enemies: labelAndSortByLocationCount(enemyList, (c) => countryByNumber.get(c)),
+          allies: labelAndSortByLocationCount(allyList, (c) => countryByNumber.get(c)),
           isPvP,
           win,
           uncertain,
@@ -323,26 +425,87 @@
   // direct two-sided comparison (both scores present at once) or the
   // physical occupation snapshot, so it's now only consulted as a fallback
   // when occupation itself has nothing to say.
-  function economicOutcomeSignal(economy) {
+  // Restricts a side's economy delta to just the war's ORIGINALLY-declared
+  // belligerent(s) (war.originalAttacker - a single country; war.
+  // originalDefenders - can be more than one at declaration) instead of the
+  // full "side" (which can grow mid-war via called allies/revolters).
+  // Confirmed real failure mode this fixes: a player can fully annex an
+  // unrelated coalition member as part of the peace deal, which swings that
+  // whole SIDE's aggregate location count wildly even though the actual two
+  // principals' land didn't meaningfully change hands between each other -
+  // the old aggregate-only check could credit the wrong side with "winning"
+  // off a windfall against a third party while the player was simultaneously
+  // losing land to the actual opposing player. Falls back to the full side
+  // aggregate only when the principal(s) have no tracked delta at all (e.g.
+  // never appeared in an "interesting countries" snapshot) - `usedPrincipal`
+  // tells the caller which source it got, so a comparison built from a
+  // fallback isn't trusted as fully as one built from clean principal data
+  // on both sides.
+  function principalCountrySet(value) {
+    const set = new Set();
+    if (typeof value === "number") set.add(value);
+    else if (Array.isArray(value)) for (const n of value) if (typeof n === "number") set.add(n);
+    return set;
+  }
+  function principalFieldSum(sideInfo, principals, field) {
+    if (!sideInfo || !sideInfo.countryDeltas || !principals.size) return null;
+    let sum = 0;
+    let count = 0;
+    for (const cd of sideInfo.countryDeltas) {
+      if (!principals.has(cd.country)) continue;
+      if (typeof cd[field] === "number") {
+        sum += cd[field];
+        count++;
+      }
+    }
+    return count ? sum : null;
+  }
+  function resolveSideField(sideInfo, principals, field) {
+    const principalValue = principalFieldSum(sideInfo, principals, field);
+    if (principalValue !== null) return { value: principalValue, usedPrincipal: true };
+    return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
+  }
+
+  function economicOutcomeSignal(war, economy) {
     if (!economy || !economy.Attacker || !economy.Defender) return null;
-    const aGold = economy.Attacker.goldDelta;
-    const dGold = economy.Defender.goldDelta;
-    const aPrestige = economy.Attacker.prestigeDelta;
-    const dPrestige = economy.Defender.prestigeDelta;
-    const aLocations = economy.Attacker.locationDelta;
-    const dLocations = economy.Defender.locationDelta;
+    const attackerPrincipals = principalCountrySet(war.originalAttacker);
+    const defenderPrincipals = principalCountrySet(war.originalDefenders);
+
+    const aLoc = resolveSideField(economy.Attacker, attackerPrincipals, "locationDelta");
+    const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
+    const aGoldR = resolveSideField(economy.Attacker, attackerPrincipals, "goldDelta");
+    const dGoldR = resolveSideField(economy.Defender, defenderPrincipals, "goldDelta");
+    const aPrestR = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta");
+    const dPrestR = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta");
+
+    const aLocations = aLoc.value;
+    const dLocations = dLoc.value;
+    const aGold = aGoldR.value;
+    const dGold = dGoldR.value;
+    const aPrestige = aPrestR.value;
+    const dPrestige = dPrestR.value;
     const signals = [];
 
     if (typeof aLocations === "number" && typeof dLocations === "number") {
       const spread = aLocations - dLocations;
       if (Math.abs(spread) >= 2 && Math.sign(aLocations) !== Math.sign(dLocations)) {
-        signals.push({ winnerSide: spread > 0 ? "Attacker" : "Defender", reason: "post-war-land-transfer", strength: Math.abs(spread) * 1000 });
+        const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
+        signals.push({
+          winnerSide: spread > 0 ? "Attacker" : "Defender",
+          reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
+          strength: Math.abs(spread) * 1000,
+        });
       }
     } else if (typeof aLocations === "number" || typeof dLocations === "number") {
       const side = typeof aLocations === "number" ? "Attacker" : "Defender";
       const value = typeof aLocations === "number" ? aLocations : dLocations;
+      const clean = side === "Attacker" ? aLoc.usedPrincipal : dLoc.usedPrincipal;
       if (Math.abs(value) >= 1) {
-        signals.push({ winnerSide: value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker", reason: "post-war-land-transfer", strength: Math.abs(value) * 1000 });
+        signals.push({
+          winnerSide: value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker",
+          reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
+          strength: Math.abs(value) * 1000,
+        });
       }
     }
 
@@ -445,7 +608,7 @@
     // unambiguous as this game's data gets); gold/prestige-only signals get
     // "medium" (real, but a country's treasury swings for other reasons
     // too, just less commonly by this much right as a war ends).
-    const economicSignal = economicOutcomeSignal(economy);
+    const economicSignal = economicOutcomeSignal(war, economy);
     if (economicSignal) {
       return finalize({
         winnerSide: economicSignal.winnerSide,
@@ -539,11 +702,15 @@
     return departedAt;
   }
 
-  function computeFromLedger(snapshots, events, overrides, excludedPlayers) {
+  // `mode` ("pvp", the default, or "pve") - see the identical parameter on
+  // computeLlamaScores above for the full rationale; this is the same split
+  // applied to the campaign-ledger data source instead of a single save.
+  function computeFromLedger(snapshots, events, overrides, excludedPlayers, mode) {
     overrides = overrides || {};
     snapshots = snapshots || [];
     events = events || [];
     excludedPlayers = excludedPlayers || new Set();
+    mode = mode === "pve" ? "pve" : "pvp";
 
     // The recorder can now persist a snapshot that arrived chronologically
     // out of order (a fast-saving source can hand it content out of turn
@@ -597,6 +764,16 @@
       return typeof d === "string" && dateKey(d) <= dateKey(byDate);
     }
 
+    // See excludeSubjectsOfPresentOverlords()'s comment - PVE mode only.
+    // `.overlord` is only present on snapshots recorded after this field was
+    // added to the recorder's countrySummary() - older ledger data simply
+    // has no entry here, so this is a no-op (full participant count, same
+    // as before) for any war scored from pre-existing snapshots.
+    function overlordOf(country) {
+      const info = latestCountryByNumber.get(country);
+      return info && typeof info.overlord === "number" ? info.overlord : undefined;
+    }
+
     const rows = [];
     const seen = new Set();
     // A war-disappeared event with no lastWar means the recorder never had a
@@ -628,6 +805,9 @@
         const enemyEverPlayer = [...enemyCountriesAll].filter((c) => playerCountries.has(c));
         const allyCountriesAll = sideCountries(war, side, country);
         const allyEverPlayer = [...allyCountriesAll].filter((c) => playerCountries.has(c));
+        // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
+        // `presentList` param comment for why this is needed for A.
+        const allySideFull = sideCountries(war, side);
 
         // A war only "counts" as PvP if the enemy side has at least one
         // country that was ever recorded as player-controlled in this
@@ -643,8 +823,27 @@
         // so it stays useful as "player vs AI" reference data - it's just
         // not scored.
         const isPvP = enemyEverPlayer.length > 0;
-        const E = isPvP ? enemyEverPlayer.length : enemyCountriesAll.size;
-        const A = isPvP ? allyEverPlayer.length : allyCountriesAll.size;
+        const matchesMode = mode === "pve" ? !isPvP : isPvP;
+        // Keyed off the row's own true isPvP nature, NOT the requested
+        // `mode` - see computeLlamaScores' identical comment above for why
+        // (a real bug otherwise: the same war could show different E/A
+        // depending on which tab you viewed it from). PvE mode's enemy side
+        // is by definition all-AI, so E is the full enemy country count
+        // instead of the (always-zero) ever-player count, minus any
+        // vassal/subject whose own overlord is also present on that side
+        // (excludeSubjectsOfPresentOverlords) - "the Ottomans + 3 vassals"
+        // should read as one enemy, not four. A gets the same
+        // subject-filtering (the player's own vassals joining shouldn't
+        // count as extra allies).
+        // Kept as the actual lists (not just their .length) so a PvE row can
+        // show WHO the enemy/allies were - a PvE war has no opposing PLAYER
+        // row to read that off of the way a PvP war's two rows can read
+        // each other's countryTag, so summarizeWars() below needs this
+        // spelled out explicitly per row.
+        const enemyList = isPvP ? enemyEverPlayer : excludeSubjectsOfPresentOverlords([...enemyCountriesAll], overlordOf);
+        const allyList = isPvP ? allyEverPlayer : excludeSubjectsOfPresentOverlords([...allyCountriesAll], overlordOf, [...allySideFull]);
+        const E = enemyList.length;
+        const A = allyList.length;
         // Three states now, not two: true (win), false (loss), or null (a
         // white peace - no score for either side). override.win encodes the
         // manual-override version of that same trio as true / false /
@@ -678,11 +877,13 @@
         const enemyActivePlayer = enemyEverPlayer.filter((c) => !departedBy(c, event.date) && !excludedPlayers.has(attributedPlayerFor(c)));
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !isPvP
-            ? "vs-ai"
+          : !matchesMode
+            ? mode === "pve"
+              ? "vs-player"
+              : "vs-ai"
             : selfDeparted
               ? "player-departed"
-              : enemyActivePlayer.length === 0
+              : mode === "pvp" && enemyActivePlayer.length === 0
                 ? "opponent-departed"
                 : null;
         const hasOverrideExcluded = typeof override.excluded === "boolean";
@@ -709,6 +910,13 @@
           whitePeace: win === null,
           E,
           A,
+          // Who E/A actually refer to - a PvE row's enemies have no player
+          // row of their own for the UI to read a name/tag off of, so this
+          // is the only place that information survives to the display
+          // layer. Country info comes from this same snapshot ledger's
+          // latestCountryByNumber, same source as this row's own countryTag.
+          enemies: labelAndSortByLocationCount(enemyList, (c) => latestCountryByNumber.get(c)),
+          allies: labelAndSortByLocationCount(allyList, (c) => latestCountryByNumber.get(c)),
           isPvP,
           condottieri,
           excluded,
@@ -751,6 +959,12 @@
       }
     }
     for (const row of rows) {
+      // Excluded rows (vs-ai when mode is "pvp", vs-player when mode is
+      // "pve", departed-player/opponent, hidden) shouldn't count toward
+      // THIS mode's win/loss/war-count record either - without this, a PVE
+      // leaderboard would show the exact same W/L/D as the PVP one, since
+      // every row was tallied here regardless of which mode excluded it.
+      if (row.excluded) continue;
       let agg = byPlayer.get(row.player);
       if (!agg) {
         agg = { player: row.player, country: row.country, countryTag: row.countryTag, gpScore: 0, vpTotal: 0, vpPositive: 0, vpNegative: 0, warCount: 0, scoredWarCount: 0, wins: 0, losses: 0, draws: 0 };
@@ -795,7 +1009,13 @@
   // extra `whitePeace` flag is preferred when present, since per-save rows
   // don't have one (their `win === null` already only ever means "uncertain
   // outcome", close enough to treat the same way here).
-  function summarizeWars(rows) {
+  // `mode` ("pvp", the default, or "pve") picks which half of the rows
+  // becomes the returned `wars` list - the white peace tally below always
+  // reflects the true PvP/AI split regardless of `mode`, since "how many
+  // real player wars ended in white peace" is meaningful information either
+  // way you're looking at the panel.
+  function summarizeWars(rows, mode) {
+    mode = mode === "pve" ? "pve" : "pvp";
     const byWar = new Map();
     for (const r of rows || []) {
       if (!byWar.has(r.warNumber)) byWar.set(r.warNumber, []);
@@ -807,20 +1027,50 @@
     let aiWhitePeaceCount = 0;
     for (const [warNumber, warRows] of byWar) {
       const isPvP = warRows.some((r) => r.isPvP);
+      const matchesMode = mode === "pve" ? !isPvP : isPvP;
       const isWhitePeace = warRows.some((r) => (typeof r.whitePeace === "boolean" ? r.whitePeace : r.win === null));
       if (isWhitePeace) {
         if (isPvP) playerWhitePeaceCount++;
         else aiWhitePeaceCount++;
       }
-      if (!isPvP) continue; // this list is player wars only - see the AI count above for the rest
+      if (!matchesMode) continue; // this list is scoped to one mode - see the white-peace counts above for the rest
+      let attackers = warRows.filter((r) => r.side === "Attacker");
+      let defenders = warRows.filter((r) => r.side === "Defender");
+      // A PvE war only ever has real rows for the player's OWN side - the
+      // opposing side is pure AI, so no country there was ever player-
+      // controlled and no row was ever created for it (rows only exist per
+      // playerCountries entry). Without this, that side of the table would
+      // just show nothing at all, which is what prompted this - the user
+      // wants to see the enemy leader plus enemy/ally counts, not a blank
+      // column. Every row on the player's side already recorded exactly who
+      // it fought (`enemies`, built alongside E, since an AI opponent has
+      // no row of its own to read a name/tag off of) - reuse that here as
+      // placeholder entries for the side that has no real rows. A genuinely
+      // PvP-matching war never hits this (both sides already have real
+      // rows), and a war can only ever be missing rows on ONE side at a
+      // time (see the module's isPvP/matchesMode logic), so there's no risk
+      // of synthesizing both sides from each other.
+      function aiSidePlaceholders(realRows) {
+        const source = realRows.find((r) => r.enemies && r.enemies.length);
+        return source ? source.enemies.map((e) => ({ isAiSide: true, countryTag: e.tag, country: e.number })) : [];
+      }
+      if (attackers.length === 0 && defenders.length > 0) attackers = aiSidePlaceholders(defenders);
+      else if (defenders.length === 0 && attackers.length > 0) defenders = aiSidePlaceholders(attackers);
       wars.push({
         warNumber,
         startDate: warRows[0].startDate,
         endDate: warRows[0].endDate,
         whitePeace: isWhitePeace,
         winnerSide: warRows[0].winnerSide || null,
-        attackers: warRows.filter((r) => r.side === "Attacker"),
-        defenders: warRows.filter((r) => r.side === "Defender"),
+        // Same for every row of this war (inferOutcome() runs once per
+        // war-disappeared event, not once per participant) - surfaced so a
+        // UI can show/let the user spot-check HOW the winner was decided
+        // (land transfer vs. treasury swing vs. battle losses, etc.), not
+        // just the verdict itself.
+        reason: warRows[0].reason || null,
+        confidence: warRows[0].confidence || null,
+        attackers,
+        defenders,
       });
     }
     wars.sort((a, b) => dateKey(b.endDate) - dateKey(a.endDate));

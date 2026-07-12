@@ -13,61 +13,88 @@
   const AXIS_TEXT = "#9aa5b5"; // --text-dim
 
   function fmtCompact(n) {
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
-    if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+    const abs = Math.abs(n);
+    if (abs >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (abs >= 1000) return (n / 1000).toFixed(1) + "k";
+    if (abs > 0 && abs < 1) return n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    if (abs < 10) return n.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    if (abs < 100) return n.toFixed(1).replace(/0+$/, "").replace(/\.$/, "");
     return n.toFixed(0);
   }
 
   // series: [{ label, color, points: number[] }], all points arrays the
   // same length, aligned to `years` (same length, ascending).
   function renderLineChart(container, { title, years, series }) {
-    const W = 640,
-      H = 260;
-    const padL = 44,
-      padR = 12,
-      padT = 16,
-      padB = 28;
+    const W = 720,
+      H = 300;
+    const padL = 52,
+      padR = 18,
+      padT = 18,
+      padB = 32;
     const plotW = W - padL - padR;
     const plotH = H - padT - padB;
 
-    let minY = 0;
-    let maxY = 1;
+    let dataMin = Infinity;
+    let dataMax = -Infinity;
     for (const s of series) {
       for (const v of s.points) {
-        if (typeof v === "number" && v > maxY) maxY = v;
+        if (typeof v === "number") {
+          if (v < dataMin) dataMin = v;
+          if (v > dataMax) dataMax = v;
+        }
       }
     }
-    maxY *= 1.08;
+    if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) {
+      dataMin = 0;
+      dataMax = 1;
+    }
+    const span = Math.max(1e-9, dataMax - dataMin);
+    const clusteredPositive = dataMin > 0 && dataMin / Math.max(dataMax, 1e-9) > 0.25;
+    let minY = clusteredPositive ? Math.max(0, dataMin - span * 0.18) : 0;
+    let maxY = dataMax + span * 0.18;
+    if (maxY <= minY) maxY = minY + 1;
 
     const xAt = (i) => padL + (years.length <= 1 ? 0 : (i / (years.length - 1)) * plotW);
-    const yAt = (v) => padT + plotH - (v / maxY) * plotH;
+    const yAt = (v) => padT + plotH - ((v - minY) / (maxY - minY)) * plotH;
 
     const GRID_STEPS = 4;
     let gridLines = "";
     let yLabels = "";
     for (let g = 0; g <= GRID_STEPS; g++) {
-      const v = (maxY / GRID_STEPS) * g;
+      const v = minY + ((maxY - minY) / GRID_STEPS) * g;
       const y = yAt(v);
-      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${GRIDLINE}" stroke-width="1"/>`;
+      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${GRIDLINE}" stroke-width="1" opacity="0.72"/>`;
       yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${AXIS_TEXT}">${fmtCompact(v)}</text>`;
     }
 
     const xTickEvery = Math.max(1, Math.round(years.length / 8));
     let xLabels = "";
     for (let i = 0; i < years.length; i += xTickEvery) {
-      xLabels += `<text x="${xAt(i)}" y="${H - padB + 16}" text-anchor="middle" font-size="10" fill="${AXIS_TEXT}">${years[i]}</text>`;
+      xLabels += `<text x="${xAt(i)}" y="${H - padB + 18}" text-anchor="middle" font-size="10" fill="${AXIS_TEXT}">${years[i]}</text>`;
     }
 
     let lines = "";
     let dots = "";
     series.forEach((s, si) => {
       const color = s.color || SERIES_COLORS[si % SERIES_COLORS.length];
-      const pts = s.points.map((v, i) => `${xAt(i)},${yAt(typeof v === "number" ? v : 0)}`).join(" ");
-      lines += `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" data-series="${si}"/>`;
-      const lastIdx = s.points.length - 1;
-      const lastVal = s.points[lastIdx];
+      const segments = [];
+      let current = [];
+      s.points.forEach((v, i) => {
+        if (typeof v === "number") current.push(`${xAt(i)},${yAt(v)}`);
+        else if (current.length) {
+          segments.push(current);
+          current = [];
+        }
+      });
+      if (current.length) segments.push(current);
+      lines += segments
+        .filter((pts) => pts.length > 1)
+        .map((pts) => `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" data-series="${si}"/>`)
+        .join("");
+      const lastIdx = s.points.map((v, i) => (typeof v === "number" ? i : -1)).filter((i) => i >= 0).pop();
+      const lastVal = lastIdx !== undefined ? s.points[lastIdx] : undefined;
       if (typeof lastVal === "number") {
-        dots += `<circle cx="${xAt(lastIdx)}" cy="${yAt(lastVal)}" r="4" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`;
+        dots += `<circle cx="${xAt(lastIdx)}" cy="${yAt(lastVal)}" r="4.2" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`;
       }
     });
 
@@ -82,6 +109,7 @@
     container.innerHTML = `
       <div class="chart-title">${escapeHtml(title)}</div>
       <svg id="${svgId}" viewBox="0 0 ${W} ${H}" class="trend-chart" role="img" aria-label="${escapeHtml(title)}">
+        <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="rgba(255,255,255,0.012)" rx="4"/>
         ${gridLines}
         ${yLabels}
         ${xLabels}

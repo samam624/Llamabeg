@@ -32,6 +32,12 @@
   const llamaWarDetailsBtn = document.getElementById("llamaWarDetailsBtn");
   const llamaWarModalCloseBtn = document.getElementById("llamaWarModalClose");
   const llamaShowAiWarsEl = document.getElementById("llamaShowAiWars");
+  const llamaShowAiWarsLabelEl = document.getElementById("llamaShowAiWarsLabel");
+  const llamaModePvpBtn = document.getElementById("llamaModePvp");
+  const llamaModePveBtn = document.getElementById("llamaModePve");
+  const llamaModeNoteEl = document.getElementById("llamaModeNote");
+  const llamaH2HHeadingEl = document.getElementById("llamaH2HHeading");
+  const llamaH2HNoteEl = document.getElementById("llamaH2HNote");
   const llamaLinkStatusEl = document.getElementById("llamaLinkStatus");
   const savesLibraryPanel = document.getElementById("savesLibraryPanel");
   const savesLibraryTableEl = document.getElementById("savesLibraryTable");
@@ -74,6 +80,14 @@
   let llamaAutoLinked = false;
   let currentLlamaDraw = null; // stores the currently-active mode's draw() so the AI-wars toggle can re-render on demand
   const LLAMA_SHOW_TOGGLE_KEY = "eu5-analyzer-llama-show-toggle";
+  // PVP (default) scores player-vs-player wars, same as always. PVE scores
+  // the SAME wars/formula but for the opposite isPvP split - a player's
+  // performance against AI - which doubles as a live sanity-check of the
+  // PVP scoring logic itself (see js/llama-score.js's module comment on
+  // computeLlamaScores' mode param). Persisted so reloading the page keeps
+  // whichever mode was last selected.
+  const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
+  let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   // Set when the page loads with a ?save=<id> URL that isn't in this
   // browser's local history yet - see initFromShareUrl()/onParsed().
   let pendingShareId = null;
@@ -81,6 +95,8 @@
 
   function activateTab(tab) {
     currentTab = tab;
+    document.body.classList.toggle("map-view-active", tab === "map");
+    if (tab === "map") window.scrollTo(0, 0);
     tabButtons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     Object.entries(tabPanels).forEach(([key, panel]) => {
       if (panel) panel.hidden = key !== tab;
@@ -386,9 +402,11 @@
     const withHistory = players.filter((p) => Array.isArray(p.country.historicalPopulation) && p.country.historicalPopulation.length);
     const popChartEl = document.getElementById("populationChart");
     const taxChartEl = document.getElementById("taxBaseChart");
+    const taxPerPopChartEl = document.getElementById("taxBasePerPopChart");
     if (!withHistory.length) {
       popChartEl.innerHTML = '<div class="chart-title">No historical data available for current players.</div>';
       taxChartEl.innerHTML = "";
+      if (taxPerPopChartEl) taxPerPopChartEl.innerHTML = "";
       return;
     }
 
@@ -413,6 +431,15 @@
       return pad > 0 ? Array(pad).fill(undefined).concat(points) : points.slice(points.length - len);
     }
 
+    function taxBasePerPopSeries(country) {
+      const pop = alignRight(country.historicalPopulation || []);
+      const tax = alignRight(country.historicalTaxBase || []);
+      return tax.map((taxValue, i) => {
+        const popValue = pop[i];
+        return typeof taxValue === "number" && typeof popValue === "number" && popValue > 0 ? taxValue / popValue : undefined;
+      });
+    }
+
     renderChartWithRange(popChartEl, {
       title: "Population over time (people)",
       years,
@@ -426,6 +453,13 @@
       years,
       series: withHistory.map((p, i) => ({ ...series[i], points: alignRight(p.country.historicalTaxBase || []) })),
     });
+    if (taxPerPopChartEl) {
+      renderChartWithRange(taxPerPopChartEl, {
+        title: "Tax base / population over time",
+        years,
+        series: withHistory.map((p, i) => ({ ...series[i], points: taxBasePerPopSeries(p.country) })),
+      });
+    }
   }
 
   // historicalPopulation is one entry per in-game year, ending at the
@@ -570,17 +604,33 @@
   // computeFromLedger's per-participant rows back into one entry per war,
   // but a side can still have more than one player (a coalition), so each
   // side is its own small list rather than a single cell value.
+  // A PvE war's opposing side has no real player row (see summarizeWars'
+  // aiSidePlaceholders in js/llama-score.js) - those entries carry
+  // `isAiSide` + just a countryTag (already sorted biggest-nation-first, see
+  // labelAndSortByLocationCount). Collapsed to ONE line - "leader (+N
+  // allies)" - matching the style a real row's own allies get below, rather
+  // than a separate tag per AI country (unreadable on a real 10+-country
+  // coalition war). A real row's own `.A` (allies excluding self, already
+  // vassal-filtered for PvE) is called out inline too, since "how many
+  // allies" otherwise has nowhere to show for a PvE row (AI vassals
+  // correctly have no row/tag of their own to display separately).
   function renderH2HSide(participants) {
     if (!participants.length) return '<span class="panel-note">-</span>';
+    if (participants.every((r) => r.isAiSide)) {
+      const [leader, ...rest] = participants;
+      const alliesNote = rest.length > 0 ? ` <span class="panel-note">(+${rest.length} ${rest.length === 1 ? "ally" : "allies"})</span>` : "";
+      return `<span class="tag-badge">${escapeHtml(leader.countryTag || "?")}</span>${alliesNote}`;
+    }
     const items = participants.map((r) => {
       const name = `${escapeHtml(r.player || "-")} <span class="tag-badge">${escapeHtml(r.countryTag || "?")}</span>`;
+      const alliesNote = r.A > 0 ? ` <span class="panel-note">(+${r.A} ${r.A === 1 ? "ally" : "allies"})</span>` : "";
       if (r.excluded) {
-        return `<li>${name} <span class="panel-note">(${escapeHtml(r.autoExcludeReason || "excluded")})</span></li>`;
+        return `<li>${name}${alliesNote} <span class="panel-note">(${escapeHtml(r.autoExcludeReason || "excluded")})</span></li>`;
       }
-      if (typeof r.warScore !== "number") return `<li>${name} <span class="panel-note">-</span></li>`;
+      if (typeof r.warScore !== "number") return `<li>${name}${alliesNote} <span class="panel-note">-</span></li>`;
       const cls = r.warScore > 0 ? "h2h-score-positive" : r.warScore < 0 ? "h2h-score-negative" : "h2h-score-neutral";
       const sign = r.warScore > 0 ? "+" : "";
-      return `<li>${name} <span class="${cls}">${sign}${fmtNum(r.warScore, 2)}</span></li>`;
+      return `<li>${name}${alliesNote} <span class="${cls}">${sign}${fmtNum(r.warScore, 2)}</span></li>`;
     });
     return `<ul class="h2h-side">${items.join("")}</ul>`;
   }
@@ -592,17 +642,51 @@
     return '<span class="panel-note">Unknown</span>';
   }
 
+  // Maps js/llama-score.js's/llama-log-machine.js's internal `reason` codes
+  // (see inferOutcome() in either file) to plain-English labels - lets the
+  // user spot-check HOW a winner was decided, not just the verdict.
+  const LLAMA_REASON_LABELS = {
+    "post-war-land-transfer": "Land changed hands (clean 1-on-1 data)",
+    "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
+    "post-war-treasury-swing": "Treasury swung between sides",
+    "post-war-treasury-gain": "One side gained a lot of gold",
+    "post-war-prestige-swing": "Prestige swung between sides",
+    "battle-losses-inflicted": "Battle losses (no economic signal)",
+    "last-known-war-score": "Last known in-game war score",
+    "last-known-single-sided-attacker-score": "Leftover one-sided war score (attacker)",
+    "last-known-single-sided-defender-score": "Leftover one-sided war score (defender)",
+    "white-peace": "No decisive signal - treated as white peace",
+    "war-disappeared-without-decisive-signal": "No signal before the war disappeared",
+  };
+  // Hover tooltips for the less-obvious reason codes - see the "How are
+  // these scores calculated?" details block above for the full writeup.
+  const LLAMA_REASON_TOOLTIPS = {
+    "last-known-single-sided-attacker-score":
+      "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct is available.",
+    "last-known-single-sided-defender-score":
+      "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct is available.",
+    "post-war-land-transfer-coalition":
+      "Land changed hands, but only measured across the whole side (including any vassals/allies dragged in) rather than just the war's original two declared belligerents - a real signal, just less precise than a clean 1-on-1 comparison.",
+  };
+  function renderLlamaReason(w) {
+    const label = LLAMA_REASON_LABELS[w.reason] || w.reason || "Unknown";
+    const tooltip = LLAMA_REASON_TOOLTIPS[w.reason] || "";
+    const cls = w.confidence === "high" ? "llama-confidence-high" : w.confidence === "medium" ? "llama-confidence-medium" : w.confidence === "low" ? "llama-confidence-low" : "";
+    return `<span class="${cls}" title="${escapeHtml(tooltip)}">${escapeHtml(label)}</span>`;
+  }
+
   const LLAMA_HEAD_TO_HEAD_COLUMNS = [
     { key: "startDate", label: "Started", render: (w) => escapeHtml(w.startDate || "-") },
     { key: "endDate", label: "Ended", render: (w) => escapeHtml(w.endDate || "-") },
     { key: "attackers", label: "Attacker(s)", render: (w) => renderH2HSide(w.attackers) },
     { key: "defenders", label: "Defender(s)", render: (w) => renderH2HSide(w.defenders) },
     { key: "result", label: "Result", render: renderH2HResult },
+    { key: "reason", label: "How decided", render: renderLlamaReason },
   ];
 
   function renderLlamaHeadToHead(rows) {
     if (typeof LlamaScore === "undefined" || typeof LlamaScore.summarizeWars !== "function") return;
-    const { wars, playerWhitePeaceCount, aiWhitePeaceCount } = LlamaScore.summarizeWars(rows);
+    const { wars, playerWhitePeaceCount, aiWhitePeaceCount } = LlamaScore.summarizeWars(rows, llamaScoreMode);
     const statsEl = document.getElementById("llamaWhitePeaceStats");
     if (statsEl) {
       statsEl.textContent =
@@ -613,7 +697,7 @@
     const tableEl = document.getElementById("llamaHeadToHeadTable");
     if (!tableEl) return;
     if (!wars.length) {
-      tableEl.innerHTML = '<p class="panel-note">No player-vs-player wars found yet.</p>';
+      tableEl.innerHTML = `<p class="panel-note">No ${llamaScoreMode === "pve" ? "PvE" : "player-vs-player"} wars found yet.</p>`;
       return;
     }
     renderSortableTable(tableEl, wars, LLAMA_HEAD_TO_HEAD_COLUMNS, { defaultSortKey: "endDate" });
@@ -680,8 +764,12 @@
       return;
     }
     leaderboardEl.innerHTML = '<div id="llamaLeaderboardChart"></div>';
+    // PVE's points are relabeled "Alpaca Points" per the user's request -
+    // same underlying computation/formula (llamaPoints field, unchanged) as
+    // PVP's "Llama Points", just a different name so the two are never
+    // confused for the same leaderboard at a glance.
     Charts.renderStackedBarChart(document.getElementById("llamaLeaderboardChart"), {
-      title: "Llama Points",
+      title: llamaScoreMode === "pve" ? "Alpaca Points" : "Llama Points",
       items: leaderboard.map((l) => ({
         label: `${l.player} (${l.countryTag || "?"})`,
         player: l.player,
@@ -706,7 +794,7 @@
     }
 
     function draw() {
-      const { rows, leaderboard } = LlamaScore.computeLlamaScores(result, overrides, getExcludedPlayers());
+      const { rows, leaderboard } = LlamaScore.computeLlamaScores(result, overrides, getExcludedPlayers(), llamaScoreMode);
       rows.forEach((r) => {
         r.__key = LlamaScore.overrideKey(r.warNumber, r.country);
       });
@@ -714,11 +802,12 @@
       renderLlamaLeaderboardChart(document.getElementById("llamaLeaderboard"), leaderboard);
       renderLlamaHeadToHead(rows);
 
-      // Solo/AI-only wars are real data (kept for the player-attribution
-      // candidate list etc.) but never score, so they're just clutter in the
-      // corrections table by default - the "Show AI-only wars" checkbox in
-      // the modal (see index.html's #llamaWarModal) reveals them again.
-      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => r.isPvP);
+      // Whichever category ISN'T the active mode is real data (kept for the
+      // player-attribution candidate list etc.) but never scores here, so
+      // it's just clutter in the corrections table by default - the "Show
+      // AI-only wars"/"Show PvP wars" checkbox in the modal (see index.html's
+      // #llamaWarModal) reveals it again.
+      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => (llamaScoreMode === "pve" ? !r.isPvP : r.isPvP));
       renderSortableTable(document.getElementById("llamaWarsTable"), visibleRows, LLAMA_WAR_COLUMNS, {
         defaultSortKey: "startDate",
         onRender: (container) => {
@@ -886,17 +975,19 @@
         snapshots,
         events,
         overrides,
-        getExcludedPlayers()
+        getExcludedPlayers(),
+        llamaScoreMode
       );
       rows.forEach((r) => {
         r.__key = LlamaScore.overrideKey(r.warNumber, r.country);
       });
 
+      const scoredCount = rows.filter((r) => !r.excluded).length;
       llamaLedgerStatusEl.textContent =
         `Loaded ${llamaSnapshotsLedger.length.toLocaleString()} snapshot(s) and ${llamaEventsLedger.length.toLocaleString()} event(s)` +
         (distinctCampaigns.size > 1 ? ` spanning ${distinctCampaigns.size} campaigns - showing the most recently recorded one` : "") +
         (latestSnapshot ? `: ${latestSnapshot.playthroughName || "campaign"} at ${latestSnapshot.date || "?"}.` : ".") +
-        ` ${rows.length.toLocaleString()} scored player war(s) found.` +
+        ` ${scoredCount.toLocaleString()} scored ${llamaScoreMode === "pve" ? "PvE" : "player"} war(s) found.` +
         (unscoreableCount
           ? ` (${unscoreableCount.toLocaleString()} more war(s) disappeared with no recorded state to score them from - ` +
             `likely logged before a recorder restart could recover them; re-running the recorder while the original saves still exist will fix this going forward.)`
@@ -905,10 +996,11 @@
       renderLlamaLeaderboardChart(document.getElementById("llamaLeaderboard"), leaderboard);
       renderLlamaHeadToHead(rows);
 
-      // Solo/AI-only wars are real data but never score - hidden from the
-      // corrections table by default (see the identical filter in
-      // renderPerSaveLlamaScore above), revealed via the modal's checkbox.
-      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => r.isPvP);
+      // Whichever category ISN'T the active mode is real data but never
+      // scores - hidden from the corrections table by default (see the
+      // identical filter in renderPerSaveLlamaScore above), revealed via the
+      // modal's checkbox.
+      const visibleRows = llamaShowAiWarsEl.checked ? rows : rows.filter((r) => (llamaScoreMode === "pve" ? !r.isPvP : r.isPvP));
       renderSortableTable(document.getElementById("llamaWarsTable"), visibleRows, LLAMA_LEDGER_WAR_COLUMNS, {
         defaultSortKey: "endDate",
         onRender: (container) => {
@@ -1044,6 +1136,40 @@
   llamaShowAiWarsEl.addEventListener("change", () => {
     if (currentLlamaDraw) currentLlamaDraw();
   });
+
+  const LLAMA_MODE_COPY = {
+    pvp: {
+      note: "Scoring player-vs-player wars - who beat whom, and the score exchanged.",
+      h2hHeading: "Player Wars",
+      h2hNote: "One row per war between players - who fought whom, who won, and how much score each side gained or lost.",
+      aiToggleLabel: "Show AI-only wars (reference data, never scored)",
+    },
+    pve: {
+      note: "Scoring wars against AI - how each player has done fighting the computer, using the same formula as PVP.",
+      h2hHeading: "Wars vs AI",
+      h2hNote: "One row per war a player fought against AI - started/ended, who won, and the score it was worth.",
+      aiToggleLabel: "Show PvP wars (reference data, not scored here)",
+    },
+  };
+  function applyLlamaModeCopy() {
+    const copy = LLAMA_MODE_COPY[llamaScoreMode];
+    llamaModeNoteEl.textContent = copy.note;
+    llamaH2HHeadingEl.textContent = copy.h2hHeading;
+    llamaH2HNoteEl.textContent = copy.h2hNote;
+    llamaShowAiWarsLabelEl.textContent = copy.aiToggleLabel;
+    llamaModePvpBtn.classList.toggle("active", llamaScoreMode === "pvp");
+    llamaModePveBtn.classList.toggle("active", llamaScoreMode === "pve");
+  }
+  function setLlamaMode(mode) {
+    if (mode === llamaScoreMode) return;
+    llamaScoreMode = mode;
+    localStorage.setItem(LLAMA_MODE_KEY, mode);
+    applyLlamaModeCopy();
+    if (currentLlamaDraw) currentLlamaDraw();
+  }
+  llamaModePvpBtn.addEventListener("click", () => setLlamaMode("pvp"));
+  llamaModePveBtn.addEventListener("click", () => setLlamaMode("pve"));
+  applyLlamaModeCopy();
 
   // --- Llama score, auto-connected campaign folder (js/ledger-connect.js) ---
   //
@@ -1434,7 +1560,7 @@
   ];
 
   const COUNTRY_METRIC_GROUPS = {
-    key: ["tag", "playerNames", "governmentType", "scorePlace", "locationCount", "gold", "lastMonthGoldIncome", "profit", "population", "manpower"],
+    key: ["tag", "playerNames", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop"],
     economy: [
       "tag",
       "playerNames",
@@ -1467,7 +1593,7 @@
   };
 
   const PLAYER_METRIC_GROUPS = {
-    key: ["name", "tag", "governmentType", "scorePlace", "gold", "lastMonthGoldIncome", "profit", "population", "manpower", "__hide"],
+    key: ["name", "tag", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
     economy: ["name", "tag", "gold", "lastMonthGoldIncome", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
     military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "admScore", "dipScore", "milScore", "__hide"],
     demographic: ["name", "tag", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "greatPowerRank", "__hide"],
@@ -1490,6 +1616,13 @@
       return row.country[col.key];
     }
     return row[col.key];
+  }
+
+  const KEY_HEAT_COLUMNS = new Set(["lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop"]);
+
+  function metricValue(row, col) {
+    const value = sortValue(row, col);
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   }
 
   function renderSortableTable(container, rows, columns, options) {
@@ -1519,7 +1652,24 @@
 
       const tbody = sorted
         .map((row) => {
-          const cells = columns.map((col) => `<td class="${col.numeric ? "num" : ""}">${col.render(row)}</td>`).join("");
+          const cells = columns
+            .map((col) => {
+              const classes = [col.numeric ? "num" : ""];
+              let style = "";
+              if (options.colorKeyMetrics && KEY_HEAT_COLUMNS.has(col.key)) {
+                const value = metricValue(row, col);
+                const values = rows.map((r) => metricValue(r, col)).filter((v) => typeof v === "number");
+                const min = values.length ? Math.min(...values) : undefined;
+                const max = values.length ? Math.max(...values) : undefined;
+                if (typeof value === "number" && typeof min === "number" && typeof max === "number" && max > min) {
+                  const score = Math.max(0, Math.min(1, (value - min) / (max - min)));
+                  classes.push("metric-heat");
+                  style = ` style="--metric-score:${score.toFixed(3)}"`;
+                }
+              }
+              return `<td class="${classes.filter(Boolean).join(" ")}"${style}>${col.render(row)}</td>`;
+            })
+            .join("");
           return `<tr class="${row.__isPlayerCountry ? "is-player" : ""}">${cells}</tr>`;
         })
         .join("");
@@ -1576,6 +1726,7 @@
     const columns = playerColumnsForCurrentGroup();
     renderSortableTable(playersTableEl, visible, columns, {
       defaultSortKey: columns.some((col) => col.key === "scorePlace") ? "scorePlace" : columns[0] && columns[0].key,
+      colorKeyMetrics: currentPlayerMetricGroup === "key",
       onRender: (container) => {
         container.querySelectorAll(".hide-player-btn").forEach((btn) => {
           btn.addEventListener("click", () => {
@@ -1648,6 +1799,7 @@
     const defaultSortKey = columns.some((col) => col.key === "scorePlace") ? "scorePlace" : columns[0] && columns[0].key;
     countriesController = renderSortableTable(countriesTableEl, filteredCountries(), columns, {
       defaultSortKey,
+      colorKeyMetrics: currentMetricGroup === "key",
     });
   }
 
