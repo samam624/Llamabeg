@@ -818,6 +818,14 @@
     function participantHistory(p) {
       if (Array.isArray(p.history)) return p.history[p.history.length - 1] || {};
       if (p.history && typeof p.history === "object") return p.history;
+      // At least one observed melted text export (game version 1.3.10)
+      // names this field "all_history" instead of "history" - same shape
+      // either way. Binary saves are unaffected (confirmed against a real
+      // 1.3.10 binary autosave - resolves via fixed token 0x3db9 below
+      // regardless of which string the text melter used), so this is a
+      // defensive fallback for the text-format parser only.
+      if (Array.isArray(p.all_history)) return p.all_history[p.all_history.length - 1] || {};
+      if (p.all_history && typeof p.all_history === "object") return p.all_history;
       // Binary saves encode this field as fixed token 0x3db9 in observed
       // EU5 builds. The token table does not name it yet, but the nested
       // shape is identical to melted `history={ request={...} joined={...} }`.
@@ -855,6 +863,14 @@
         combat: typeof score.Combat === "number" ? score.Combat : 0,
         siege: typeof score.Siege === "number" ? score.Siege : 0,
         status: p.status, // Active | Left
+        // Per-participant casualties, same shape/units as the war-wide
+        // attacker_losses/defender_losses below (sumLosses is shared) -
+        // nested one level deeper here, under this participant's own
+        // history.joined.losses, not the war-wide totals. Lets the scoring
+        // engine tell "actually fought" apart from "joined then left without
+        // a single battle" per-country, which the war-wide aggregate can't
+        // do (js/llama-score.js's hasFoughtLosses()).
+        losses: sumLosses(joined.losses),
       });
     }
 

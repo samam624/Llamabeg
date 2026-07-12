@@ -381,6 +381,12 @@ function participantSummary(p) {
     combat: p.combat,
     siege: p.siege,
     status: p.status,
+    // Per-country battle/attrition/capture casualties (js/clausewitz.js's
+    // extractWarFields) - lets the scoring engine tell "actually fought"
+    // apart from "joined then left without a single battle" per participant
+    // (js/llama-score.js's hasFoughtLosses()), which the war-wide
+    // attacker_losses/defender_losses aggregate can't do.
+    losses: p.losses,
   };
 }
 

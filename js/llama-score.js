@@ -195,6 +195,22 @@
   // since both modes share every line of code below except which side of
   // the isPvP flag counts as "in scope" - a bug in one is very likely a bug
   // in both.
+  // A participant who joined a war (or got auto-added via a calledAlly
+  // chain) but never recorded a single Battle or Capture loss never actually
+  // fought - per the user's call, they shouldn't score (win or lose) for
+  // that war, and shouldn't count toward anyone else's E/A either. Attrition
+  // losses (marching/sieging/disease, not combat) deliberately don't count -
+  // same battle+capture distinction battleLossSignal already uses, for the
+  // same reason (attrition accrues to armies stationed in a warzone without
+  // ever fighting). Returns true (count them) when there's no losses data to
+  // check at all - older ledger data predates this field, and "unknown"
+  // shouldn't retroactively exclude someone who may well have fought.
+  function hasFoughtLosses(participant) {
+    const losses = participant && participant.losses;
+    if (!losses) return true;
+    return (losses.battle || 0) + (losses.capture || 0) > 0;
+  }
+
   function computeLlamaScores(result, overrides, excludedPlayers, mode) {
     overrides = overrides || {};
     excludedPlayers = excludedPlayers || new Set();
@@ -218,6 +234,8 @@
     const rows = [];
     for (const war of wars) {
       const heuristic = heuristicWinnerSide(war);
+      const participantByCountry = new Map((war.participants || []).map((p) => [p.country, p]));
+      const fought = (c) => hasFoughtLosses(participantByCountry.get(c));
       for (const participant of war.participants) {
         const country = participant.country;
         if (typeof country !== "number") continue;
@@ -231,13 +249,13 @@
         const ambiguous = candidates.length > 1;
 
         const enemySide = participant.side === "Attacker" ? "Defender" : "Attacker";
-        const enemyCountriesAll = sideCountryList(war.participants, enemySide);
+        const enemyCountriesAll = sideCountryList(war.participants, enemySide).filter(fought);
         const enemyEverPlayer = enemyCountriesAll.filter(isKnownPlayer);
-        const allyCountriesAll = sideCountryList(war.participants, participant.side, country);
+        const allyCountriesAll = sideCountryList(war.participants, participant.side, country).filter(fought);
         const allyEverPlayer = allyCountriesAll.filter(isKnownPlayer);
         // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
         // `presentList` param comment for why this is needed for A.
-        const allySideFull = sideCountryList(war.participants, participant.side);
+        const allySideFull = sideCountryList(war.participants, participant.side).filter(fought);
 
         // Same PvP-only gate as computeFromLedger below: a war only scores
         // if the enemy side has at least one country ever known to be
@@ -294,13 +312,15 @@
         const active = !war.concluded;
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !matchesMode
-            ? mode === "pve"
-              ? "vs-player"
-              : "vs-ai"
-            : mode === "pvp" && enemyActivePlayer.length === 0
-              ? "opponent-departed"
-              : null;
+          : !fought(country)
+            ? "no-battle-losses"
+            : !matchesMode
+              ? mode === "pve"
+                ? "vs-player"
+                : "vs-ai"
+              : mode === "pvp" && enemyActivePlayer.length === 0
+                ? "opponent-departed"
+                : null;
         const hasOverrideExcluded = typeof override.excluded === "boolean";
         // Active wars are unconditionally excluded (no win/loss to score yet)
         // regardless of any override - only a concluded war's exclusion is
@@ -843,6 +863,9 @@
       if (seen.has(keyBase)) continue;
       seen.add(keyBase);
 
+      const participantByCountry = new Map((war.participants || []).map((p) => [p.country, p]));
+      const fought = (c) => hasFoughtLosses(participantByCountry.get(c));
+
       for (const [country, players] of playerCountries.entries()) {
         const side = participantSide(war, country);
         if (side !== "Attacker" && side !== "Defender") continue;
@@ -851,13 +874,13 @@
         const player = override.player || currentPlayers.get(country) || candidates[candidates.length - 1] || null;
         if (!player) continue;
         const enemySide = side === "Attacker" ? "Defender" : "Attacker";
-        const enemyCountriesAll = sideCountries(war, enemySide);
+        const enemyCountriesAll = new Set([...sideCountries(war, enemySide)].filter(fought));
         const enemyEverPlayer = [...enemyCountriesAll].filter((c) => playerCountries.has(c));
-        const allyCountriesAll = sideCountries(war, side, country);
+        const allyCountriesAll = new Set([...sideCountries(war, side, country)].filter(fought));
         const allyEverPlayer = [...allyCountriesAll].filter((c) => playerCountries.has(c));
         // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
         // `presentList` param comment for why this is needed for A.
-        const allySideFull = sideCountries(war, side);
+        const allySideFull = new Set([...sideCountries(war, side)].filter(fought));
 
         // A war only "counts" as PvP if the enemy side has at least one
         // country that was ever recorded as player-controlled in this
@@ -927,15 +950,17 @@
         const enemyActivePlayer = enemyEverPlayer.filter((c) => !departedBy(c, event.date) && !excludedPlayers.has(attributedPlayerFor(c)));
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !matchesMode
-            ? mode === "pve"
-              ? "vs-player"
-              : "vs-ai"
-            : selfDeparted
-              ? "player-departed"
-              : mode === "pvp" && enemyActivePlayer.length === 0
-                ? "opponent-departed"
-                : null;
+          : !fought(country)
+            ? "no-battle-losses"
+            : !matchesMode
+              ? mode === "pve"
+                ? "vs-player"
+                : "vs-ai"
+              : selfDeparted
+                ? "player-departed"
+                : mode === "pvp" && enemyActivePlayer.length === 0
+                  ? "opponent-departed"
+                  : null;
         const hasOverrideExcluded = typeof override.excluded === "boolean";
         const excluded = hasOverrideExcluded ? override.excluded : autoExcludeReason !== null;
 

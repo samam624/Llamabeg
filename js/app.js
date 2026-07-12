@@ -578,6 +578,7 @@
     "player-departed": "Auto-excluded: this player was no longer controlling this country by the time the war ended (recorder saw the country revert to AI). Uncheck to score it anyway.",
     "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign by its end (fighting an abandoned country doesn't score). Uncheck to score it anyway.",
     "player-hidden": "Auto-excluded: you've hidden this player in the Players table (Hide button) as departed - unhide them there to include their wars again.",
+    "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. Uncheck to score it anyway.",
   };
   function autoExcludeBadge(reason) {
     if (!reason || !AUTO_EXCLUDE_TITLES[reason]) return "";
