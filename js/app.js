@@ -42,6 +42,7 @@
   const savesLibraryPanel = document.getElementById("savesLibraryPanel");
   const savesLibraryTableEl = document.getElementById("savesLibraryTable");
   const copyLinkBtn = document.getElementById("copyLinkBtn");
+  const themeToggleBtn = document.getElementById("themeToggleBtn");
   const pendingShareNoticeEl = document.getElementById("pendingShareNotice");
   const countryMetricTabs = document.querySelectorAll("#metricTabs .metric-tab");
   const playerMetricTabs = document.querySelectorAll("#playerMetricTabs .metric-tab");
@@ -80,6 +81,7 @@
   let llamaAutoLinked = false;
   let currentLlamaDraw = null; // stores the currently-active mode's draw() so the AI-wars toggle can re-render on demand
   const LLAMA_SHOW_TOGGLE_KEY = "eu5-analyzer-llama-show-toggle";
+  const THEME_KEY = "eu5-analyzer-theme";
   // PVP (default) scores player-vs-player wars, same as always. PVE scores
   // the SAME wars/formula but for the opposite isPvP split - a player's
   // performance against AI - which doubles as a live sanity-check of the
@@ -477,23 +479,6 @@
     return typeof v === "number" ? v : undefined;
   }
 
-  // Green (least population lost, "won" against the plague) to red (most
-  // lost) - scaled relative to THIS save's own min/max (set by
-  // renderBlackDeath below) rather than a fixed 0-100% axis, since real
-  // per-country tallies cluster in a fairly narrow band (e.g. 20-40%) that
-  // would otherwise all read as a near-identical color against the full
-  // range.
-  const LOSS_PCT_GOOD_RGB = [111, 207, 151]; // --good
-  const LOSS_PCT_BAD_RGB = [235, 87, 87]; // --bad
-  let blackDeathLossRange = { min: 0, max: 1 };
-  function lossPctColor(pct) {
-    const { min, max } = blackDeathLossRange;
-    const span = max - min;
-    const t = span > 0 ? Math.max(0, Math.min(1, (pct - min) / span)) : 0;
-    const rgb = LOSS_PCT_GOOD_RGB.map((g, i) => Math.round(g + (LOSS_PCT_BAD_RGB[i] - g) * t));
-    return `rgb(${rgb.join(",")})`;
-  }
-
   const BLACK_DEATH_COLUMNS = [
     {
       key: "tag",
@@ -508,10 +493,9 @@
       key: "popLossPct",
       label: "Lost %",
       numeric: true,
-      render: (c) =>
-        typeof c.popLossPct === "number"
-          ? `<span style="color:${lossPctColor(c.popLossPct)}; font-weight:600;">${(c.popLossPct * 100).toFixed(1)}%</span>`
-          : "-",
+      heatColumn: true,
+      lowerIsBetter: true,
+      render: (c) => (typeof c.popLossPct === "number" ? `${(c.popLossPct * 100).toFixed(1)}%` : "-"),
     },
   ];
 
@@ -552,12 +536,9 @@
         return { ...c, popAtStart, deaths, popLossPct };
       });
 
-    const lossValues = rows.map((r) => r.popLossPct).filter((v) => typeof v === "number");
-    blackDeathLossRange = lossValues.length ? { min: Math.min(...lossValues), max: Math.max(...lossValues) } : { min: 0, max: 1 };
-
     // Ascending (lowest Lost % first) - the least-affected country is the
     // "winner" of the outbreak, per the tab's rename.
-    renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct", defaultSortDir: 1 });
+    renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct", defaultSortDir: 1, colorKeyMetrics: true });
   }
 
   // --- Llama score (js/llama-score.js) ---
@@ -666,9 +647,23 @@
     "post-war-land-transfer-coalition":
       "Land changed hands, but only measured across the whole side (including any vassals/allies dragged in) rather than just the war's original two declared belligerents - a real signal, just less precise than a clean 1-on-1 comparison.",
   };
+  // War score/prestige/battle-losses no longer decide a winner on their own
+  // (see inferOutcome() in either file) - they're attached to every outcome
+  // as contributingFactors so the reasoning stays auditable even though
+  // only a land or gold exchange between the two principals can crown a
+  // winner. Surfaced here as an extra tooltip line rather than a silent
+  // internal-only field, per the user's "list them as contributing factors"
+  // request.
+  const CONTRIBUTING_FACTOR_LABELS = { "war-score": "war score", "prestige-swing": "prestige", "battle-losses": "battle losses" };
+  function contributingFactorsNote(w) {
+    const factors = w.contributingFactors || [];
+    if (!factors.length) return "";
+    const parts = factors.map((f) => `${CONTRIBUTING_FACTOR_LABELS[f.signal] || f.signal} leaned ${f.winnerSide}`);
+    return `Considered but not decisive: ${parts.join("; ")}.`;
+  }
   function renderLlamaReason(w) {
     const label = LLAMA_REASON_LABELS[w.reason] || w.reason || "Unknown";
-    const tooltip = LLAMA_REASON_TOOLTIPS[w.reason] || "";
+    const tooltip = [LLAMA_REASON_TOOLTIPS[w.reason] || "", contributingFactorsNote(w)].filter(Boolean).join(" ");
     const cls = w.confidence === "high" ? "llama-confidence-high" : w.confidence === "medium" ? "llama-confidence-medium" : w.confidence === "low" ? "llama-confidence-low" : "";
     return `<span class="${cls}" title="${escapeHtml(tooltip)}">${escapeHtml(label)}</span>`;
   }
@@ -761,7 +756,13 @@
       leaderboardEl.innerHTML = '<p class="panel-note">No players found.</p>';
       return;
     }
-    leaderboardEl.innerHTML = '<div id="llamaLeaderboardChart"></div>';
+    leaderboardEl.innerHTML = '<div id="llamaLeaderboardChart" class="trend-chart-wrap"></div>';
+    // Ledger-mode leaderboards (js/llama-score.js's computeFromLedger) don't
+    // carry a country color - the recorder's compact snapshot format doesn't
+    // store it - but the save actually loaded in this browser tab (always
+    // present, ledger mode or not) has the real thing, so fall back to
+    // looking it up there by tag rather than leaving those bars uncolored.
+    const tagToColor = new Map((latestResult && latestResult.countries ? latestResult.countries : []).filter((c) => c.tag && c.color).map((c) => [c.tag, c.color]));
     // PVE's points are relabeled "Alpaca Points" per the user's request -
     // same underlying computation/formula (llamaPoints field, unchanged) as
     // PVP's "Llama Points", just a different name so the two are never
@@ -772,11 +773,12 @@
         label: `${l.player} (${l.countryTag || "?"})`,
         player: l.player,
         countryTag: l.countryTag,
+        color: l.color || (l.countryTag ? tagToColor.get(l.countryTag) : null),
         total: Math.round((l.llamaPoints || 0) * 100) / 100,
         segments: [
-          { label: "GP contribution", color: "#5b9dd9", value: Math.round(((l.gpScore || 0) / 100) * 100) / 100 },
-          { label: "War contribution", color: "#6fcf97", value: Math.round((l.vpPositive || 0) * 100) / 100 },
-          { label: "Negative war score", color: "#eb5757", value: Math.round((l.vpNegative || 0) * 100) / 100 },
+          { label: "GP contribution", color: "#a9822f", value: Math.round(((l.gpScore || 0) / 100) * 100) / 100 },
+          { label: "War contribution", color: "#1f7a3d", value: Math.round((l.vpPositive || 0) * 100) / 100 },
+          { label: "Negative war score", color: "#a1442f", value: Math.round((l.vpNegative || 0) * 100) / 100 },
         ],
       })),
     });
@@ -1700,8 +1702,8 @@
   // shade based on how catastrophically negative it is (how much worse
   // -50% is than -5000% isn't a meaningful distinction to color-code), and
   // 0-100% gets the actual gradient.
-  function heatScoreFor(col, value, rows) {
-    if (col.key === "efficiency") {
+  function heatScoreFor(col, value, rows, relativeEfficiencyHeat) {
+    if (col.key === "efficiency" && !relativeEfficiencyHeat) {
       if (typeof value !== "number") return undefined;
       return value <= 0 ? 0 : Math.min(1, value);
     }
@@ -1709,7 +1711,8 @@
     const min = values.length ? Math.min(...values) : undefined;
     const max = values.length ? Math.max(...values) : undefined;
     if (typeof value !== "number" || typeof min !== "number" || typeof max !== "number" || max <= min) return undefined;
-    return Math.max(0, Math.min(1, (value - min) / (max - min)));
+    const score = Math.max(0, Math.min(1, (value - min) / (max - min)));
+    return col.lowerIsBetter ? 1 - score : score;
   }
 
   // Income/mo first (when the current metric group shows it - Key and
@@ -1757,9 +1760,9 @@
             .map((col) => {
               const classes = [col.numeric ? "num" : ""];
               let style = "";
-              if (options.colorKeyMetrics && KEY_HEAT_COLUMNS.has(col.key)) {
+              if (options.colorKeyMetrics && (KEY_HEAT_COLUMNS.has(col.key) || col.heatColumn)) {
                 const value = metricValue(row, col);
-                const score = heatScoreFor(col, value, rows);
+                const score = heatScoreFor(col, value, rows, options.relativeEfficiencyHeat);
                 if (typeof score === "number") {
                   classes.push("metric-heat");
                   style = ` style="--metric-score:${score.toFixed(3)}"`;
@@ -1825,6 +1828,11 @@
     renderSortableTable(playersTableEl, visible, columns, {
       defaultSortKey: defaultSortKeyFor(columns),
       colorKeyMetrics: currentPlayerMetricGroup === "key",
+      // Unlike the Countries table (1000+ rows, real risk of a catastrophic
+      // outlier squishing everyone else into a thin green sliver - see
+      // heatScoreFor), the Players table is a handful of rows where relative
+      // worst-to-best ranking is exactly what's useful.
+      relativeEfficiencyHeat: true,
       onRender: (container) => {
         container.querySelectorAll(".hide-player-btn").forEach((btn) => {
           btn.addEventListener("click", () => {
@@ -2070,6 +2078,42 @@
       })
       .catch(() => {});
   });
+
+  // The inline <script> in index.html's <head> already stamped data-theme
+  // from localStorage (if any) before this file even loaded, to avoid a
+  // flash of the wrong theme - this just keeps the toggle button's own icon
+  // in sync with whatever's actually in effect. Dark is the default (an
+  // explicit product choice, not tied to OS preference) - only an explicit
+  // "light" ever switches it, so anything else (unset, or literally "dark")
+  // counts as dark.
+  function currentEffectiveTheme() {
+    return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  }
+
+  function syncThemeToggleButton() {
+    const isDark = currentEffectiveTheme() === "dark";
+    themeToggleBtn.textContent = isDark ? "☀" : "☾"; // sun (switch to light) / crescent moon (switch to dark)
+    themeToggleBtn.title = isDark ? "Switch to light mode" : "Switch to dark mode";
+    themeToggleBtn.setAttribute("aria-label", themeToggleBtn.title);
+  }
+
+  themeToggleBtn.addEventListener("click", () => {
+    const next = currentEffectiveTheme() === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (e) {}
+    syncThemeToggleButton();
+    // Re-render whatever's currently drawn so already-built charts (which
+    // bake resolved colors into their SVG at render time, not live CSS
+    // references) pick up the new theme's tokens immediately instead of
+    // only on the next data change.
+    if (latestResult) {
+      renderTrends(latestResult);
+      if (currentLlamaDraw) currentLlamaDraw();
+    }
+  });
+  syncThemeToggleButton();
 
   updateLlamaPanelVisibility();
   initFromShareUrl();

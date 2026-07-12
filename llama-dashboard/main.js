@@ -263,11 +263,30 @@ function buildOngoingWars(latestSnapshot, mode) {
   if (!latestSnapshot) return [];
   const countries = Object.assign({}, latestSnapshot.countries, latestSnapshot.economyCountries);
   const playerCountryNums = new Set((latestSnapshot.playerCountries || []).map((c) => c.number));
+  // Same subject-collapsing js/llama-score.js already applies to concluded-
+  // war scoring (excludeSubjectsOfPresentOverlords) - a war side listing
+  // "the Ottomans + 3 vassals" should read as one belligerent, not four,
+  // here too. Never drops an actual player's own country even if their
+  // overlord is also on the same side - hiding a real player from their own
+  // war would be worse than the vassal clutter this is fixing.
+  function overlordOf(n) {
+    const info = countries[n] || (latestSnapshot.playerCountries || []).find((c) => c.number === n);
+    return info && typeof info.overlord === "number" ? info.overlord : undefined;
+  }
+  function collapseSubjects(numbers) {
+    return LlamaScore.excludeSubjectsOfPresentOverlords(
+      numbers,
+      (n) => (playerCountryNums.has(n) ? undefined : overlordOf(n)),
+      numbers
+    );
+  }
   return (latestSnapshot.wars || [])
     .filter((w) => !w.concluded)
     .map((w) => {
-      const attackers = ((w.sides && w.sides.Attacker) || []).map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
-      const defenders = ((w.sides && w.sides.Defender) || []).map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
+      const attackerNums = collapseSubjects((w.sides && w.sides.Attacker) || []);
+      const defenderNums = collapseSubjects((w.sides && w.sides.Defender) || []);
+      const attackers = attackerNums.map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
+      const defenders = defenderNums.map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
       const isPvP = attackers.some((a) => playerCountryNums.has(a.number)) && defenders.some((d) => playerCountryNums.has(d.number));
       return { warNumber: w.number, startDate: w.startDate, attackers, defenders, isPvP };
     })

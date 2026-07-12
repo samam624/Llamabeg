@@ -33,8 +33,20 @@ const REASON_TOOLTIPS = {
 function reasonLabel(reason) {
   return REASON_LABELS[reason] || reason || "Unknown";
 }
-function reasonTooltip(reason) {
-  return REASON_TOOLTIPS[reason] || "";
+// War score/prestige/battle-losses no longer decide a winner on their own
+// (see inferOutcome() in js/llama-score.js or llama-log-machine.js) - they're
+// attached to every outcome as contributingFactors so the reasoning stays
+// auditable even though only a land or gold exchange between the two
+// principals can crown a winner. Surfaced here as an extra tooltip line.
+const CONTRIBUTING_FACTOR_LABELS = { "war-score": "war score", "prestige-swing": "prestige", "battle-losses": "battle losses" };
+function contributingFactorsNote(w) {
+  const factors = w.contributingFactors || [];
+  if (!factors.length) return "";
+  const parts = factors.map((f) => `${CONTRIBUTING_FACTOR_LABELS[f.signal] || f.signal} leaned ${f.winnerSide}`);
+  return `Considered but not decisive: ${parts.join("; ")}.`;
+}
+function reasonTooltip(w) {
+  return [REASON_TOOLTIPS[w.reason] || "", contributingFactorsNote(w)].filter(Boolean).join(" ");
 }
 const CONFIDENCE_CLASS = { high: "confidence-high", medium: "confidence-medium", low: "confidence-low", unknown: "confidence-unknown" };
 
@@ -147,7 +159,7 @@ function renderConcludedWars(mode, wars) {
       <td>${renderConcludedSide(w.attackers)}</td>
       <td>${renderConcludedSide(w.defenders)}</td>
       <td>${renderResult(w)}</td>
-      <td><span class="${confClass}" title="${escapeHtml(reasonTooltip(w.reason))}">${escapeHtml(reasonLabel(w.reason))}</span></td>
+      <td><span class="${confClass}" title="${escapeHtml(reasonTooltip(w))}">${escapeHtml(reasonLabel(w.reason))}</span></td>
     </tr>`;
     })
     .join("");

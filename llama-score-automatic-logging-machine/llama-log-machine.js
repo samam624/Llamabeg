@@ -514,20 +514,28 @@ function economicOutcomeSignal(war, economy) {
   const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
   const aGoldR = resolveSideField(economy.Attacker, attackerPrincipals, "goldDelta");
   const dGoldR = resolveSideField(economy.Defender, defenderPrincipals, "goldDelta");
-  const aPrestR = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta");
-  const dPrestR = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta");
 
   const aGold = aGoldR.value;
   const dGold = dGoldR.value;
-  const aPrestige = aPrestR.value;
-  const dPrestige = dPrestR.value;
   const aLocations = aLoc.value;
   const dLocations = dLoc.value;
   const signals = [];
 
   if (typeof aLocations === "number" && typeof dLocations === "number") {
     const spread = aLocations - dLocations;
-    if (Math.abs(spread) >= 2 && Math.sign(aLocations) !== Math.sign(dLocations)) {
+    // Both principal sides must show a REAL (nonzero) location change for
+    // this to be evidence of land actually exchanged between THEM
+    // specifically. Confirmed on real data (pure-reparations wars where the
+    // loser paid gold only): the loser's own location delta was exactly 0
+    // while the winner's showed an unrelated nonzero swing (some other war/
+    // colonization concluding in the same snapshot window, not land taken
+    // from this opponent) - the old check treated 0 as "opposite sign" from
+    // any nonzero value and wrongly called that a clean two-sided transfer.
+    // A genuine bilateral transfer moves both sides' counts in real,
+    // opposite directions (e.g. -24 / +24, an exact mirror); one side
+    // sitting at exactly 0 proves nothing came from/went to this opponent,
+    // whatever the other side's unrelated change was.
+    if (aLocations !== 0 && dLocations !== 0 && Math.abs(spread) >= 2 && Math.sign(aLocations) !== Math.sign(dLocations)) {
       const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
       signals.push({
         winnerSide: spread > 0 ? "Attacker" : "Defender",
@@ -573,21 +581,32 @@ function economicOutcomeSignal(war, economy) {
     }
   }
 
-  if (typeof aPrestige === "number" && typeof dPrestige === "number") {
-    const spread = aPrestige - dPrestige;
-    if (Math.abs(spread) >= 5) {
-      signals.push({
-        winnerSide: spread > 0 ? "Attacker" : "Defender",
-        loserSide: spread > 0 ? "Defender" : "Attacker",
-        reason: "post-war-prestige-swing",
-        strength: Math.abs(spread) * 10,
-      });
-    }
-  }
+  // Prestige deliberately NOT considered here anymore - see prestigeSignal
+  // below and inferOutcome's comment for why it's a contributing factor
+  // only, never decisive on its own.
 
   if (!signals.length) return null;
   signals.sort((a, b) => b.strength - a.strength);
   return signals[0];
+}
+
+// Prestige swing alone (diplomatic reputation, not land or gold) - kept as a
+// CONTRIBUTING factor only (see inferOutcome), never decisive: unlike
+// land/gold, prestige moves constantly for reasons that have nothing to do
+// with a specific war (tech, religion, other diplomacy elsewhere), so
+// trusting it to crown a winner risks the exact same false-positive shape
+// economicOutcomeSignal's own nonzero-both-sides fix just had to correct
+// for location counts.
+function prestigeSignal(war, economy) {
+  if (!economy || !economy.Attacker || !economy.Defender) return null;
+  const attackerPrincipals = principalCountrySet(war.originalAttacker);
+  const defenderPrincipals = principalCountrySet(war.originalDefenders);
+  const aPrestige = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta").value;
+  const dPrestige = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta").value;
+  if (typeof aPrestige !== "number" || typeof dPrestige !== "number") return null;
+  const spread = aPrestige - dPrestige;
+  if (Math.abs(spread) < 5) return null;
+  return { winnerSide: spread > 0 ? "Attacker" : "Defender" };
 }
 
 // Battle-inflicted casualties (Battle+Capture, NOT Attrition) compared
@@ -623,55 +642,48 @@ function inferOutcome(war, disappeared, economy) {
   const aScore = war.attackerScore;
   const dScore = war.defenderScore;
   const lossSignal = battleLossSignal(war);
+  const scoreSignal =
+    typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore
+      ? { winnerSide: aScore > dScore ? "Attacker" : "Defender" }
+      : null;
+  const prestSignal = prestigeSignal(war, economy);
 
-  // Applied to every call below, regardless of which signal made it: an
-  // independently-derived battle-losses margin that agrees raises
-  // confidence a notch (two signals derived from completely different data
-  // pointing the same way is real corroboration); one that disagrees is
-  // flagged (not overridden - occupation/war-score are still more direct
-  // evidence of the territorial/diplomatic outcome than casualties, which a
-  // winning invader can still rack up) rather than silently trusted or
-  // silently ignored. A war that stalled for years before ending is more
-  // likely a negotiated/stalemate result than a clean decisive one, so a
-  // long stall knocks confidence back down a notch no matter the source.
+  // Per the user's call (js/llama-score.js's copy of this function has the
+  // full writeup, kept in sync deliberately): war score, prestige, and
+  // battle losses never decide a winner on their own anymore - each one
+  // moves for reasons that don't reliably track who actually won THIS
+  // specific war (a two-sided war score is frequently a partial-clear
+  // artifact from EU5's own end-of-war cleanup; prestige swings constantly
+  // for reasons unrelated to a specific war; a winning invader can still
+  // rack up heavy battle losses). Only land or gold actually changing hands
+  // between the two principals (economicOutcomeSignal) decides who won;
+  // everything else is attached below as contributingFactors so the
+  // reasoning stays visible/auditable without ever being trusted to pick a
+  // side by itself - not even when several of them happen to agree.
   function finalize(result) {
     let confidence = result.confidence;
     let lossSignalAgrees = null;
-    if (lossSignal && result.reason !== "battle-losses-inflicted") {
+    if (lossSignal && result.winnerSide != null) {
       lossSignalAgrees = lossSignal.winnerSide === result.winnerSide;
       confidence = shiftConfidence(confidence, lossSignalAgrees ? 1 : 0);
     }
     if (typeof war.stalledYears === "number" && war.stalledYears >= 2) {
       confidence = shiftConfidence(confidence, -1);
     }
-    return { ...result, confidence, lossSignalAgrees };
+    const contributingFactors = [];
+    if (scoreSignal) contributingFactors.push({ signal: "war-score", winnerSide: scoreSignal.winnerSide });
+    if (prestSignal) contributingFactors.push({ signal: "prestige-swing", winnerSide: prestSignal.winnerSide });
+    if (lossSignal) contributingFactors.push({ signal: "battle-losses", winnerSide: lossSignal.winnerSide });
+    return { ...result, confidence, lossSignalAgrees, contributingFactors, attackerScore: aScore, defenderScore: dScore };
   }
 
-  if (typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore) {
-    return finalize({
-      winnerSide: aScore > dScore ? "Attacker" : "Defender",
-      loserSide: aScore > dScore ? "Defender" : "Attacker",
-      confidence: disappeared ? "medium" : "low",
-      reason: "last-known-war-score",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    });
-  }
-
-  // Before/after territory and treasury change (economicOutcomeSignal)
-  // outranks occupation-during-the-war below - it measures the actual,
-  // formalized CONSEQUENCE of the peace deal (who really ended up with the
-  // land or the gold), where occupation-during-the-war is only ever a
-  // proxy for what the eventual peace *might* do. Confirmed directly on 5
-  // real wars from the same campaign: occupation called 4 of them for the
-  // wrong side, but comparing each side's location/gold count just before
-  // the war disappeared vs. just after matched the true outcome on all 5 -
-  // including two wars where no land changed hands at all (a pure monetary
-  // reparation) that occupation had nothing useful to say about regardless.
-  // Land transfer gets "high" confidence (about as unambiguous as this
-  // game's data gets); gold/prestige-only signals get "medium" (real, but a
-  // country's treasury swings for other reasons too, just less commonly by
-  // this much right as a war ends).
+  // The only decisive check in this function: before/after territory and
+  // treasury change, restricted to the war's two original principals (see
+  // economicOutcomeSignal's own comments for the nonzero-both-sides fix and
+  // the principal/coalition split). Land transfer gets "high" confidence
+  // (about as unambiguous as this game's data gets); a gold-only signal
+  // gets "medium" (real, but a country's treasury swings for other reasons
+  // too, just less commonly by this much right as a war ends).
   const economicSignal = economicOutcomeSignal(war, economy);
   if (economicSignal) {
     return finalize({
@@ -679,69 +691,30 @@ function inferOutcome(war, disappeared, economy) {
       loserSide: economicSignal.loserSide,
       confidence: economicSignal.reason === "post-war-land-transfer" ? "high" : "medium",
       reason: economicSignal.reason,
-      attackerScore: aScore,
-      defenderScore: dScore,
     });
   }
 
-  // Occupation counts outrank a SINGLE-sided leftover score (only one of
-  // attacker_score/defender_score still present, the other already null).
-  // Confirmed wrong on real data: a war where the attacker held 238 of 259
-  // contested locations (92%) - about as decisive an occupation result as
-  // this game produces - still had a lone defenderScore=5 lingering, and
-  // the old priority order trusted that residual over the occupation split,
-  // calling a Defender win the user confirmed was actually a clear Attacker
-  // win. A single leftover score value is most likely a partial-clear
-  // artifact from EU5's own end-of-war cleanup (the module doc above notes
-  // both fields normally clear together), not a real signal - unlike a
-  // *direct* two-sided comparison (both scores present at once, checked
-  // first above) or the physical occupation snapshot, so it's now only
-  // consulted as a fallback when occupation itself has nothing to say.
-  const occ = war.occupation || {};
-  if (typeof occ.attackerLocations === "number" && typeof occ.defenderLocations === "number" && occ.attackerLocations !== occ.defenderLocations) {
-    return finalize({
-      winnerSide: occ.attackerLocations > occ.defenderLocations ? "Attacker" : "Defender",
-      loserSide: occ.attackerLocations > occ.defenderLocations ? "Defender" : "Attacker",
-      confidence: "medium",
-      reason: "occupied-location-count",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    });
-  }
+  // Deliberately NOT falling back to war.occupation (who's occupying more
+  // contested territory at the moment the war disappears) here - confirmed
+  // wrong on real data twice now (see js/llama-score.js's copy of this
+  // function): occupation called 4 of 5 real wars for the wrong side even
+  // as the PRIMARY signal. Occupying land mid-war is not the same as
+  // keeping it - only the economic/land-transfer signal above (a real
+  // before/after comparison) can tell those apart, so this heuristic is
+  // retired rather than kept as a lower-confidence guess.
 
-  // Occupation and the economic signal both had nothing decisive to say -
-  // a clear battle-losses margin is the last real signal left, since it's
-  // derived from the whole side's actual combat performance across every
-  // participant, not a possibly-stale residual value.
-  if (lossSignal) {
-    return finalize({
-      winnerSide: lossSignal.winnerSide,
-      loserSide: lossSignal.winnerSide === "Attacker" ? "Defender" : "Attacker",
-      confidence: "low",
-      reason: lossSignal.reason,
-      attackerScore: aScore,
-      defenderScore: dScore,
-    });
-  }
-
-  // Deliberately NOT falling back to a lone single-sided leftover
-  // attacker_score/defender_score here (removed per user request, was
-  // "last-known-single-sided-attacker/defender-score"). EU5 normally
-  // clears both sides' war score together when a war ends; a single
-  // surviving value is a partial-clear artifact, not a real two-sided
-  // comparison, and guessing a winner off it was a weaker signal than
-  // everything else in this function - falls through to the no-winner
-  // default below instead. The genuine two-sided score check earlier in
-  // this function is untouched, only this single-sided fallback is gone.
-
-  return {
+  // No land or gold actually changed hands between the two principals -
+  // default to White Peace. War score/prestige/battle-losses are still
+  // attached as contributingFactors above for anyone auditing the call, but
+  // per the user's call none of them gets to crown a winner on its own - a
+  // white peace costs nothing to get right, and the per-row manual override
+  // still corrects it if this genuinely was decisive.
+  return finalize({
     winnerSide: null,
     loserSide: null,
     confidence: "unknown",
     reason: disappeared ? "war-disappeared-without-decisive-signal" : "active-or-tied",
-    attackerScore: aScore,
-    defenderScore: dScore,
-  };
+  });
 }
 
 function warSummary(war) {
