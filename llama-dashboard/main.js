@@ -12,11 +12,15 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
-const RECORDER_DEFAULT_SAVE_DIR = "C:\\Users\\samca\\Documents\\Paradox Interactive\\Europa Universalis V\\save games";
-// Points at the same data dir the web app's "Connect campaign folder..."
-// picker already reads from, so this dashboard and the web app share one
-// ledger rather than starting a second, disconnected one.
-const KNOWN_PROJECT_DATA_DIR = "C:\\Users\\samca\\Desktop\\EU5 Save Analyzer\\llama-score-automatic-logging-machine\\data";
+// Ledger lives next to the exe in a packaged (unzipped-and-run) install, so
+// a fresh download "just works" - the web app's "Connect campaign folder..."
+// picker then points at that same sibling `data` folder to share one ledger
+// instead of starting a second, disconnected one. In dev (`npm start`),
+// falls back to the repo's shared recorder data dir instead.
+function defaultDataDir() {
+  if (app.isPackaged) return path.join(path.dirname(process.execPath), "data");
+  return path.join(__dirname, "..", "llama-score-automatic-logging-machine", "data");
+}
 
 function vendorPath(...parts) {
   return app.isPackaged ? path.join(process.resourcesPath, "app", "vendor", ...parts) : path.join(__dirname, "..", ...parts);
@@ -48,8 +52,7 @@ function buildConfig() {
   if (settings.saveDir) args.saveDir = settings.saveDir;
   if (settings.dataDir) args.dataDir = settings.dataDir;
   const config = Recorder.readConfig(args);
-  if (!settings.saveDir) config.saveDir = RECORDER_DEFAULT_SAVE_DIR;
-  if (!settings.dataDir) config.dataDir = KNOWN_PROJECT_DATA_DIR;
+  if (!settings.dataDir) config.dataDir = defaultDataDir();
   config.campaignsDir = path.join(config.dataDir, "campaigns");
   return config;
 }
@@ -361,8 +364,8 @@ ipcMain.handle("campaigns:select", (_event, campaignKey) => {
 ipcMain.handle("settings:get", () => {
   const settings = loadSettings();
   return {
-    saveDir: settings.saveDir || RECORDER_DEFAULT_SAVE_DIR,
-    dataDir: settings.dataDir || KNOWN_PROJECT_DATA_DIR,
+    saveDir: settings.saveDir || Recorder.DEFAULT_CONFIG.saveDir,
+    dataDir: settings.dataDir || defaultDataDir(),
   };
 });
 

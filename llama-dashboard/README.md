@@ -11,9 +11,10 @@ A desktop window version of the Llama Score recorder
   exchanged on each side, and the Llama Points leaderboard.
 
 It reads/writes the **same ledger** the web app's "Connect campaign
-folder..." button already points at
-(`../llama-score-automatic-logging-machine/data` by default), so anything
-this app records is immediately visible to the web app too, and vice versa.
+folder..." button already points at - a `data` folder it creates right next
+to the .exe in a packaged build (`../llama-score-automatic-logging-machine/data`
+in dev, via `npm start`) - so anything this app records is immediately
+visible to the web app too, and vice versa.
 
 **Don't run `node llama-log-machine.js` (the standalone CLI recorder) at the
 same time as this app against the same data folder** - both would append to
@@ -65,8 +66,16 @@ copy is a snapshot, not a live link.
 
 The **Settings** button in the app lets you point it at a different save
 folder or data folder (persisted to this app's own user-data folder, not
-this repo) - defaults are the same ones the CLI recorder and web app already
-use. Changing either restarts the embedded watcher.
+this repo). Defaults, no configuration needed for a typical single-PC
+install:
+
+- **EU5 save folder** - `Documents\Paradox Interactive\Europa Universalis V\save games`
+  under the current Windows user, same default the CLI recorder uses.
+- **Ledger data folder** - a `data` folder created next to
+  `Llama Score Dashboard.exe` (in a packaged build) - the same folder the web
+  app's "Connect campaign folder..." should be pointed at.
+
+Changing either restarts the embedded watcher.
 
 ## Architecture notes
 

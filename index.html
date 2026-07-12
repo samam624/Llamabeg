@@ -4,15 +4,29 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Llamabeg</title>
-  <link rel="icon" href="assets/llama-logo-avatar.png" onerror="this.remove()" />
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="assets/llama-logo-avatar.png?v=ui-20260712-ledger-reskin6" onerror="this.remove()" />
+  <link rel="stylesheet" href="css/style.css?v=ui-20260712-ledger-reskin7" />
+  <script>
+    // Applied synchronously, before the stylesheet paints anything, so a
+    // returning visitor's saved preference never flashes the other theme
+    // first. No preference saved yet -> no data-theme attribute at all,
+    // which is exactly what css/style.css's plain :root (the dark palette,
+    // the app's default) already renders - dark isn't tied to OS preference,
+    // only an explicit "light" choice ever overrides it.
+    (function () {
+      try {
+        var saved = localStorage.getItem("eu5-analyzer-theme");
+        if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <header class="app-header">
-    <div class="app-logo-frame"><img class="app-logo" src="assets/llama-logo-avatar.png" alt="" onerror="this.parentElement.style.display='none'" /></div>
+    <div class="app-logo-frame"><img class="app-logo" src="assets/llama-logo-avatar.png?v=ui-20260712-ledger-reskin6" alt="" onerror="this.parentElement.style.display='none'" /></div>
     <div class="app-header-text">
       <h1>Llamabeg</h1>
-      <p class="subtitle">Drop in an Europa Universalis V save (compressed or melted) to see players, countries, and world stats.</p>
+      <p class="subtitle">A Europa Universalis V save analyzer and automatic multiplayer scoring system</p>
     </div>
     <a class="app-download-btn" href="https://github.com/samam624/EU5-Save-Analyzer/releases/download/llama-dashboard-v1.0.0/Llama-Score-Dashboard-win32-x64.zip" download>
       <span aria-hidden="true">&#128421;&#65039;</span>
@@ -21,6 +35,7 @@
         <small>Windows desktop app &middot; live war tracking &middot; ~110MB .zip</small>
       </span>
     </a>
+    <button type="button" id="themeToggleBtn" class="theme-toggle-btn" title="Switch to light mode" aria-label="Switch to light mode">&#9728;</button>
   </header>
 
   <main>
@@ -141,15 +156,23 @@
             <summary>Llama Score User Manual</summary>
             <ol class="llama-manual-steps">
               <li>
-                Download the <strong>Llama Score Dashboard</strong> (the button at the top of this page) and unzip it anywhere on your
-                PC - it's a small Windows desktop app that embeds the same recorder described below, with a live view of ongoing and
-                concluded wars.
+                Download the <strong>Llama Score Dashboard</strong> (the button at the top of this page). It comes as a .zip - unzip the
+                whole thing into a permanent folder first (e.g. your <code>Desktop</code> or <code>Documents</code>), not left inside
+                Downloads or a still-zipped view. Everything in that folder needs to stay together and stay put, since it's where the
+                Dashboard will also keep its recorded ledger.
               </li>
               <li>
-                Run <code>Llama Score Dashboard.exe</code> from the unzipped folder and leave it running in the background while you
-                play (right-click the exe &rarr; "Send to" &rarr; "Desktop (create shortcut)" if you want it easy to relaunch next
-                time). It watches your EU5 <code>save games</code> folder automatically - no configuration needed unless your saves
-                live somewhere non-default.
+                Run <code>Llama Score Dashboard.exe</code> from that folder and leave it running in the background while you play
+                (right-click the exe &rarr; "Send to" &rarr; "Desktop (create shortcut)" if you want it easy to relaunch next time). Its
+                <strong>Settings</strong> button controls two folders, both already defaulted for a typical install:
+                <ul>
+                  <li><strong>EU5 save folder</strong> - where it watches for new autosaves. Defaults to your own
+                    <code>Documents\Paradox Interactive\Europa Universalis V\save games</code>. Only change this if your saves live
+                    somewhere non-default (a different drive, a custom Documents location, etc).</li>
+                  <li><strong>Ledger data folder</strong> - where it records what it sees. Defaults to a <code>data</code> folder it
+                    creates right next to the .exe - this is the same folder you'll point this webpage at in the next step. Only change
+                    this if you specifically want the ledger stored somewhere else; most people never need to touch it.</li>
+                </ul>
               </li>
               <li>
                 Play normally. EU5 autosaves periodically; the Dashboard reads each new one as it lands and builds up a running log of
@@ -158,8 +181,9 @@
               </li>
               <li>
                 Come back to this tab any time you want to check scores. Click <strong>"Connect campaign folder&hellip;"</strong> below
-                (one-time per browser) and pick the <code>data</code> folder inside wherever you unzipped the Dashboard - after that,
-                loading any save from a linked campaign shows its Llama Score automatically, no more picking required.
+                (one-time per browser) and pick the <code>data</code> folder that appeared next to <code>Llama Score Dashboard.exe</code>
+                once you ran it - after that, loading any save from a linked campaign shows its Llama Score automatically, no more
+                picking required.
               </li>
               <li>
                 <strong>Multiplayer note:</strong> there's no server and no automatic syncing between different players' computers -
@@ -181,15 +205,16 @@
               <span
                 class="info-badge"
                 tabindex="0"
-                title="In the folder picker, choose the folder named &quot;data&quot; that's directly inside &quot;llama-score-automatic-logging-machine&quot;. Do NOT pick a specific campaign's folder (the long id folder inside data/campaigns), and don't pick llama-score-automatic-logging-machine itself - one level too high or too low and nothing will be found. The app looks for a campaigns subfolder inside whatever you select."
+                title="In the folder picker, choose the folder named &quot;data&quot; - next to &quot;Llama Score Dashboard.exe&quot; if you used the Dashboard app, or directly inside &quot;llama-score-automatic-logging-machine&quot; if you ran the CLI recorder script. Do NOT pick a specific campaign's folder (the long id folder inside data/campaigns), and don't pick its parent folder - one level too high or too low and nothing will be found. The app looks for a campaigns subfolder inside whatever you select."
                 >&#9432;</span
               >
               <button type="button" id="llamaDisconnectBtn" class="link-btn" hidden>Disconnect</button>
               <span id="llamaLinkStatus" class="llama-link-status" hidden>&#9989; Linked!</span>
             </div>
             <p class="panel-note llama-connect-hint">
-              Pick the recorder's <code>data</code> folder (the one directly inside <code>llama-score-automatic-logging-machine</code>) &mdash;
-              not <code>llama-score-automatic-logging-machine</code> itself, and not one specific campaign's folder inside <code>data/campaigns</code>.
+              Pick the recorder's <code>data</code> folder &mdash; next to <code>Llama Score Dashboard.exe</code> if you used the Dashboard app,
+              or directly inside <code>llama-score-automatic-logging-machine</code> if you ran the CLI recorder script. Don't pick its parent
+              folder, and not one specific campaign's folder inside <code>data/campaigns</code>.
             </p>
             <div id="llamaManualLoader" class="ledger-loader">
               <label>Snapshots <input type="file" id="llamaSnapshotsInput" accept=".jsonl,.txt,application/jsonl"></label>
@@ -257,11 +282,11 @@
   <script src="js/clausewitz.js?v=ui-20260712-mapfixes5"></script>
   <script src="js/eu5-fixed-ids.js?v=ui-20260712-mapfixes5"></script>
   <script src="js/clausewitz-binary.js?v=ui-20260712-mapfixes5"></script>
-  <script src="js/map.js?v=ui-20260712-mapfixes5"></script>
-  <script src="js/charts.js?v=ui-20260712-mapfixes5"></script>
-  <script src="js/llama-score.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/map.js?v=ui-20260712-ledger-reskin"></script>
+  <script src="js/charts.js?v=ui-20260712-ledger-reskin5"></script>
+  <script src="js/llama-score.js?v=ui-20260712-ledger-reskin1"></script>
   <script src="js/ledger-connect.js?v=ui-20260712-mapfixes5"></script>
   <script src="js/save-library.js?v=ui-20260712-mapfixes5"></script>
-  <script src="js/app.js?v=ui-20260712-country-colors"></script>
+  <script src="js/app.js?v=ui-20260712-ledger-reskin7"></script>
 </body>
 </html>

@@ -11,7 +11,7 @@ const Clausewitz = require("../js/clausewitz.js");
 const ClausewitzBinary = require("../js/clausewitz-binary.js");
 
 const DEFAULT_CONFIG = {
-  saveDir: "C:\\Users\\samca\\Documents\\Paradox Interactive\\Europa Universalis V\\save games",
+  saveDir: path.join(os.homedir(), "Documents", "Paradox Interactive", "Europa Universalis V", "save games"),
   dataDir: "./data",
   // Lowered from 15000: at high game speed the autosave rotation can cycle
   // through all ~9-10 slots in well under 90 seconds (confirmed on a real

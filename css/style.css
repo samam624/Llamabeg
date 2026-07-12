@@ -1,15 +1,80 @@
+/* Dark mode is the default (user's explicit request - not tied to OS
+   preference). :root itself holds the dark "campaign ledger at night"
+   values; :root[data-theme="light"] below is the opt-in override for
+   anyone who toggles it, via js/app.js stamping data-theme on <html>
+   (persisted to localStorage, applied synchronously by the inline <script>
+   in index.html's <head> before first paint). */
 :root {
-  --bg: #14181f;
-  --panel-bg: #1c222c;
-  --panel-border: #2a3240;
-  --text: #e6e9ef;
-  --text-dim: #9aa5b5;
-  --accent: #5b9dd9;
-  --accent-dim: #3a6a94;
-  --good: #6fcf97;
-  --bad: #eb5757;
-  --row-hover: #232b38;
-  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --bg: #1c150e;
+  --panel-bg: #2b2015;
+  --panel-border: #b7a877;
+  --rule-strong: #8a7c4f;
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
+  --accent: #c25b4f;
+  --accent-dim: #8a3f37;
+  --good: #7fa88f;
+  --bad: #cf6b52;
+  --gold: #c9a24a;
+  --row-hover: #3d301d;
+  --texture-tint: 241, 230, 200;
+  --font-mono: "Courier New", ui-monospace, "Cascadia Code", monospace;
+
+  /* Chart tokens are separate from the page tokens above (rather than
+     reusing --panel-bg/--text directly) so js/charts.js has one dedicated
+     set of names to read via getComputedStyle, regardless of whether the
+     page tokens they're currently equal to ever drift apart from these. */
+  --chart-surface: #2b2015;
+  --chart-gridline: #b7a877;
+  --chart-axis-text: #c9b98c;
+  --chart-label-text: #f1e6c8;
+  --chart-total-bar: #c25b4f;
+  /* Dark-surface categorical palette (validated against #2b2015: worst
+     adjacent CVD 10.3, in the 8-12 floor band - legal given the
+     chart-legend's always-present direct labels). Same set the app used
+     before this session's light reskin, re-validated for this exact dark
+     surface rather than assumed still valid. */
+  --chart-series-1: #3987e5;
+  --chart-series-2: #199e70;
+  --chart-series-3: #c98500;
+  --chart-series-4: #008300;
+  --chart-series-5: #9085e9;
+  --chart-series-6: #e66767;
+  --chart-series-7: #d55181;
+  --chart-series-8: #d95926;
+
+  font-family: Georgia, "Iowan Old Style", "Palatino Linotype", "Times New Roman", serif;
+}
+
+/* Light mode: the same campaign-ledger identity by day - opt-in only now.
+   Gold-tan hairlines (--panel-border, --rule-strong) are deliberately left
+   unchanged from the dark values above - already proven to read fine on
+   both (the map's always-dark HUD chrome uses this exact same gold). */
+:root[data-theme="light"] {
+  --bg: #e7dcc0;
+  --panel-bg: #f7f2e2;
+  --text: #2e2a22;
+  --text-dim: #6b6248;
+  --accent: #7a2e2e;
+  --accent-dim: #5c2323;
+  --good: #4c6b5a;
+  --bad: #a1442f;
+  --gold: #a9822f;
+  --row-hover: #ddd0a3;
+  --texture-tint: 46, 42, 34;
+
+  --chart-surface: #f7f2e2;
+  --chart-axis-text: #6b6248;
+  --chart-label-text: #2e2a22;
+  --chart-total-bar: #7a2e2e;
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #1baf7a;
+  --chart-series-3: #eda100;
+  --chart-series-4: #008300;
+  --chart-series-5: #4a3aa7;
+  --chart-series-6: #e34948;
+  --chart-series-7: #e87ba4;
+  --chart-series-8: #eb6834;
 }
 
 * {
@@ -21,6 +86,10 @@ body {
   background: var(--bg);
   color: var(--text);
   min-height: 100vh;
+  background-image:
+    radial-gradient(circle at 12% 18%, rgba(var(--texture-tint), 0.05) 0, transparent 40%),
+    radial-gradient(circle at 88% 74%, rgba(var(--texture-tint), 0.06) 0, transparent 45%),
+    radial-gradient(circle at 46% 92%, rgba(var(--texture-tint), 0.04) 0, transparent 50%);
 }
 
 body.map-view-active {
@@ -28,12 +97,13 @@ body.map-view-active {
 }
 
 .app-header {
-  padding: 2rem 1.5rem 1rem;
+  padding: 2rem 1.5rem 1.25rem;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 1rem;
   text-align: center;
+  border-bottom: 3px double var(--rule-strong);
 }
 
 .app-logo-frame {
@@ -42,8 +112,9 @@ body.map-view-active {
   flex: 0 0 auto;
   border-radius: 50%;
   overflow: hidden;
-  background: rgba(91, 157, 217, 0.08);
-  border: 1px solid var(--panel-border);
+  background: var(--accent);
+  border: 2px solid var(--gold);
+  box-shadow: inset 0 0 0 2px rgba(241, 230, 200, 0.35), 0 2px 6px rgba(46, 42, 34, 0.25);
 }
 .app-logo {
   /* Source asset (assets/llama-logo-avatar.png) is pre-cropped to a
@@ -63,14 +134,16 @@ body.map-view-active {
 
 .app-header h1 {
   margin: 0 0 0.25rem;
-  font-size: 1.8rem;
-  letter-spacing: 0.02em;
+  font-size: 1.9rem;
+  font-style: italic;
+  letter-spacing: 0.01em;
 }
 
 .subtitle {
   margin: 0;
   color: var(--text-dim);
   font-size: 0.95rem;
+  font-style: italic;
 }
 
 .app-download-btn {
@@ -79,9 +152,9 @@ body.map-view-active {
   gap: 0.6rem;
   flex: 0 0 auto;
   padding: 0.55rem 0.9rem;
-  border-radius: 10px;
+  border-radius: 2px;
   border: 1px solid var(--accent-dim);
-  background: rgba(91, 157, 217, 0.1);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--text);
   text-decoration: none;
   text-align: left;
@@ -90,7 +163,7 @@ body.map-view-active {
 }
 
 .app-download-btn:hover {
-  background: rgba(91, 157, 217, 0.2);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   border-color: var(--accent);
 }
 
@@ -108,6 +181,24 @@ body.map-view-active {
 .app-download-btn-text small {
   font-size: 0.75rem;
   color: var(--text-dim);
+}
+
+.theme-toggle-btn {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--gold);
+  background: var(--panel-bg);
+  color: var(--accent);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.theme-toggle-btn:hover {
+  background: var(--row-hover);
 }
 
 @media (max-width: 720px) {
@@ -155,6 +246,9 @@ body.map-view-active #results {
 }
 
 body.map-view-active .app-tabs {
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
+  --accent: #d3a468;
   position: absolute;
   top: 0.75rem;
   left: 1rem;
@@ -162,10 +256,10 @@ body.map-view-active .app-tabs {
   width: min(37rem, calc(45vw - 1.5rem));
   max-width: calc(100vw - 2rem);
   padding: 0.25rem;
-  border: 1px solid rgba(42, 50, 64, 0.9);
-  border-radius: 8px;
-  background: rgba(12, 16, 21, 0.86);
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(183, 168, 119, 0.55);
+  border-radius: 2px;
+  background: rgba(26, 20, 14, 0.9);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(12px);
   overflow-x: auto;
   overflow-y: hidden;
@@ -174,13 +268,13 @@ body.map-view-active .app-tabs {
 
 body.map-view-active .app-tab {
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 3px;
   padding: 0.45rem 0.7rem;
 }
 
 body.map-view-active .app-tab.active {
-  border-color: rgba(91, 157, 217, 0.55);
-  background: rgba(91, 157, 217, 0.16);
+  border-color: rgba(211, 164, 104, 0.55);
+  background: rgba(211, 164, 104, 0.16);
 }
 
 body.map-view-active .copy-link-btn {
@@ -198,7 +292,7 @@ body.map-view-active .map-panel {
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: #0c1015;
+  background: #15100c;
 }
 
 body.map-view-active .map-toolbar {
@@ -240,7 +334,7 @@ body.map-view-active .location-details {
   padding: 0.65rem 1rem;
   border: 1px solid transparent;
   border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 4px 4px 0 0;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -271,18 +365,22 @@ body.map-view-active .location-details {
   background: var(--panel-bg);
   border-color: var(--panel-border);
   color: var(--accent);
+  font-style: italic;
+  font-weight: 600;
 }
 
 .panel {
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  border-radius: 10px;
+  border-radius: 3px;
   padding: 1.25rem 1.5rem;
 }
 
 .panel h2 {
   margin: 0 0 0.75rem;
   font-size: 1.1rem;
+  font-style: italic;
+  font-weight: normal;
   color: var(--text);
 }
 
@@ -293,8 +391,8 @@ body.map-view-active .location-details {
   gap: 1rem;
   padding: 0.6rem 0.9rem;
   border: 1px solid var(--panel-border);
-  border-radius: 10px;
-  background: rgba(91, 157, 217, 0.06);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
   color: var(--text);
   font-size: 0.9rem;
 }
@@ -309,7 +407,7 @@ body.map-view-active .location-details {
   justify-content: center;
   height: 110px;
   border: 2px dashed var(--panel-border);
-  border-radius: 10px;
+  border-radius: 3px;
   cursor: pointer;
   color: var(--text-dim);
   transition: border-color 0.15s, color 0.15s, background 0.15s;
@@ -323,7 +421,7 @@ body.map-view-active .location-details {
 .dropzone.drag-over {
   border-color: var(--accent);
   color: var(--text);
-  background: rgba(91, 157, 217, 0.06);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
 .status {
@@ -341,7 +439,7 @@ body.map-view-active .location-details {
   flex: 1;
   height: 8px;
   background: var(--panel-border);
-  border-radius: 4px;
+  border-radius: 2px;
   overflow: hidden;
 }
 
@@ -361,24 +459,25 @@ body.map-view-active .location-details {
 .error-box {
   margin-top: 1rem;
   padding: 0.85rem 1rem;
-  border-radius: 8px;
-  background: rgba(235, 87, 87, 0.1);
-  border: 1px solid rgba(235, 87, 87, 0.35);
-  color: #f5b5b5;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  color: var(--bad);
   font-size: 0.9rem;
   line-height: 1.5;
 }
 
 .error-box a {
-  color: #fff;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .pending-share-notice {
   margin-top: 1rem;
   padding: 0.85rem 1rem;
-  border-radius: 8px;
-  background: rgba(91, 157, 217, 0.1);
-  border: 1px solid rgba(91, 157, 217, 0.35);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   color: var(--text);
   font-size: 0.9rem;
   line-height: 1.5;
@@ -405,8 +504,8 @@ body.map-view-active .location-details {
   gap: 0.25rem;
   min-height: 4.25rem;
   padding: 0.9rem 1.1rem;
-  border-right: 1px solid rgba(42, 50, 64, 0.76);
-  border-bottom: 1px solid rgba(42, 50, 64, 0.76);
+  border-right: 1px solid rgba(183, 168, 119, 0.76);
+  border-bottom: 1px solid rgba(183, 168, 119, 0.76);
 }
 
 .stat .label {
@@ -420,6 +519,8 @@ body.map-view-active .location-details {
   font-size: 1.15rem;
   font-weight: 600;
   line-height: 1.2;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .stat.wide {
@@ -430,7 +531,7 @@ body.map-view-active .location-details {
   width: 100%;
   padding: 0.5rem 0.75rem;
   margin-bottom: 0.75rem;
-  border-radius: 6px;
+  border-radius: 3px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text);
@@ -449,7 +550,7 @@ body.map-view-active .location-details {
   align-items: center;
   gap: 0.35rem;
   padding: 0.35rem 0.7rem;
-  border-radius: 6px;
+  border-radius: 3px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text-dim);
@@ -466,7 +567,7 @@ body.map-view-active .location-details {
 .metric-tab.active {
   color: var(--accent);
   border-color: var(--accent);
-  background: rgba(91, 157, 217, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .llama-mode-tabs {
@@ -477,7 +578,7 @@ body.map-view-active .location-details {
 
 .llama-mode-tab {
   padding: 0.35rem 1.1rem;
-  border-radius: 6px;
+  border-radius: 3px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text-dim);
@@ -489,7 +590,7 @@ body.map-view-active .location-details {
 .llama-mode-tab.active {
   color: var(--accent);
   border-color: var(--accent);
-  background: rgba(91, 157, 217, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .table-wrap {
@@ -497,8 +598,8 @@ body.map-view-active .location-details {
   max-height: 520px;
   overflow-y: auto;
   border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  background: rgba(20, 24, 31, 0.42);
+  border-radius: 3px;
+  background: var(--panel-bg);
 }
 
 table {
@@ -512,7 +613,7 @@ table {
 thead th {
   position: sticky;
   top: 0;
-  background: #232b38;
+  background: var(--row-hover);
   text-align: center;
   padding: 0.6rem 0.75rem;
   cursor: pointer;
@@ -520,7 +621,7 @@ thead th {
   color: var(--text-dim);
   font-weight: 600;
   border-bottom: 1px solid var(--panel-border);
-  border-right: 1px solid rgba(42, 50, 64, 0.75);
+  border-right: 1px solid rgba(183, 168, 119, 0.75);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -538,7 +639,7 @@ thead th.sorted {
 }
 
 thead th.has-desc {
-  text-decoration: underline dotted rgba(255, 255, 255, 0.35);
+  text-decoration: underline dotted rgba(46, 42, 34, 0.4);
   text-underline-offset: 3px;
 }
 
@@ -551,7 +652,7 @@ thead th .arrow {
 tbody td {
   padding: 0.52rem 0.75rem;
   border-bottom: 1px solid var(--panel-border);
-  border-right: 1px solid rgba(42, 50, 64, 0.48);
+  border-right: 1px solid rgba(183, 168, 119, 0.48);
   overflow: hidden;
   text-align: center;
   text-overflow: ellipsis;
@@ -573,16 +674,31 @@ tbody tr.is-player td:first-child {
 td.num {
   text-align: center;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 td.metric-heat {
+  /* Both gradient stops stay at the same high alpha (only lightness steps
+     between them) - fading alpha toward 0 would fade toward the surface
+     color instead, which is exactly backwards from "highlight this cell":
+     dark saturated fill + light text here since dark is the default theme;
+     the light-mode override below flips both for the same reason. */
   background: linear-gradient(
     90deg,
-    hsla(calc(var(--metric-score) * 118), 54%, 26%, 0.46),
-    hsla(calc(var(--metric-score) * 118), 54%, 22%, 0.22)
+    hsla(calc(var(--metric-score) * 118), 54%, 28%, 0.9),
+    hsla(calc(var(--metric-score) * 118), 54%, 24%, 0.75)
   );
-  color: hsl(calc(var(--metric-score) * 118), 72%, 78%);
+  color: hsl(calc(var(--metric-score) * 118), 70%, 80%);
   font-weight: 650;
+}
+
+:root[data-theme="light"] td.metric-heat {
+  background: linear-gradient(
+    90deg,
+    hsla(calc(var(--metric-score) * 118), 62%, 76%, 0.9),
+    hsla(calc(var(--metric-score) * 118), 62%, 82%, 0.75)
+  );
+  color: hsl(calc(var(--metric-score) * 118), 68%, 22%);
 }
 
 .hidden-players-note {
@@ -642,9 +758,9 @@ td.metric-heat {
 .formula-note dl {
   margin: 0.5rem 0 0;
   padding: 0.75rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(183, 168, 119, 0.1);
   border: 1px solid var(--panel-border);
-  border-radius: 8px;
+  border-radius: 3px;
 }
 
 .formula-note dt {
@@ -670,9 +786,9 @@ td.metric-heat {
 .llama-manual-steps {
   margin: 0.5rem 0 0;
   padding: 0.75rem 1rem 0.75rem 2rem;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(183, 168, 119, 0.1);
   border: 1px solid var(--panel-border);
-  border-radius: 8px;
+  border-radius: 3px;
 }
 
 .llama-manual-steps li {
@@ -682,6 +798,15 @@ td.metric-heat {
 
 .llama-manual-steps li:first-child {
   margin-top: 0;
+}
+
+.llama-manual-steps ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.llama-manual-steps ul li {
+  margin-top: 0.35rem;
 }
 
 .link-btn {
@@ -716,7 +841,7 @@ td.metric-heat {
 }
 
 .llama-link-status {
-  color: #6fcf97;
+  color: var(--good);
   font-weight: 600;
   font-size: 0.9rem;
 }
@@ -749,7 +874,7 @@ td.metric-heat {
   background: var(--panel-bg);
   color: var(--text);
   border: 1px solid var(--panel-border);
-  border-radius: 10px;
+  border-radius: 3px;
   padding: 1.25rem 1.5rem;
   width: min(95vw, 1100px);
   max-height: 85vh;
@@ -773,7 +898,7 @@ td.metric-heat {
 
 .hide-player-btn {
   padding: 0.2rem 0.55rem;
-  border-radius: 5px;
+  border-radius: 3px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text-dim);
@@ -798,11 +923,12 @@ td.metric-heat {
 .tag-badge {
   display: inline-block;
   padding: 0.1rem 0.4rem;
-  border-radius: 4px;
-  background: var(--accent-dim);
-  color: #fff;
+  border-radius: 2px;
+  background: var(--gold);
+  color: var(--panel-bg);
   font-weight: 600;
   font-size: 0.78rem;
+  font-family: var(--font-mono);
 }
 
 /* Player Wars (head-to-head) table - js/app.js's renderLlamaHeadToHead() */
@@ -846,10 +972,15 @@ td.metric-heat {
 }
 
 .llama-confidence-high { color: var(--good); }
-.llama-confidence-medium { color: #e0c34c; }
+.llama-confidence-medium { color: var(--gold); }
 .llama-confidence-low { color: var(--bad); }
 
 .map-toolbar {
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
+  --accent: #d3a468;
+  --panel-border: rgba(183, 168, 119, 0.55);
+  --bg: rgba(26, 20, 14, 0.72);
   position: absolute;
   left: 1rem;
   top: 1rem;
@@ -859,10 +990,10 @@ td.metric-heat {
   gap: 0.35rem;
   width: min(720px, calc(100% - 2rem));
   padding: 0.7rem;
-  border: 1px solid rgba(42, 50, 64, 0.92);
-  border-radius: 8px;
-  background: rgba(12, 16, 21, 0.82);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(183, 168, 119, 0.55);
+  border-radius: 3px;
+  background: rgba(26, 20, 14, 0.88);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(12px);
 }
 
@@ -877,7 +1008,7 @@ body.map-view-active .map-toolbar .map-mode-btn {
   align-items: center;
   gap: 0.38rem;
   padding: 0.4rem 0.9rem;
-  border-radius: 6px;
+  border-radius: 3px;
   border: 1px solid var(--panel-border);
   background: var(--bg);
   color: var(--text-dim);
@@ -889,7 +1020,7 @@ body.map-view-active .map-toolbar .map-mode-btn {
 .map-toolbar .map-mode-btn {
   width: auto;
   justify-content: flex-start;
-  background: rgba(20, 24, 31, 0.72);
+  background: rgba(46, 36, 25, 0.6);
 }
 
 .map-mode-btn[hidden],
@@ -912,7 +1043,7 @@ body.map-view-active .map-toolbar .map-mode-btn {
 .map-mode-btn.active {
   border-color: var(--accent);
   color: var(--accent);
-  background: rgba(91, 157, 217, 0.08);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .map-canvas-wrap {
@@ -921,7 +1052,7 @@ body.map-view-active .map-toolbar .map-mode-btn {
   border: 0;
   border-radius: 0;
   overflow: hidden;
-  background: #0c1015;
+  background: #15100c;
   min-width: 0;
   width: 100%;
   height: 100%;
@@ -933,7 +1064,7 @@ body.map-view-active .map-toolbar .map-mode-btn {
   height: min(82vh, 840px);
   min-height: 520px;
   overflow: hidden;
-  background: #0c1015;
+  background: #15100c;
   /* Single source of truth for the country/location side panels' width, so
      the legend below can reserve the exact same space when centering
      itself in the remaining visible gap instead of drifting out of sync
@@ -974,30 +1105,38 @@ body.map-view-active #mapContainer {
 }
 
 .map-tooltip {
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
   position: absolute;
   pointer-events: none;
-  background: rgba(20, 24, 31, 0.92);
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
+  background: rgba(26, 20, 14, 0.92);
+  border: 1px solid rgba(183, 168, 119, 0.55);
+  border-radius: 3px;
   padding: 0.35rem 0.6rem;
   font-size: 0.8rem;
   white-space: nowrap;
   z-index: 10;
+  color: var(--text);
 }
 
 .location-details,
 .country-details {
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
+  --accent: #d3a468;
+  --panel-border: rgba(183, 168, 119, 0.55);
   position: absolute;
   z-index: 14;
   min-width: 0;
   max-height: none;
   overflow: auto;
-  background: rgba(12, 16, 21, 0.86);
-  border: 1px solid rgba(42, 50, 64, 0.95);
-  border-radius: 8px;
+  background: rgba(26, 20, 14, 0.92);
+  border: 1px solid rgba(183, 168, 119, 0.6);
+  border-radius: 3px;
   padding: 0.85rem;
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
   backdrop-filter: blur(12px);
+  color: var(--text);
 }
 
 .country-details {
@@ -1056,8 +1195,8 @@ body.map-view-active #mapContainer {
 .location-context-pill {
   min-width: 0;
   padding: 0.5rem 0.55rem;
-  border: 1px solid rgba(42, 50, 64, 0.9);
-  border-radius: 6px;
+  border: 1px solid rgba(183, 168, 119, 0.9);
+  border-radius: 3px;
   background: rgba(255, 255, 255, 0.025);
 }
 
@@ -1081,7 +1220,7 @@ body.map-view-active #mapContainer {
   width: 1.65rem;
   height: 1.65rem;
   border: 1px solid var(--panel-border);
-  border-radius: 5px;
+  border-radius: 3px;
   background: var(--bg);
   color: var(--text-dim);
   cursor: pointer;
@@ -1103,7 +1242,7 @@ body.map-view-active #mapContainer {
 .location-detail-stat {
   min-width: 0;
   padding: 0.45rem 0;
-  border-bottom: 1px solid rgba(42, 50, 64, 0.8);
+  border-bottom: 1px solid rgba(183, 168, 119, 0.8);
 }
 
 .location-detail-stat span {
@@ -1188,7 +1327,7 @@ body.map-view-active #mapContainer {
 
 .building-detail-section {
   padding-top: 0.7rem;
-  border-top: 1px solid rgba(42, 50, 64, 0.9);
+  border-top: 1px solid rgba(183, 168, 119, 0.9);
 }
 
 .building-tabs {
@@ -1205,7 +1344,7 @@ body.map-view-active #mapContainer {
   min-height: 1.85rem;
   padding: 0.25rem 0.45rem;
   border: 1px solid color-mix(in srgb, var(--demographic-color) 42%, var(--panel-border));
-  border-radius: 5px;
+  border-radius: 3px;
   background: rgba(255, 255, 255, 0.025);
   color: color-mix(in srgb, var(--demographic-color) 72%, #ffffff);
   cursor: pointer;
@@ -1253,14 +1392,14 @@ body.map-view-active #mapContainer {
   aspect-ratio: 1;
   border-radius: 50%;
   border: 1px solid var(--panel-border);
-  box-shadow: inset 0 0 0 8px rgba(20, 24, 31, 0.35);
+  box-shadow: inset 0 0 0 8px rgba(26, 20, 14, 0.4);
 }
 
 .demographic-pie-tax {
   width: 62%;
   aspect-ratio: 1;
   border-radius: 50%;
-  border: 8px solid rgba(20, 24, 31, 0.9);
+  border: 8px solid rgba(26, 20, 14, 0.92);
 }
 
 .demographic-summary {
@@ -1268,6 +1407,8 @@ body.map-view-active #mapContainer {
 }
 
 .map-legend {
+  --text: #f1e6c8;
+  --text-dim: #c9b98c;
   position: absolute;
   left: 1rem;
   right: 1rem;
@@ -1281,10 +1422,10 @@ body.map-view-active #mapContainer {
   margin: 0 auto;
   overflow: auto;
   padding: 0.6rem 0.75rem;
-  border: 1px solid rgba(42, 50, 64, 0.9);
-  border-radius: 8px;
-  background: rgba(12, 16, 21, 0.78);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(183, 168, 119, 0.55);
+  border-radius: 3px;
+  background: rgba(26, 20, 14, 0.85);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
   font-size: 0.8rem;
   color: var(--text-dim);
   align-items: center;
@@ -1344,7 +1485,7 @@ body.map-view-active #mapContainer {
 .map-legend-gradient-bar {
   flex: 1;
   height: 0.75rem;
-  border-radius: 4px;
+  border-radius: 2px;
   background: linear-gradient(to right, rgb(40, 60, 200) 0%, rgb(220, 220, 100) 50%, rgb(240, 40, 10) 100%);
 }
 
@@ -1447,9 +1588,9 @@ body.map-view-active .map-loading {
   position: relative;
   min-width: 0;
   padding: 1rem;
-  border: 1px solid rgba(42, 50, 64, 0.85);
-  border-radius: 8px;
-  background: rgba(20, 24, 31, 0.62);
+  border: 1px solid rgba(183, 168, 119, 0.85);
+  border-radius: 3px;
+  background: var(--panel-bg);
 }
 
 .chart-range-controls {
@@ -1458,9 +1599,9 @@ body.map-view-active .map-loading {
   gap: 0.75rem;
   margin-bottom: 0.75rem;
   padding: 0.45rem 0.55rem;
-  border: 1px solid rgba(42, 50, 64, 0.72);
-  border-radius: 6px;
-  background: rgba(12, 16, 21, 0.32);
+  border: 1px solid rgba(183, 168, 119, 0.72);
+  border-radius: 3px;
+  background: rgba(183, 168, 119, 0.12);
   color: var(--text-dim);
   font-size: 0.8rem;
 }
@@ -1497,8 +1638,8 @@ body.map-view-active .map-loading {
 }
 
 .trend-chart {
-  border-radius: 6px;
-  background: rgba(12, 16, 21, 0.2);
+  border-radius: 3px;
+  background: var(--panel-bg);
 }
 
 /* Llama Score leaderboard: collapsed by default to one plain bar per
@@ -1554,13 +1695,14 @@ body.map-view-active .map-loading {
 .chart-tooltip {
   position: absolute;
   pointer-events: none;
-  background: rgba(20, 24, 31, 0.95);
+  background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  border-radius: 6px;
+  border-radius: 3px;
   padding: 0.4rem 0.6rem;
   font-size: 0.78rem;
   z-index: 10;
   white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(46, 42, 34, 0.22);
 }
 
 .chart-tooltip-year {
@@ -1579,5 +1721,6 @@ footer {
   text-align: center;
   color: var(--text-dim);
   font-size: 0.8rem;
+  font-style: italic;
   padding: 1rem 0 2rem;
 }
