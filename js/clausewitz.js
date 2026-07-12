@@ -293,7 +293,19 @@
       religiousInfluence: currency.religious_influence,
       inflation: currency.inflation,
       totalProduced: obj.total_produced,
-      lastMonthGoldIncome: obj.last_month_gold_income,
+      // `last_month_gold_income` is absent entirely from at least one real
+      // older save (confirmed: 1.0.11, "Sindh" campaign - 0 of 2456 "Real"
+      // countries had it, vs. economy.income/expense both present and
+      // driving Profit correctly) - either this exact field didn't exist
+      // yet that early, or its fixed ID differs from the 1.1.x-1.3.x saves
+      // this project's ID table was built from (no melted copy of a 1.0.11
+      // save exists to cross-check the version-specific ID and fix it
+      // properly). `economy.income` (gross income, already extracted
+      // separately below) is confirmed within ~1-2% of `last_month_gold_
+      // income` on every save that has both fields, so it's used as the
+      // fallback here rather than leaving Income/mo blank for saves this
+      // old.
+      lastMonthGoldIncome: typeof obj.last_month_gold_income === "number" ? obj.last_month_gold_income : economy.income,
       lastMonthManpowerIncome: obj.last_month_manpower_income,
       lastMonthSailorsIncome: obj.last_month_sailors_income,
       maxManpower: obj.max_manpower,
@@ -483,15 +495,6 @@
         loc.buildingCounts[asset.building] = (loc.buildingCounts[asset.building] || 0) + 1;
         loc.buildingTotal = (loc.buildingTotal || 0) + 1;
       }
-      if (asset.roadType && typeof asset.startLocation === "number" && typeof asset.endLocation === "number") {
-        for (const locId of [asset.startLocation, asset.endLocation]) {
-          const loc = locByNumber.get(locId);
-          if (!loc) continue;
-          if (!loc.roadCounts) loc.roadCounts = {};
-          loc.roadCounts[asset.roadType] = (loc.roadCounts[asset.roadType] || 0) + 1;
-          loc.roadTotal = (loc.roadTotal || 0) + 1;
-        }
-      }
     }
   }
 
@@ -619,7 +622,12 @@
             scanner.consumeIfPresent("=");
             const assetObj = scanner.parseValue();
             const asset = extractEstateAssetFields(parseInt(numTok.raw, 10), assetObj);
-            if (asset && (asset.building || asset.roadType || typeof asset.rgo === "number")) onAsset(asset);
+            // Road assets are deliberately dropped here rather than kept
+            // and just hidden in the UI - the user confirmed the map's
+            // "Roads" panel isn't reliable/useful enough to be worth the
+            // parse cost, so entries are skipped at the source instead of
+            // being extracted and then discarded downstream.
+            if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
           }
         } else {
           scanner.skipValue();

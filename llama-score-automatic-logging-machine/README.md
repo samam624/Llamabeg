@@ -1,4 +1,4 @@
-# Llama Score Automatic Logging Machine
+# 🪓 Llama Score Logging Machine
 
 Small companion recorder for EU5 campaigns. It watches a save folder, waits for
 new/changed autosaves to finish writing, parses only the light campaign metadata

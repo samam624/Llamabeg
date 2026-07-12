@@ -68,11 +68,21 @@ mapText = mapText.replace(/#[^\n]*/g, "");
 const mapTree = new cw.Scanner(mapText, 0, mapText.length).parseBlockBody();
 const seaNames = new Set(mapTree.sea_zones || []);
 const lakeNames = new Set(mapTree.lakes || []);
+// Real, unowned/undevelopable terrain (mountain ranges/wasteland and desert
+// "corridor" crossings) - land geographically, but the game never assigns
+// it a real owner or development/control value the way farmable provinces
+// get. Confirmed the gap this closes: these locations were rendering as
+// flat dark patches on every numeric mapmode and (worse) dragging down the
+// min end of the min/max color scale for whichever country's border
+// happens to enclose them, compressing the gradient's usable range for
+// everyone else's real, meaningful data.
+const impassableNames = new Set([...(mapTree.impassable_mountains || []), ...(mapTree.non_ownable || [])]);
 
 const locations = {};
 let withColor = 0;
 let seaCount = 0,
-  lakeCount = 0;
+  lakeCount = 0,
+  impassableCount = 0;
 for (let i = 0; i < orderedNames.length; i++) {
   const id = i + 1;
   const name = orderedNames[i];
@@ -86,11 +96,13 @@ for (let i = 0; i < orderedNames.length; i++) {
     type = "lake";
     lakeCount++;
   }
-  locations[id] = { name, color: color || null, type, province: orderedProvinces[i] };
+  const impassable = type === "land" && impassableNames.has(name);
+  if (impassable) impassableCount++;
+  locations[id] = { name, color: color || null, type, province: orderedProvinces[i], impassable: impassable || undefined };
 }
 
 console.log(`Total locations: ${orderedNames.length}, with a color entry: ${withColor}`);
-console.log(`Water: ${seaCount} sea, ${lakeCount} lake, ${orderedNames.length - seaCount - lakeCount} land`);
+console.log(`Water: ${seaCount} sea, ${lakeCount} lake, ${orderedNames.length - seaCount - lakeCount - impassableCount} land, ${impassableCount} impassable/non-ownable`);
 
 fs.writeFileSync(path.join(MAP_DATA, "locations.json"), JSON.stringify(locations));
 console.log("Wrote map_data/locations.json");

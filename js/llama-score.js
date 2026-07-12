@@ -373,7 +373,15 @@
       if (excludedPlayers.has(name)) continue;
       const player = (result.players || []).find((p) => p.name === name);
       const country = player && typeof player.countryNumber === "number" ? countryByNumber.get(player.countryNumber) : null;
-      const gpScore = country ? gpScoreFromRank(country.greatPowerRank) : null;
+      // Alpaca Points (PVE mode) are the player's raw PVE war performance
+      // only, per the user's request - GP Score is a world-standing/economic
+      // baseline that has nothing to do with how well someone's doing
+      // against AI specifically, unlike PVP's Llama Points where it's an
+      // intentional baseline everyone starts with. Zeroed rather than just
+      // excluded from the total so the leaderboard chart's segment
+      // breakdown (which reads gpScore directly) doesn't show a "GP
+      // contribution" sliver that isn't actually counted.
+      const gpScore = mode === "pve" ? null : country ? gpScoreFromRank(country.greatPowerRank) : null;
       leaderboard.push({
         player: name,
         countryTag: country ? country.tag : null,
@@ -381,7 +389,7 @@
         vpTotal: agg.vpTotal,
         vpPositive: agg.vpPositive,
         vpNegative: agg.vpNegative,
-        llamaPoints: (gpScore || 0) / 100 + agg.vpTotal,
+        llamaPoints: mode === "pve" ? agg.vpTotal : (gpScore || 0) / 100 + agg.vpTotal,
         warCount: agg.warCount,
         scoredWarCount: agg.scoredWarCount,
         uncertainCount: agg.uncertainCount,
@@ -635,20 +643,22 @@
     // as a lower-confidence guess.
 
     // The economic signal and the two-sided score both had nothing decisive
-    // to say - a clear battle-losses margin is a better bet than the
-    // single-sided leftover score checked next, since it's derived from the
-    // whole side's actual combat performance, not a possibly-stale residual
-    // value.
+    // to say - a clear battle-losses margin is the last real signal left,
+    // since it's derived from the whole side's actual combat performance,
+    // not a possibly-stale residual value.
     if (lossSignal) {
       return finalize({ winnerSide: lossSignal.winnerSide, confidence: "low", reason: lossSignal.reason });
     }
 
-    if (typeof aScore === "number" && aScore !== 0 && typeof dScore !== "number") {
-      return finalize({ winnerSide: aScore > 0 ? "Attacker" : "Defender", confidence: "low", reason: "last-known-single-sided-attacker-score" });
-    }
-    if (typeof dScore === "number" && dScore !== 0 && typeof aScore !== "number") {
-      return finalize({ winnerSide: dScore > 0 ? "Defender" : "Attacker", confidence: "low", reason: "last-known-single-sided-defender-score" });
-    }
+    // Deliberately NOT falling back to a lone single-sided leftover
+    // attacker_score/defender_score here (removed per user request, was
+    // "last-known-single-sided-attacker/defender-score"). EU5 normally
+    // clears both sides' war score together when a war ends; a single
+    // surviving value is a partial-clear artifact, not a real two-sided
+    // comparison, and guessing a winner off it was a weaker signal than
+    // everything else in this function. Falls through to White Peace
+    // instead - the genuine two-sided score check at the top of this
+    // function is untouched, only this single-sided fallback is gone.
 
     // Nothing above found a decisive signal - confirmed on real data that
     // this genuinely happens (a real war fought entirely against non-player
@@ -946,7 +956,9 @@
           player,
           country,
           countryTag: countryLabel(countryInfo, typeof country === "number" ? "#" + country : "?"),
-          gpScore: gpScoreFromRank(countryInfo && countryInfo.gpRank),
+          // Alpaca Points (PVE mode) drop GP Score entirely - see the
+          // matching comment in computeLlamaScores above.
+          gpScore: mode === "pve" ? null : gpScoreFromRank(countryInfo && countryInfo.gpRank),
           vpTotal: 0,
           vpPositive: 0,
           vpNegative: 0,
@@ -989,7 +1001,7 @@
       .filter((p) => !excludedPlayers.has(p.player))
       .map((p) => ({
         ...p,
-        llamaPoints: (p.gpScore || 0) / 100 + p.vpTotal,
+        llamaPoints: mode === "pve" ? p.vpTotal : (p.gpScore || 0) / 100 + p.vpTotal,
       }));
     leaderboard.sort((a, b) => b.llamaPoints - a.llamaPoints);
     rows.sort((a, b) => dateKey(b.endDate) - dateKey(a.endDate));

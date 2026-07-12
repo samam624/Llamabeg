@@ -1,4 +1,162 @@
-# Handoff — 2026-07-11 session
+# Handoff — 2026-07-12 session
+
+Replaces the 2026-07-11 handoff below it in spirit. Server for local testing is running
+at **http://localhost:8000** (`python3 -m http.server 8000` from this directory if it's
+died — see README's "Running locally"). Current script cache-busting version string is
+`ui-20260712-mapfixes5` (in `index.html`'s `<script src>` tags) — bump it again if you
+change `js/map.js`/`app.js`/etc. and things "don't seem to have taken effect" — see the
+caching gotcha at the bottom of this file, it bit us repeatedly tonight.
+
+## What shipped this session
+
+**Netlify deploy prep** (not deployed yet, per your "let me know before spending
+credits" — nothing here touched Netlify itself). Fixed two real bugs in the build
+pipeline before you ever ship it: `scripts/build-netlify-site.js` wasn't copying
+`assets/` (logo/favicon would've been silently missing on the live site), and
+`netlify.toml`'s CSP `img-src` didn't allow `eu5.paradoxwikis.com`, which is where every
+tab/metric icon is hotlinked from — they'd have been silently blocked by the browser in
+production even though there's no CSP enforced on localhost. Verified by actually
+building (`node scripts/build-netlify-site.js`) and serving `dist/` locally.
+
+**Renamed**: web app → **Llamabeg** (title/header). Recorder → **🪓 Llama Score Logging
+Machine** (console banner + its own README) — no GUI of its own, so the "sprite" is an
+axe emoji in the startup banner, not a graphic asset.
+
+**Llama Score tab overhaul**:
+- New **"Llama Score User Manual"** section at the top, open by default — 5-step
+  walkthrough (download the Dashboard → run it → play → connect the campaign folder
+  here → multiplayer note that there's no server/auto-sync, everyone runs their own
+  recorder against their own save folder).
+- Removed the single-sided-leftover-war-score win/loss guess entirely (both
+  `js/llama-score.js` and the recorder's own copy in `llama-log-machine.js`) — a war
+  where only one side's `attacker_score`/`defender_score` survives now falls straight
+  to White Peace instead of guessing a winner off a partial-clear artifact. The
+  two-sided "last known war score" check is untouched. Cleaned the now-dead
+  "Leftover one-sided war score" copy out of the calculation dropdown and both UIs'
+  (web + Dashboard) reason-label lookups.
+- Removed ADM/DIP/MIL from the Military metrics tab (both Countries and Players); moved
+  GP Rank to the first metric slot on Demographic.
+- Countries/Players tables: default sort is now Income/mo (was whatever column
+  happened to be first). Black Death renamed to **"Black Death Winner"**, now sorts
+  ascending (lowest Lost % / least-affected first) by default.
+- Added hover-only tooltips (native `title`, dotted-underline hint) explaining every
+  non-obvious calculated column — Profit Efficiency, ADM/DIP/MIL, Income/1k people,
+  Black Death Lost %, war Score, etc.
+- Fixed Profit Efficiency's table heat-coloring: a single country with a -5000%-ish
+  efficiency outlier was being used as the color scale's low end, which squished the
+  entire meaningful 0-100% range into a thin green sliver — every country looked
+  "good" regardless of real standing. Now any negative efficiency reads as flatly
+  worst (full red); 0-100% gets the real gradient.
+
+**Map — heat gradient overhaul** (development/population/control/prosperity):
+- New unified palette (dark brown → tan → vivid green), replacing two near-identical
+  black/red/green/blue "rainbow" variants, per your "pdx.tools reads better" feedback.
+  The dark floor is a real dark brown, not literal near-black, so a genuine 0% no
+  longer looks identical to "no data."
+- Gradients now scale **min → max of whatever's in view** (world or a focused nation)
+  instead of always 0 → max. Confirmed real ranges can be surprising — Prosperity's
+  actual world range in one save was **-30% to 100%**, previously all silently
+  clamped to the same 0% color.
+- **Three real, distinct bugs** chased down and fixed on this same "why does the
+  gradient look wrong" thread tonight, in order:
+  1. Locations flagged `impassable` in `default.map` (mountains/wasteland + desert
+     "non-ownable" corridors, ~1,971 of 28,573 locations — new `impassable` field in
+     `map_data/locations.json`, baked by `tools/build-location-data.js`) were being
+     read as genuine 0%-control/development land, dominating the min/max scale for
+     whichever country's border happened to enclose them. Now excluded from the
+     gradient entirely, unconditionally (even the ~166 that happen to carry real
+     data — tried letting those through first, but per your feedback that still let
+     atypical mountain values distort the scale for the rest of the country).
+  2. `applyProvinceOwnerFallback()` (assigns a location's owner from its enclosing
+     province when the location's own owner field is blank, for political-map-color
+     correctness) was making completely blank-slate locations — no population, no
+     development, no control, nothing, not impassable-flagged either — look "owned,"
+     which fed into the same "owned but missing = 0" heuristic and reproduced the
+     identical fake-0% problem through a different door. Fixed: a location now only
+     gets the "missing field → 0" treatment if it has at least one OTHER real,
+     directly-parsed heat-scale field; a total blank slate reads as neutral "no data"
+     regardless of why it appears owned. Verified against real numbers: Serbia's
+     population range went from a fake "0 – 25,874" to the correct **"2,121 –
+     25,874"** (matches an independent hand-calculation exactly); Control went from
+     fake "0% – 100%" to real **"8% – 100%"**.
+  3. `map_data/locations.json` itself was being served from the browser's **stale
+     HTTP cache** — unlike the JS files (which have a `?v=` cache-busting query
+     string), this fetch had none at all, so even a full page reload could keep
+     reusing the pre-fix JSON. Fixed with `{ cache: "no-store" }` on that fetch. This
+     one cost real back-and-forth before it was found — worth remembering as its own
+     category of bug, distinct from "the logic is wrong."
+- **Markets mapmode**: merged the old separate "Markets" and "Market Access" tabs
+  into one ("Markets"), colored by each market's real in-game color (not hashed) with
+  a grey/dark→color gradient by access %. Tried a 75%-inflection "peaks then darkens"
+  curve per your read of the game (¬75% access = time to split the market) — reverted
+  per your feedback that it made the whole map look uniformly washed out (most real
+  locations sit in a 30-70% band that never reached the peak). Now a plain steep power
+  curve (`t^2.4`) instead — no inflection point, just falls into dark/grey faster than
+  a straight linear blend.
+- **Legend rendering**: now samples 9 points instead of 4 when building the CSS
+  gradient bar, so non-linear curves actually show their real shape. Fixed centering
+  to account for whichever side panel(s) are open (was always centering on the full
+  map width, so it visibly drifted off-center whenever only one panel was open) —
+  verified with 0px offset in all panel-open/closed combinations at your actual
+  screen resolution (2524×1239).
+- Political/Trade Goods/Religion/Culture legends removed entirely (too many
+  categories to be useful — was a "+1040 more" list).
+- **Sea/lake tiles**: click now shows a trimmed detail panel (only fields that
+  genuinely apply — Market/Second Market/Market Attraction — instead of a wall of
+  blank placeholders), and correctly resets any stale nation-focus view back to
+  global when clicked. Border lines between sea tiles are unaffected (still drawn).
+- **Removed entirely, not just hidden**: the dashed "leader line" pointer connecting
+  a selected location to its detail panel, and the Roads section/parsing. Roads were
+  removed at the source (`estate_manager.database` walk no longer even pushes
+  road-type entries in either parser) per your call that the feature wasn't reliable
+  enough to be worth the parse cost, even though the underlying data was confirmed
+  correct (517 real gravel roads in one save, cross-validated text vs. binary) — it's
+  just genuinely sparse and mostly on tiny AI/native nations, easy to never encounter.
+
+**Income/mo fallback for older saves.** Confirmed root cause on a real 1.0.11 save
+("Sindh" campaign): `last_month_gold_income` is absent from every single country (not
+a parsing bug — the field or its fixed ID genuinely isn't there that early/that
+version), while `economy.income`/`economy.expense` are present and already drive
+Profit correctly. Cross-checked on a newer save where both fields exist — they track
+within ~1-2% of each other — so `lastMonthGoldIncome` now falls back to `economy.income`
+whenever the primary field is missing. **Known limitation, not fixed**: a separate
+"Bohemia" save 3 months into a brand-new campaign has no income data at all (not even
+`economy.income` — only 164 of 2,325 countries have any income figure that early,
+exactly matching which ones have the primary field too) — this looks like the game
+itself hasn't computed monthly income yet this early, not a parser gap. Nothing to fix
+there without a later autosave from that same campaign to confirm.
+
+## The caching gotcha, worth remembering
+
+Two distinct caching issues bit us repeatedly tonight, on top of each other:
+1. **Stale browser tab.** `map.js`/`app.js`/etc. are plain `<script src="...?v=...">`
+   tags — an already-open tab never re-fetches until the page is reloaded AND the `?v=`
+   string has changed. Several "still broken" reports this session turned out to be a
+   tab that had been open since before the fix. Bumped the version string after every
+   `map.js` change tonight; keep doing this (`ui-20260712-mapfixesN`, increment N).
+2. **Stale `fetch()`ed data, separate from the script cache.** `map_data/locations.json`
+   is loaded via a plain `fetch()` with no cache-busting at all — a normal reload could
+   still reuse the browser's cached copy of the JSON even after the *code* reading it
+   was already fixed and reloaded correctly. Now fixed with `{ cache: "no-store" }`,
+   but worth remembering as a category if a similar "the code is right but the bug
+   persists" situation comes up with any other `fetch()`-loaded data file.
+
+## Suggested next steps
+
+1. Confirm everything above looks right in a real browser session on your own machine
+   — this session verified extensively with Playwright + real save data (including
+   pixel-exact legend centering at your actual 2524×1239 resolution and hand-verified
+   min/max numbers), but that's not a substitute for you actually looking at it.
+2. When you're ready to actually deploy: `netlify link` + a first `netlify deploy` are
+   the only remaining steps that touch Netlify's quota — nothing tonight did.
+3. `map_data/` is gitignored (licensing) so the regenerated `locations.json` (with the
+   new `impassable` flag) only exists on this machine — if you set up the map on
+   another machine, re-run `tools/build-location-data.js` after copying your own EU5
+   map files in, or the impassable-terrain fix won't apply there until you do.
+
+---
+
+# Handoff — 2026-07-11 session (superseded, kept for history)
 
 This replaces the 2026-07-10 handoff below it in spirit (not literally kept — that one
 predated Llama Score even being wired into the UI and described `.git` as empty, which

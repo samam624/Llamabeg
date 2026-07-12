@@ -24,7 +24,7 @@
 
   // series: [{ label, color, points: number[] }], all points arrays the
   // same length, aligned to `years` (same length, ascending).
-  function renderLineChart(container, { title, years, series }) {
+  function renderLineChart(container, { title, years, series, yScale, yMin, yMax }) {
     const W = 720,
       H = 300;
     const padL = 52,
@@ -48,14 +48,28 @@
       dataMin = 0;
       dataMax = 1;
     }
+    if (Number.isFinite(yMin) && Number.isFinite(yMax) && yMax > yMin) {
+      dataMin = yMin;
+      dataMax = yMax;
+    }
     const span = Math.max(1e-9, dataMax - dataMin);
+    const tightScale = yScale === "tight";
     const clusteredPositive = dataMin > 0 && dataMin / Math.max(dataMax, 1e-9) > 0.25;
-    let minY = clusteredPositive ? Math.max(0, dataMin - span * 0.18) : 0;
+    let minY = tightScale || clusteredPositive ? dataMin - span * 0.18 : 0;
     let maxY = dataMax + span * 0.18;
-    if (maxY <= minY) maxY = minY + 1;
+    if (!tightScale) minY = Math.max(0, minY);
+    if (maxY <= minY) {
+      const pad = Math.max(Math.abs(dataMax || 0) * 0.08, 0.001);
+      minY = tightScale ? dataMin - pad : 0;
+      maxY = dataMax + pad;
+    }
 
     const xAt = (i) => padL + (years.length <= 1 ? 0 : (i / (years.length - 1)) * plotW);
-    const yAt = (v) => padT + plotH - ((v - minY) / (maxY - minY)) * plotH;
+    const yAt = (v) => {
+      const raw = (v - minY) / (maxY - minY);
+      const t = tightScale ? Math.max(0, Math.min(1, raw)) : raw;
+      return padT + plotH - t * plotH;
+    };
 
     const GRID_STEPS = 4;
     let gridLines = "";

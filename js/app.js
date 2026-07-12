@@ -424,6 +424,7 @@
 
     const series = withHistory.map((p) => ({
       label: `${p.name} (${p.country.tag})`,
+      color: p.country.color || undefined,
     }));
 
     function alignRight(points) {
@@ -455,8 +456,9 @@
     });
     if (taxPerPopChartEl) {
       renderChartWithRange(taxPerPopChartEl, {
-        title: "Tax base / population over time",
+        title: "Tax base / 1k people over time",
         years,
+        yScale: "tight",
         series: withHistory.map((p, i) => ({ ...series[i], points: taxBasePerPopSeries(p.country) })),
       });
     }
@@ -553,7 +555,9 @@
     const lossValues = rows.map((r) => r.popLossPct).filter((v) => typeof v === "number");
     blackDeathLossRange = lossValues.length ? { min: Math.min(...lossValues), max: Math.max(...lossValues) } : { min: 0, max: 1 };
 
-    renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct" });
+    // Ascending (lowest Lost % first) - the least-affected country is the
+    // "winner" of the outbreak, per the tab's rename.
+    renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct", defaultSortDir: 1 });
   }
 
   // --- Llama score (js/llama-score.js) ---
@@ -653,18 +657,12 @@
     "post-war-prestige-swing": "Prestige swung between sides",
     "battle-losses-inflicted": "Battle losses (no economic signal)",
     "last-known-war-score": "Last known in-game war score",
-    "last-known-single-sided-attacker-score": "Leftover one-sided war score (attacker)",
-    "last-known-single-sided-defender-score": "Leftover one-sided war score (defender)",
     "white-peace": "No decisive signal - treated as white peace",
     "war-disappeared-without-decisive-signal": "No signal before the war disappeared",
   };
   // Hover tooltips for the less-obvious reason codes - see the "How are
   // these scores calculated?" details block above for the full writeup.
   const LLAMA_REASON_TOOLTIPS = {
-    "last-known-single-sided-attacker-score":
-      "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct is available.",
-    "last-known-single-sided-defender-score":
-      "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct is available.",
     "post-war-land-transfer-coalition":
       "Land changed hands, but only measured across the whole side (including any vassals/allies dragged in) rather than just the war's original two declared belligerents - a real signal, just less precise than a clean 1-on-1 comparison.",
   };
@@ -1263,7 +1261,7 @@
     }
     const handle = (ledgerConnection && ledgerConnection.dataDirHandle) || (await LedgerConnect.loadHandle());
     if (!handle) {
-      llamaAutoStatusEl.textContent = "No recorder folder connected yet - see Manual setup below.";
+      llamaAutoStatusEl.textContent = "No recorder folder connected yet - see the Llama Score User Manual below.";
       updateLlamaPanelVisibility();
       return;
     }
@@ -1390,10 +1388,28 @@
         endInput.value = end;
       }
       label.textContent = years.length ? `${years[start]}-${years[end]}` : "";
+      const slicedSeries = config.series.map((s) => ({ ...s, points: (s.points || []).slice(start, end + 1) }));
+      let yMin;
+      let yMax;
+      if (config.yScale === "tight") {
+        const values = slicedSeries.flatMap((s) => (s.points || []).filter((v) => typeof v === "number" && Number.isFinite(v)));
+        if (values.length) {
+          const sortedValues = values.slice().sort((a, b) => a - b);
+          const at = (p) => sortedValues[Math.max(0, Math.min(sortedValues.length - 1, Math.round((sortedValues.length - 1) * p)))];
+          const min = at(0.05);
+          const max = at(0.95);
+          const span = Math.max(max - min, Math.abs(max || min || 1) * 0.08, 0.001);
+          yMin = min - span * 0.18;
+          yMax = max + span * 0.18;
+        }
+      }
       Charts.renderLineChart(inner, {
         title: config.title,
         years: years.slice(start, end + 1),
-        series: config.series.map((s) => ({ ...s, points: (s.points || []).slice(start, end + 1) })),
+        series: slicedSeries,
+        yScale: config.yScale,
+        yMin,
+        yMax,
       });
     }
 
@@ -1427,9 +1443,24 @@
     return Math.round(Number(raw) * 1000).toLocaleString();
   }
 
+  // `countryType === "Real"` alone still includes every unformed/pre-spawn
+  // country-database slot (formables, reserved native tags, etc.) that owns
+  // zero locations - confirmed against real save data these are legitimate
+  // placeholder entries (e.g. a "FIN" record sitting in the database years
+  // before Finland actually forms, with historicalPopulation=[0] and no
+  // economy block at all), not a parsing bug. They swamped the Countries
+  // table with rows that are entirely "-" and inflated the Overview's
+  // country count by nearly 3x in one real save (2501 "Real" entries, only
+  // 1052 actually holding land). A landless "country" isn't a country
+  // anyone cares to look at in either place, so both are scoped to ones
+  // that actually exist on the map.
+  function isRealTerritorialCountry(c) {
+    return c.countryType === "Real" && typeof c.locationCount === "number" && c.locationCount > 0;
+  }
+
   function renderOverview(result) {
     const meta = result.metadata || {};
-    const realCountries = result.countries.filter((c) => c.countryType === "Real");
+    const realCountries = result.countries.filter(isRealTerritorialCountry);
     const totalGold = realCountries.reduce((sum, c) => sum + (c.gold || 0), 0);
 
     const stats = [
@@ -1453,6 +1484,39 @@
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
+
+  // Hover-only explanations for column headers, shown via the native title
+  // attribute (see renderSortableTable's thead builder) - keyed by column
+  // key, shared across every table so a key like "efficiency" only needs
+  // writing once even though it appears in both the Countries and Players
+  // tables. Only keys worth explaining are listed (self-explanatory ones
+  // like "Treasury" or "Tag" are skipped) - a column with no entry here
+  // just gets no tooltip, not a placeholder one.
+  const COLUMN_DESCRIPTIONS = {
+    scorePlace: "The game's own overall world rank for this country (score.score_place in the save) - lower is better, combines the ADM/DIP/MIL rank-in-category scores below.",
+    admScore: "Administrative score rating (score.score_rating.ADM) - one of the game's three per-country competency scores; see the DIP/MIL tooltips for the other two.",
+    dipScore: "Diplomatic score rating (score.score_rating.DIP) - one of the game's three per-country competency scores.",
+    milScore: "Military score rating (score.score_rating.MIL) - one of the game's three per-country competency scores.",
+    totalDevelopment: "Sum of the Development stat across every location this country owns.",
+    avgDevelopment: "Total Development divided by number of owned locations - average development per location, independent of how large the country is.",
+    lastMonthGoldIncome: "Gold income from last month (last_month_gold_income in the save) - the game's own single \"how much did I make\" figure.",
+    income: "Gross income - all sources of income added together, before any expenses are subtracted.",
+    expense: "Gross expense - all outgoing spending added together, before weighing it against income.",
+    profit: "Income minus Expense - what's actually left over each month after paying for everything.",
+    efficiency: "Profit divided by Income - the share of gross income kept as profit rather than spent. 100% = no expenses at all; 0% = spending exactly what you make; negative = spending more than you make.",
+    lastMonthsArmyMaintenance: "Gold spent maintaining the standing army last month.",
+    lastMonthsNavyMaintenance: "Gold spent maintaining the navy last month.",
+    incomePerPop: "Last month's gold income divided by population - how much this country earns per person, independent of its total size.",
+    taxBasePerPop: "Latest tax base value divided by population - how much taxable value this country generates per person.",
+    manpowerPerPop: "Manpower divided by population - how much of this country's population is available as army reinforcements, per person.",
+    greatPowerRank: "This country's rank on the game's Great Power standings (lower is better) - factors in population, income, advances, stability, prestige, markets, military, and more per the game's own Great Power Score.",
+    popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
+    deaths: "The game's own recorded death count for this country from this specific Black Death outbreak (disease_outbreak_manager's per-country tally) - not a population-before/after estimate, so land gained or lost during the outbreak doesn't distort it.",
+    popLossPct: "Black Death deaths divided by population at the start of the outbreak - what share of this country's people the plague actually killed.",
+    E: "Enemies - count of distinct enemy countries on the other side of this war (players only, for a scored PvP row).",
+    A: "Allies - count of distinct allied countries on this player's own side of the war, not counting themselves.",
+    warScore: "This war's contribution to the player's Llama/Alpaca Points, from the formula: 10·E·W/(A+1) + 10·(W−1)·(A+1)/(2·E) - bigger for beating more enemies with fewer allies helping.",
+  };
 
   const COUNTRY_COLUMNS = [
     {
@@ -1575,10 +1639,11 @@
       "incomePerPop",
       "taxBasePerPop",
     ],
-    military: ["tag", "playerNames", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "admScore", "dipScore", "milScore"],
+    military: ["tag", "playerNames", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize"],
     demographic: [
       "tag",
       "playerNames",
+      "greatPowerRank",
       "locationCount",
       "totalDevelopment",
       "avgDevelopment",
@@ -1588,15 +1653,14 @@
       "manpowerPerPop",
       "stability",
       "prestige",
-      "greatPowerRank",
     ],
   };
 
   const PLAYER_METRIC_GROUPS = {
     key: ["name", "tag", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
     economy: ["name", "tag", "gold", "lastMonthGoldIncome", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
-    military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "admScore", "dipScore", "milScore", "__hide"],
-    demographic: ["name", "tag", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "greatPowerRank", "__hide"],
+    military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "__hide"],
+    demographic: ["name", "tag", "greatPowerRank", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "__hide"],
   };
 
   function countryColumnsForCurrentGroup() {
@@ -1625,10 +1689,44 @@
     return typeof value === "number" && Number.isFinite(value) ? value : undefined;
   }
 
+  // Efficiency (profit/income) gets a FIXED 0-100% scale instead of the
+  // usual per-column min/max normalization - a real save can have a country
+  // losing money so badly its efficiency reads -5000% (spending 50x what it
+  // makes), and normalizing 0-100% against that outlier as the "max" end
+  // squished every normal country (0-100%, the entire range anyone actually
+  // cares to compare) into a thin green sliver at the very top - EVERY
+  // country looked "good" regardless of real standing. Any negative value
+  // now reads as flatly the worst score (0) rather than getting its own
+  // shade based on how catastrophically negative it is (how much worse
+  // -50% is than -5000% isn't a meaningful distinction to color-code), and
+  // 0-100% gets the actual gradient.
+  function heatScoreFor(col, value, rows) {
+    if (col.key === "efficiency") {
+      if (typeof value !== "number") return undefined;
+      return value <= 0 ? 0 : Math.min(1, value);
+    }
+    const values = rows.map((r) => metricValue(r, col)).filter((v) => typeof v === "number");
+    const min = values.length ? Math.min(...values) : undefined;
+    const max = values.length ? Math.max(...values) : undefined;
+    if (typeof value !== "number" || typeof min !== "number" || typeof max !== "number" || max <= min) return undefined;
+    return Math.max(0, Math.min(1, (value - min) / (max - min)));
+  }
+
+  // Income/mo first (when the current metric group shows it - Key and
+  // Economy both do) since that's the number players actually care about
+  // ranking by; scorePlace next (Military/Demographic groups, where income
+  // isn't shown); otherwise whatever the first visible column happens to be
+  // (unchanged fallback behavior).
+  function defaultSortKeyFor(columns) {
+    if (columns.some((col) => col.key === "lastMonthGoldIncome")) return "lastMonthGoldIncome";
+    if (columns.some((col) => col.key === "scorePlace")) return "scorePlace";
+    return columns[0] && columns[0].key;
+  }
+
   function renderSortableTable(container, rows, columns, options) {
     options = options || {};
     let sortKey = options.defaultSortKey || (columns[0] && columns[0].key);
-    let sortDir = -1;
+    let sortDir = options.defaultSortDir || -1;
 
     function draw() {
       const sorted = rows.slice().sort((a, b) => {
@@ -1646,7 +1744,10 @@
         .map((col) => {
           const isSorted = col.key === sortKey;
           const arrow = isSorted ? `<span class="arrow">${sortDir === 1 ? "▲" : "▼"}</span>` : "";
-          return `<th data-key="${col.key}" class="${isSorted ? "sorted" : ""}">${escapeHtml(col.label)}${arrow}</th>`;
+          const desc = COLUMN_DESCRIPTIONS[col.key];
+          const titleAttr = desc ? ` title="${escapeHtml(desc)}"` : "";
+          const classes = [isSorted ? "sorted" : "", desc ? "has-desc" : ""].filter(Boolean).join(" ");
+          return `<th data-key="${col.key}" class="${classes}"${titleAttr}>${escapeHtml(col.label)}${arrow}</th>`;
         })
         .join("");
 
@@ -1658,11 +1759,8 @@
               let style = "";
               if (options.colorKeyMetrics && KEY_HEAT_COLUMNS.has(col.key)) {
                 const value = metricValue(row, col);
-                const values = rows.map((r) => metricValue(r, col)).filter((v) => typeof v === "number");
-                const min = values.length ? Math.min(...values) : undefined;
-                const max = values.length ? Math.max(...values) : undefined;
-                if (typeof value === "number" && typeof min === "number" && typeof max === "number" && max > min) {
-                  const score = Math.max(0, Math.min(1, (value - min) / (max - min)));
+                const score = heatScoreFor(col, value, rows);
+                if (typeof score === "number") {
                   classes.push("metric-heat");
                   style = ` style="--metric-score:${score.toFixed(3)}"`;
                 }
@@ -1725,7 +1823,7 @@
 
     const columns = playerColumnsForCurrentGroup();
     renderSortableTable(playersTableEl, visible, columns, {
-      defaultSortKey: columns.some((col) => col.key === "scorePlace") ? "scorePlace" : columns[0] && columns[0].key,
+      defaultSortKey: defaultSortKeyFor(columns),
       colorKeyMetrics: currentPlayerMetricGroup === "key",
       onRender: (container) => {
         container.querySelectorAll(".hide-player-btn").forEach((btn) => {
@@ -1796,7 +1894,7 @@
 
   function drawCountryTable() {
     const columns = countryColumnsForCurrentGroup();
-    const defaultSortKey = columns.some((col) => col.key === "scorePlace") ? "scorePlace" : columns[0] && columns[0].key;
+    const defaultSortKey = defaultSortKeyFor(columns);
     countriesController = renderSortableTable(countriesTableEl, filteredCountries(), columns, {
       defaultSortKey,
       colorKeyMetrics: currentMetricGroup === "key",
@@ -1804,7 +1902,7 @@
   }
 
   function renderCountries(result) {
-    latestCountries = result.countries.filter((c) => c.countryType === "Real");
+    latestCountries = result.countries.filter(isRealTerritorialCountry);
     countryCountEl.textContent = latestCountries.length;
     drawCountryTable();
   }

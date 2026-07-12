@@ -30,5 +30,6 @@ fs.mkdirSync(outDir, { recursive: true });
 copyFile("index.html");
 copyDir(path.join(root, "css"), path.join(outDir, "css"));
 copyDir(path.join(root, "js"), path.join(outDir, "js"));
+copyDir(path.join(root, "assets"), path.join(outDir, "assets"));
 
 console.log(`Built static site in ${path.relative(root, outDir)}`);

@@ -537,6 +537,11 @@ thead th.sorted {
   color: var(--accent);
 }
 
+thead th.has-desc {
+  text-decoration: underline dotted rgba(255, 255, 255, 0.35);
+  text-underline-offset: 3px;
+}
+
 thead th .arrow {
   font-size: 0.7rem;
   margin-left: 0.25rem;
@@ -660,6 +665,23 @@ td.metric-heat {
 .formula-note code {
   color: var(--accent);
   font-size: 0.85em;
+}
+
+.llama-manual-steps {
+  margin: 0.5rem 0 0;
+  padding: 0.75rem 1rem 0.75rem 2rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.llama-manual-steps li {
+  margin-top: 0.6rem;
+  line-height: 1.5;
+}
+
+.llama-manual-steps li:first-child {
+  margin-top: 0;
 }
 
 .link-btn {
@@ -912,6 +934,11 @@ body.map-view-active .map-toolbar .map-mode-btn {
   min-height: 520px;
   overflow: hidden;
   background: #0c1015;
+  /* Single source of truth for the country/location side panels' width, so
+     the legend below can reserve the exact same space when centering
+     itself in the remaining visible gap instead of drifting out of sync
+     with two separately-hardcoded 380px values. */
+  --map-side-panel-w: min(380px, calc(50vw - 2rem));
 }
 
 body.map-view-active .map-body,
@@ -977,14 +1004,14 @@ body.map-view-active #mapContainer {
   left: 1rem;
   top: 4.4rem;
   bottom: 1rem;
-  width: min(380px, calc(50vw - 2rem));
+  width: var(--map-side-panel-w);
 }
 
 .location-details {
   top: 4.4rem;
   right: 1rem;
   bottom: 1rem;
-  width: min(380px, calc(50vw - 2rem));
+  width: var(--map-side-panel-w);
 }
 
 .location-details[hidden],
@@ -1159,51 +1186,6 @@ body.map-view-active #mapContainer {
   flex: 0 0 auto;
 }
 
-.road-assets-head {
-  display: flex;
-  align-items: center;
-  gap: 0.45rem;
-  margin-bottom: 0.45rem;
-  color: var(--text);
-  font-size: 0.82rem;
-}
-
-.road-assets-head img,
-.road-chip img {
-  width: 1.1rem;
-  height: 1.1rem;
-  object-fit: contain;
-}
-
-.road-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.road-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.22rem 0.45rem;
-  border: 1px solid rgba(111, 145, 178, 0.45);
-  border-radius: 5px;
-  background: rgba(91, 157, 217, 0.08);
-  color: var(--text);
-  font-size: 0.78rem;
-  text-transform: capitalize;
-}
-
-.road-chip.empty {
-  color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.025);
-}
-
-.road-chip strong {
-  font-variant-numeric: tabular-nums;
-  color: var(--accent);
-}
-
 .building-detail-section {
   padding-top: 0.7rem;
   border-top: 1px solid rgba(42, 50, 64, 0.9);
@@ -1285,43 +1267,18 @@ body.map-view-active #mapContainer {
   min-width: 0;
 }
 
-.map-leader-line {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 3;
-}
-
-.map-leader-line[hidden] {
-  display: none;
-}
-
-.map-leader-line-path {
-  stroke: rgba(255, 255, 255, 0.88);
-  stroke-width: 2;
-  stroke-dasharray: 5 4;
-  vector-effect: non-scaling-stroke;
-}
-
-.map-leader-line-dot {
-  fill: #fff587;
-  stroke: #111;
-  stroke-width: 1.5;
-}
-
 .map-legend {
   position: absolute;
-  left: 50%;
+  left: 1rem;
+  right: 1rem;
   bottom: 1rem;
   z-index: 11;
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;
-  width: min(620px, calc(100vw - 2rem));
+  width: min(620px, calc(100% - 2rem));
   max-height: 18vh;
-  margin: 0;
+  margin: 0 auto;
   overflow: auto;
   padding: 0.6rem 0.75rem;
   border: 1px solid rgba(42, 50, 64, 0.9);
@@ -1331,12 +1288,20 @@ body.map-view-active #mapContainer {
   font-size: 0.8rem;
   color: var(--text-dim);
   align-items: center;
-  transform: translateX(-50%);
   backdrop-filter: blur(12px);
 }
 
+/* Recenter within whatever's actually still visible once a side panel
+   opens, rather than staying centered on the full map body (and drifting
+   toward whichever side just got covered) - left/right insets grow by
+   exactly the open panel's own width + gap, using the same
+   --map-side-panel-w the panels themselves are sized from. */
 .map-body.has-country .map-legend {
-  display: none;
+  left: calc(var(--map-side-panel-w) + 2rem);
+}
+
+.map-body.has-location .map-legend {
+  right: calc(var(--map-side-panel-w) + 2rem);
 }
 
 .map-legend-item {
@@ -1355,6 +1320,14 @@ body.map-view-active #mapContainer {
 }
 
 .map-legend-overflow {
+  font-style: italic;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+.map-legend-note {
+  width: 100%;
+  font-size: 0.72rem;
   font-style: italic;
   color: var(--text-dim);
   opacity: 0.75;
@@ -1445,7 +1418,16 @@ body.map-view-active .map-loading {
     bottom: 0.75rem;
     left: 0.75rem;
     width: auto;
-    transform: none;
+  }
+
+  /* The desktop side-panel-aware centering rules (same selector specificity)
+     don't apply here - on a narrow screen the country/location panels are
+     full-width bottom sheets, not side panels, so there's no side gap to
+     recenter within. */
+  .map-body.has-country .map-legend,
+  .map-body.has-location .map-legend {
+    left: 0.75rem;
+    right: 0.75rem;
   }
 
   .map-body.has-location .map-toolbar,

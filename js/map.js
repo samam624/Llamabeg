@@ -115,7 +115,14 @@
   }
 
   async function loadLocationNames() {
-    const res = await fetch("map_data/locations.json");
+    // no-store, not just a cache-busting query string: this file changes
+    // whenever tools/build-location-data.js is re-run (e.g. the
+    // `impassable` flag added later), and a stale cached copy silently
+    // reproduces "fixed" bugs with zero indication why - confirmed exactly
+    // this happened once already (map.js's own logic was correct and
+    // reloaded fine via its own cache-busted script tag, but this fetch
+    // kept serving the pre-fix JSON with no `impassable` data at all).
+    const res = await fetch("map_data/locations.json", { cache: "no-store" });
     return res.json();
   }
 
@@ -172,30 +179,29 @@
     return OFFSETS[id % OFFSETS.length];
   }
 
-  // Numeric mapmodes: low is bad/sparse (black/red), high is good/rich
-  // (green/blue). Palettes differ by mode so development and population
-  // remain visually distinct.
-  function heatColor(t, palette) {
+  // Numeric mapmodes (development, population, control, prosperity) all
+  // share ONE heat palette now - pdx.tools-style dark brown (low/bad) to
+  // tan (mid) to vivid green (high/good), replacing the old two near-
+  // identical black/red/green/blue "rainbow" variants per user request
+  // ("reads a little better"). The floor color is deliberately NOT literal
+  // black: a genuine 0% value used to render as [8,10,12]/[42,18,18],
+  // visually indistinguishable from unclaimed land, water, or the page's
+  // own dark background - all already near-black in this UI. This floor
+  // (a warm dark brown, distinct in hue from NO_DATA_COLOR/WATER_COLOR/
+  // NON_PLAYER_MUTED below) reads as "genuinely 0%, still real data"
+  // instead of "nothing rendered here."
+  const HEAT_STOPS = [
+    [40, 28, 18],
+    [130, 94, 46],
+    [78, 200, 94],
+  ];
+  function heatColor(t) {
     t = Math.max(0, Math.min(1, t));
-    const stops =
-      palette === "development"
-        ? [
-            [42, 18, 18],
-            [156, 42, 38],
-            [64, 174, 102],
-            [77, 166, 226],
-          ]
-        : [
-            [8, 10, 12],
-            [137, 28, 42],
-            [35, 154, 104],
-            [90, 188, 255],
-          ];
-    const scaled = t * (stops.length - 1);
-    const idx = Math.min(stops.length - 2, Math.floor(scaled));
+    const scaled = t * (HEAT_STOPS.length - 1);
+    const idx = Math.min(HEAT_STOPS.length - 2, Math.floor(scaled));
     const u = scaled - idx;
-    const a = stops[idx];
-    const b = stops[idx + 1];
+    const a = HEAT_STOPS[idx];
+    const b = HEAT_STOPS[idx + 1];
     return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * u));
   }
 
@@ -222,30 +228,126 @@
       return !mapState.focusCountry || (loc && loc.owner === mapState.focusCountry);
     }
 
-    function computeMetricMaxes(countryNumber) {
-      const maxes = { development: 1, population: 1, tradeGood: 1 };
+    // Heat gradients used to always run 0 -> max, but development/
+    // population/control/prosperity essentially never have any locations
+    // actually near 0 in a real save (the lowest real Population might be
+    // a few hundred, not 0) - stretching the full color range across
+    // "0 to max" when nothing ever gets close to 0 wastes most of that
+    // range: every real location bunches up in a thin slice near the
+    // bright end, and the dark end of the gradient never gets used at all.
+    // Scaling min -> max instead (per user request) uses the FULL color
+    // range for the actual spread of values that exist, so real
+    // differences between locations are visible rather than compressed.
+    const HEAT_SCALE_FIELDS = ["development", "population", "control", "prosperity"];
+    function computeMetricScales(countryNumber) {
+      const scales = {};
+      for (const field of HEAT_SCALE_FIELDS) scales[field] = { min: Infinity, max: -Infinity };
+      let tradeGoodMax = 1;
       for (const l of result.locations || []) {
         if (countryNumber && l.owner !== countryNumber) continue;
-        if (typeof l.development === "number" && l.development > maxes.development) maxes.development = l.development;
-        if (typeof l.population === "number" && l.population > maxes.population) maxes.population = l.population;
-        if (mapState.focusTradeGood && l.rawMaterial === mapState.focusTradeGood && typeof l.maxRawMaterialWorkers === "number" && l.maxRawMaterialWorkers > maxes.tradeGood) {
-          maxes.tradeGood = l.maxRawMaterialWorkers;
+        for (const field of HEAT_SCALE_FIELDS) {
+          const v = ownedNumericOrZero(l, field);
+          if (typeof v !== "number") continue;
+          const scale = scales[field];
+          if (v < scale.min) scale.min = v;
+          if (v > scale.max) scale.max = v;
+        }
+        if (mapState.focusTradeGood && l.rawMaterial === mapState.focusTradeGood && typeof l.maxRawMaterialWorkers === "number" && l.maxRawMaterialWorkers > tradeGoodMax) {
+          tradeGoodMax = l.maxRawMaterialWorkers;
         }
       }
-      return maxes;
+      for (const field of HEAT_SCALE_FIELDS) {
+        const scale = scales[field];
+        // No real data at all (e.g. a country with zero locations focused),
+        // or every value identical (min===max, would divide by zero) - fall
+        // back to a plain 0-1 scale rather than producing NaN colors.
+        if (!Number.isFinite(scale.min) || !Number.isFinite(scale.max) || scale.max <= scale.min) {
+          scales[field] = { min: 0, max: Number.isFinite(scale.max) ? Math.max(scale.max, 1) : 1 };
+        }
+      }
+      scales.tradeGood = tradeGoodMax;
+      return scales;
     }
 
-    mapState.metricMaxes = computeMetricMaxes(mapState.focusCountry);
+    mapState.metricScales = computeMetricScales(mapState.focusCountry);
 
     function updateMetricScale(countryNumber) {
-      mapState.metricMaxes = computeMetricMaxes(countryNumber);
+      mapState.metricScales = computeMetricScales(countryNumber);
     }
 
-    function filteredHeatColor(loc, field, palette) {
-      if (!loc || typeof loc[field] !== "number") return NO_DATA_COLOR;
+    // Impassable mountains/wasteland and non-ownable desert corridors
+    // (map_data's default.map `impassable_mountains`/`non_ownable` lists,
+    // baked into locations.json's `impassable` flag by
+    // tools/build-location-data.js) are real terrain but never get a
+    // meaningful development/control/prosperity value from the game -
+    // ~1,971 of 28,573 locations. Confirmed these were dominating the
+    // min/max heat scale: they render inside a country's own border (EU5
+    // assigns administrative ownership over them regardless of them being
+    // unusable), so ownedNumericOrZero's "owned but missing = 0" treatment
+    // was counting a mountain range as a genuine 0%-control PROVINCE,
+    // dragging that country's own scale floor down and compressing the
+    // gradient's usable range for its real, meaningful locations.
+    function isImpassable(loc) {
+      const meta = loc && locationsMeta[loc.number];
+      return !!(meta && meta.impassable);
+    }
+
+    // A location can be owned by a real country yet have no tracked value
+    // at all for a given numeric field - confirmed on real data: ~2,100 of
+    // 13,500 owned locations have no `control` value at all (presumably
+    // freshly taken/contested land the game hasn't assigned a % to yet).
+    // That's structurally different from a genuinely unowned/wilderness
+    // location, which has NO data for anything and should keep reading as
+    // neutral "no data" - only the owned-but-missing case gets treated as
+    // an explicit 0 (the gradient's dark floor) instead of falling back to
+    // the "no data" color, which is what was actually causing large owned
+    // stretches of the map to look flatly uncolored instead of dark.
+    //
+    // Impassable-flagged terrain is excluded from the heat gradient
+    // entirely, unconditionally - even on the ~166 of 1,971 impassable
+    // locations that happen to carry a real, directly-parsed development/
+    // control value. Tried letting those real values through (per-location
+    // accuracy), but per user feedback that still let mountain terrain's
+    // atypical values pull on the min/max SCALE, distorting the gradient's
+    // range for the country's actual real land - excluding them outright
+    // is what makes the rest of the country's own spread of values read
+    // correctly. A handful of impassable locations losing their own real
+    // color is the accepted tradeoff for that.
+    // A location with a real owner can STILL be a total blank slate - no
+    // population, no development, no control, nothing - even when it isn't
+    // impassable-flagged. Root-caused on real data: applyProvinceOwnerFallback
+    // (js/map.js) assigns a location's owner from its enclosing PROVINCE
+    // whenever the location's own owner field is blank, specifically so
+    // political-map coloring reads correctly for the ~10% of locations with
+    // that gap - but that fallback owner doesn't mean the location has any
+    // location-level data of its own. Confirmed: a real Serbia-owned
+    // location (owner assigned only via the province fallback) had no
+    // population/development/control/estate-tax/institutions at all, and
+    // ownedNumericOrZero was reading its missing population as an explicit
+    // 0 - reproducing the exact "fake 0%" problem the impassable-terrain
+    // fix addressed, just via a different path. A location only gets the
+    // "missing field -> 0" treatment now if it has at least ONE other real,
+    // directly-parsed heat-scale field - genuine partial data (e.g. missing
+    // just `control`) still gets the 0 fill; a location with NOTHING
+    // tracked at all reads as neutral "no data" regardless of why it
+    // appears owned.
+    function hasAnyLocationData(loc) {
+      return HEAT_SCALE_FIELDS.some((f) => typeof loc[f] === "number");
+    }
+
+    function ownedNumericOrZero(loc, field) {
+      if (!loc || isImpassable(loc)) return undefined;
+      if (typeof loc[field] === "number") return loc[field];
+      if (!hasAnyLocationData(loc)) return undefined;
+      return typeof loc.owner === "number" ? 0 : undefined;
+    }
+
+    function filteredHeatColor(loc, field) {
+      const value = ownedNumericOrZero(loc, field);
+      if (typeof value !== "number") return NO_DATA_COLOR;
       if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
-      const max = (mapState.metricMaxes && mapState.metricMaxes[field]) || 1;
-      return heatColor(loc[field] / max, palette);
+      const scale = (mapState.metricScales && mapState.metricScales[field]) || { min: 0, max: 1 };
+      return heatColor((value - scale.min) / (scale.max - scale.min));
     }
 
     function countryColor(countryNumber) {
@@ -269,6 +371,48 @@
       const center = market && locationsMeta[market.center];
       if (center && center.name) return `${titleCaseName(center.name)} Market`;
       return marketId === undefined || marketId === null ? null : `Market #${marketId}`;
+    }
+
+    // Markets carry their own `color` in the save (same rgb the game's own
+    // UI uses for that market) - reuse it directly rather than hashing a
+    // new one, per the user's "color coded like in the game" ask. Falls
+    // back to a hashed color only for the rare case a market has none.
+    function marketColor(marketId) {
+      const market = marketByNumber.get(marketId);
+      const rgb = market && parseRgbString(market.color);
+      return rgb || colorForId(marketId);
+    }
+
+    // "Market Access" used to run every location through ONE shared
+    // gradient regardless of which market it belongs to, so two locations
+    // in different markets with the same access % looked identical - no way
+    // to tell which market's reach you were even looking at. Now each
+    // market gets its OWN localized gradient: grey/dark (low access) rising
+    // to that specific market's own real color (high access), so color
+    // simultaneously encodes "which market" (hue) and "how much access."
+    //
+    // A 75%-inflection "peaks then darkens again" curve was tried and
+    // reverted per user feedback - it made the map look uniformly washed
+    // out (most real locations sit in a broad 30-70% band, which under that
+    // curve never reached anywhere near full color). Back to a plain
+    // monotonic rise from dark to the market's color, but weighted (t ^
+    // DARKEN_POWER, not a straight 1:1 blend) so it falls into the dark/
+    // grey floor faster as access drops - only genuinely high-access
+    // locations show real color, everything else reads as clearly muted
+    // instead of a wishy-washy 50/50 blend in the middle of the range.
+    const MARKET_ACCESS_LOW_COLOR = HEAT_STOPS[0];
+    const MARKET_ACCESS_DARKEN_POWER = 2.4;
+    // Neutral stand-in hue for the legend bar, which has to illustrate the
+    // dark -> color SHAPE generically since the real color varies per
+    // market on the actual map.
+    const MARKET_ACCESS_LEGEND_COLOR = [91, 157, 217];
+    function accessCurveColor(base, t) {
+      t = Math.max(0, Math.min(1, t));
+      const u = Math.pow(t, MARKET_ACCESS_DARKEN_POWER);
+      return [0, 1, 2].map((i) => Math.round(MARKET_ACCESS_LOW_COLOR[i] + (base[i] - MARKET_ACCESS_LOW_COLOR[i]) * u));
+    }
+    function marketAccessColor(marketId, t) {
+      return accessCurveColor(marketColor(marketId), t);
     }
 
     function politicalColor(ownerNumber) {
@@ -312,8 +456,12 @@
       return { type: "categorical", items, overflow: Math.max(0, sorted.length - items.length) };
     }
 
-    function gradientLegend(maxValue, formatFn, palette) {
-      return { type: "gradient", colorAt: (t) => heatColor(t, palette), minLabel: formatFn(0), maxLabel: formatFn(maxValue) };
+    function gradientLegend(minValue, maxValue, formatFn) {
+      return { type: "gradient", colorAt: heatColor, minLabel: formatFn(minValue), maxLabel: formatFn(maxValue) };
+    }
+
+    function scaleFor(field) {
+      return (mapState.metricScales && mapState.metricScales[field]) || { min: 0, max: 1 };
     }
 
     // Sea/lake locations are part of the same numbering as land (see
@@ -335,13 +483,10 @@
           const overlord = subjectToOverlord.has(loc.owner) ? countryByNumber.get(subjectToOverlord.get(loc.owner)) : null;
           return overlord ? `${country.tag} (${overlord.tag} subject)` : country.tag;
         },
-        legend: () =>
-          categoricalLegend(
-            (loc) => loc.owner || null,
-            (owner) => politicalColor(owner),
-            (owner) => (countryByNumber.get(owner) || {}).tag || `#${owner}`,
-            12
-          ),
+        // No legend - Political has 1000+ distinct owners in a real save,
+        // so a "top 12 + 1040 more" categorical legend was never actually
+        // useful (removed per user request); the political border/outline
+        // and hover tooltip already identify a location's owner directly.
       },
       players: {
         label: "Players",
@@ -375,71 +520,91 @@
       development: {
         label: "Development",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || typeof loc.development !== "number") return NO_DATA_COLOR;
-          return filteredHeatColor(loc, "development", "development");
+          return filteredHeatColor(locByNumber.get(id), "development");
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
-          return loc && typeof loc.development === "number" ? `Development: ${loc.development.toFixed(1)}` : null;
+          const value = ownedNumericOrZero(loc, "development");
+          return typeof value === "number" ? `Development: ${value.toFixed(1)}` : null;
         },
-        legend: () => gradientLegend((mapState.metricMaxes && mapState.metricMaxes.development) || 1, (v) => v.toFixed(0) + " pts", "development"),
+        legend: () => {
+          const s = scaleFor("development");
+          return gradientLegend(s.min, s.max, (v) => v.toFixed(0) + " pts");
+        },
       },
       population: {
         label: "Population",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || typeof loc.population !== "number") return NO_DATA_COLOR;
-          return filteredHeatColor(loc, "population", "population");
+          return filteredHeatColor(locByNumber.get(id), "population");
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
-          return loc && typeof loc.population === "number" ? `Population: ${fmtPopulation(loc.population)}` : null;
+          const value = ownedNumericOrZero(loc, "population");
+          return typeof value === "number" ? `Population: ${fmtPopulation(value)}` : null;
         },
-        legend: () => gradientLegend((mapState.metricMaxes && mapState.metricMaxes.population) || 1, (v) => fmtPopulation(v), "population"),
+        legend: () => {
+          const s = scaleFor("population");
+          return gradientLegend(s.min, s.max, (v) => fmtPopulation(v));
+        },
       },
       control: {
         label: "Control",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || typeof loc.control !== "number") return NO_DATA_COLOR;
-          if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
-          return heatColor(loc.control, "development");
+          return filteredHeatColor(locByNumber.get(id), "control");
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
-          return loc && typeof loc.control === "number" ? `Control: ${fmtPercent(loc.control, 1)}` : null;
+          const value = ownedNumericOrZero(loc, "control");
+          return typeof value === "number" ? `Control: ${fmtPercent(value, 1)}` : null;
         },
-        legend: () => gradientLegend(1, (v) => fmtPercent(v, 0), "development"),
+        legend: () => {
+          const s = scaleFor("control");
+          return gradientLegend(s.min, s.max, (v) => fmtPercent(v, 0));
+        },
       },
       prosperity: {
         label: "Prosperity",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || typeof loc.prosperity !== "number") return NO_DATA_COLOR;
-          if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
-          return heatColor(loc.prosperity, "population");
+          return filteredHeatColor(locByNumber.get(id), "prosperity");
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
-          return loc && typeof loc.prosperity === "number" ? `Prosperity: ${fmtPercent(loc.prosperity, 1)}` : null;
+          const value = ownedNumericOrZero(loc, "prosperity");
+          return typeof value === "number" ? `Prosperity: ${fmtPercent(value, 1)}` : null;
         },
-        legend: () => gradientLegend(1, (v) => fmtPercent(v, 0), "population"),
+        legend: () => {
+          const s = scaleFor("prosperity");
+          return gradientLegend(s.min, s.max, (v) => fmtPercent(v, 0));
+        },
       },
       marketAccess: {
-        label: "Market Access",
+        label: "Markets",
         colorFor(id) {
           const loc = locByNumber.get(id);
           if (!loc || typeof loc.marketAccess !== "number") return NO_DATA_COLOR;
           if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
-          return heatColor(loc.marketAccess, "development");
+          // No market id on record for this location (rare) - fall back to
+          // the old single global gradient rather than showing flat grey.
+          if (loc.market === undefined || loc.market === null) return heatColor(loc.marketAccess);
+          return marketAccessColor(loc.market, loc.marketAccess);
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
           const market = loc && marketName(loc.market);
           return loc && typeof loc.marketAccess === "number" ? `Market Access: ${fmtPercent(loc.marketAccess, 1)}${market ? ` (${market})` : ""}` : null;
         },
-        legend: () => gradientLegend(1, (v) => fmtPercent(v, 0), "development"),
+        // A per-market swatch list doesn't actually explain what the COLOR
+        // means (that's what hovering a location's tooltip is for) - the
+        // legend's job here is just the dark -> color shape, shown once in
+        // a neutral stand-in color rather than listing 100+ markets' real
+        // hues.
+        legend: () => ({
+          type: "gradient",
+          colorAt: (t) => accessCurveColor(MARKET_ACCESS_LEGEND_COLOR, t),
+          minLabel: "0%",
+          maxLabel: "100%",
+          note: "Hue varies by market - hover a location for its exact % and market name.",
+        }),
       },
       trade: {
         label: "Trade Goods",
@@ -455,14 +620,9 @@
           const name = titleCaseName(loc.rawMaterial);
           return typeof loc.maxRawMaterialWorkers === "number" ? `${name}: ${fmtNum(loc.maxRawMaterialWorkers, 0)} RGO capacity` : name;
         },
-        legend: () => {
-          return categoricalLegend(
-            (loc) => loc.rawMaterial || null,
-            (material) => colorForString(material),
-            (material) => material.replace(/_/g, " "),
-            14
-          );
-        },
+        // No legend - removed per user request (this and Culture/Religion/
+        // Political have too many distinct categories for a legend to be
+        // useful); the hover tooltip already identifies a location's good.
       },
       religion: {
         label: "Religion",
@@ -475,13 +635,7 @@
           const loc = locByNumber.get(id);
           return loc && loc.religion ? definitionName(religionByNumber.get(loc.religion), "Religion", loc.religion) : null;
         },
-        legend: () =>
-          categoricalLegend(
-            (loc) => loc.religion || null,
-            (id) => definitionColor(religionByNumber.get(id), id),
-            (id) => definitionName(religionByNumber.get(id), "Religion", id),
-            12
-          ),
+        // No legend - see the Trade Goods mode's comment above.
       },
       culture: {
         label: "Culture",
@@ -494,13 +648,7 @@
           const loc = locByNumber.get(id);
           return loc && loc.culture ? definitionName(cultureByNumber.get(loc.culture), "Culture", loc.culture) : null;
         },
-        legend: () =>
-          categoricalLegend(
-            (loc) => loc.culture || null,
-            (id) => definitionColor(cultureByNumber.get(id), id),
-            (id) => definitionName(cultureByNumber.get(id), "Culture", id),
-            12
-          ),
+        // No legend - see the Trade Goods mode's comment above.
       },
     };
 
@@ -1108,11 +1256,6 @@
     const countryDetails = document.createElement("div");
     countryDetails.className = "country-details";
     countryDetails.hidden = true;
-    const leaderLine = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    leaderLine.classList.add("map-leader-line");
-    leaderLine.setAttribute("aria-hidden", "true");
-    leaderLine.hidden = true;
-    leaderLine.innerHTML = '<line class="map-leader-line-path" x1="0" y1="0" x2="0" y2="0"></line><circle class="map-leader-line-dot" cx="0" cy="0" r="4"></circle>';
     const details = document.createElement("div");
     details.className = "location-details";
     details.hidden = true;
@@ -1126,7 +1269,6 @@
     mapBody.appendChild(legendEl);
     mapBody.appendChild(countryDetails);
     mapBody.appendChild(details);
-    mapBody.appendChild(leaderLine);
     container.appendChild(mapBody);
 
     const ctx = canvas.getContext("2d");
@@ -1135,7 +1277,6 @@
     let currentMode = modes.political;
     let selectedLocationId = 0;
     let selectedCountryId = 0;
-    let selectedSourcePoint = null;
     let maxId = 0;
     for (let i = 0; i < idGrid.length; i++) if (idGrid[i] > maxId) maxId = idGrid[i];
 
@@ -1223,8 +1364,6 @@
         <span>${label ? humanize(label) : humanize(classKey)}</span>
       </span>`;
     }
-
-    const ROAD_ICON = wikiIcon("Global road building time.png");
 
     // The exact entries here come from the generated EU5 Wiki building pages'
     // Employment column (Common/Rural/Urban buildings). The keyword fallback
@@ -1449,30 +1588,6 @@
       return `<div class="building-tabs">${tabs}</div>${panels}`;
     }
 
-    function roadSummaryHtml(loc) {
-      const entries = sortedEntries(loc.roadCounts);
-      const total = entries.reduce((sum, [, count]) => sum + count, 0);
-      const chips = entries.length
-        ? entries
-            .map(
-              ([name, count]) => `<span class="road-chip">
-                <img src="${ROAD_ICON}" alt="" aria-hidden="true">
-                <span>${humanize(name)}</span>
-                <strong>${fmtNum(count, 0)}</strong>
-              </span>`
-            )
-            .join("")
-        : `<span class="road-chip empty"><img src="${ROAD_ICON}" alt="" aria-hidden="true"><span>No road assets found</span></span>`;
-      return `<section class="location-detail-section road-assets-section">
-        <h4>Roads</h4>
-        <div class="road-assets-head">
-          <img src="${ROAD_ICON}" alt="" aria-hidden="true">
-          <strong>${total ? fmtNum(total, 0) + " road asset" + (total === 1 ? "" : "s") : "No road assets found"}</strong>
-        </div>
-        <div class="road-chip-row">${chips}</div>
-      </section>`;
-    }
-
     function estateToPopClass(name) {
       const base = String(name || "").replace(/_estate$/, "");
       if (base === "burghers") return "burghers";
@@ -1627,26 +1742,36 @@
         { label: "Controller", value: controller ? escapeHtml(controller) : "&mdash;" },
       ];
 
-      const stats = [
-        detailStat("Overlord", overlord ? escapeHtml(overlord) : "&mdash;"),
-        detailStat("Rank", humanize(loc.rank)),
-        detailStat("Development", typeof loc.development === "number" ? fmtNum(loc.development, 2) : "&mdash;"),
-        detailStat("Population", fmtPopulation(loc.population)),
-        detailStat("Pop Groups", fmtNum(loc.popCount, 0)),
-        detailStat("Tax Base", typeof loc.tax === "number" ? fmtNum(loc.tax, 4) + " tax" : "&mdash;"),
-        detailStat("Possible Tax", typeof loc.possibleTax === "number" ? fmtNum(loc.possibleTax, 4) + " tax" : "&mdash;"),
-        detailStat("Control", fmtPercent(loc.control, 1)),
-        detailStat("Prosperity", fmtPercent(loc.prosperity, 1)),
+      // Sea/lake tiles have no settlement to speak of - ownership,
+      // development, population, tax, control/prosperity, raw material, and
+      // culture/religion/language are all structurally absent (confirmed
+      // against real save data: every sampled sea location has those fields
+      // undefined). What a sea tile DOES genuinely carry is trade-node
+      // membership (market/secondBestMarket/marketAttraction show real
+      // values), so only that subset renders for water instead of a wall of
+      // "-" placeholders.
+      const isWater = type === "sea" || type === "lake";
+      const allStats = [
+        !isWater && detailStat("Overlord", overlord ? escapeHtml(overlord) : "&mdash;"),
+        !isWater && detailStat("Rank", humanize(loc.rank)),
+        !isWater && detailStat("Development", typeof loc.development === "number" ? fmtNum(loc.development, 2) : "&mdash;"),
+        !isWater && detailStat("Population", fmtPopulation(loc.population)),
+        !isWater && detailStat("Pop Groups", fmtNum(loc.popCount, 0)),
+        !isWater && detailStat("Tax Base", typeof loc.tax === "number" ? fmtNum(loc.tax, 4) + " tax" : "&mdash;"),
+        !isWater && detailStat("Possible Tax", typeof loc.possibleTax === "number" ? fmtNum(loc.possibleTax, 4) + " tax" : "&mdash;"),
+        !isWater && detailStat("Control", fmtPercent(loc.control, 1)),
+        !isWater && detailStat("Prosperity", fmtPercent(loc.prosperity, 1)),
         detailStat("Market", loc.market !== undefined && loc.market !== null ? escapeHtml(marketName(loc.market)) : "&mdash;"),
         detailStat("Second Market", loc.secondBestMarket !== undefined && loc.secondBestMarket !== null ? escapeHtml(marketName(loc.secondBestMarket)) : "&mdash;"),
         detailStat("Market Access", fmtPercent(loc.marketAccess, 1)),
         detailStat("Market Attraction", fmtPercent(loc.marketAttraction, 1)),
-        detailStat("Raw Material", humanize(loc.rawMaterial)),
-        detailStat("Raw Material Capacity", fmtNum(loc.maxRawMaterialWorkers, 0)),
-        detailStat("Culture", definitionNameFor(cultureByNumber, loc.culture, "Culture")),
-        detailStat("Religion", definitionNameFor(religionByNumber, loc.religion, "Religion")),
-        detailStat("Language", humanize(loc.language)),
-      ].join("");
+        !isWater && detailStat("Raw Material", humanize(loc.rawMaterial)),
+        !isWater && detailStat("Raw Material Capacity", fmtNum(loc.maxRawMaterialWorkers, 0)),
+        !isWater && detailStat("Culture", definitionNameFor(cultureByNumber, loc.culture, "Culture")),
+        !isWater && detailStat("Religion", definitionNameFor(religionByNumber, loc.religion, "Religion")),
+        !isWater && detailStat("Language", humanize(loc.language)),
+      ];
+      const stats = allStats.filter(Boolean).join("");
 
       const estateTaxRows = sortedEntries(loc.estateTax)
         .map(
@@ -1682,71 +1807,24 @@
             .join("")}
         </div>
         <div class="location-detail-stats">${stats}</div>
+        ${
+          isWater
+            ? ""
+            : `
         ${section("Demography", popRows ? `<table><thead><tr><th>Class</th><th>Total</th><th>Unemployed</th><th>RGO</th></tr></thead><tbody>${popRows}</tbody></table>` : "", "No population data")}
         ${section("Estate Tax", estateTaxRows ? `<table><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
         ${section("Institutions", institutionRows ? `<table><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
-        ${roadSummaryHtml(loc)}
         <section class="location-detail-section building-detail-section">
           <h4>Buildings</h4>
           ${buildingTabsHtml(loc)}
         </section>
+      `
+        }
       `;
-    }
-
-    function hideLeaderLine() {
-      leaderLine.hidden = true;
-      leaderLine.style.display = "none";
-      const line = leaderLine.querySelector(".map-leader-line-path");
-      const dot = leaderLine.querySelector(".map-leader-line-dot");
-      if (line) {
-        line.setAttribute("x1", "0");
-        line.setAttribute("y1", "0");
-        line.setAttribute("x2", "0");
-        line.setAttribute("y2", "0");
-      }
-      if (dot) {
-        dot.setAttribute("cx", "0");
-        dot.setAttribute("cy", "0");
-      }
-    }
-
-    function updateLeaderLine() {
-      if (!selectedLocationId || !selectedSourcePoint || details.hidden) {
-        hideLeaderLine();
-        return;
-      }
-      const bodyRect = mapBody.getBoundingClientRect();
-      const canvasRect = canvasWrap.getBoundingClientRect();
-      const detailsRect = details.getBoundingClientRect();
-      const x = canvasRect.left - bodyRect.left + selectedSourcePoint.x * view.scale + view.offX;
-      const y = canvasRect.top - bodyRect.top + selectedSourcePoint.y * view.scale + view.offY;
-      const canvasX = x - (canvasRect.left - bodyRect.left);
-      const canvasY = y - (canvasRect.top - bodyRect.top);
-      if (canvasX < 0 || canvasY < 0 || canvasX > canvasRect.width || canvasY > canvasRect.height) {
-        hideLeaderLine();
-        return;
-      }
-      leaderLine.hidden = false;
-      leaderLine.style.display = "";
-      leaderLine.setAttribute("viewBox", `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
-      const line = leaderLine.querySelector(".map-leader-line-path");
-      const dot = leaderLine.querySelector(".map-leader-line-dot");
-      const panelX = detailsRect.left - bodyRect.left;
-      const panelTop = detailsRect.top - bodyRect.top;
-      const panelBottom = detailsRect.bottom - bodyRect.top;
-      const panelY = Math.max(panelTop + 18, Math.min(panelBottom - 18, y));
-      line.setAttribute("x1", x);
-      line.setAttribute("y1", y);
-      line.setAttribute("x2", panelX);
-      line.setAttribute("y2", panelY);
-      dot.setAttribute("cx", x);
-      dot.setAttribute("cy", y);
     }
 
     function clearLocationDetails() {
       selectedLocationId = 0;
-      selectedSourcePoint = null;
-      hideLeaderLine();
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       updateMapBodyClasses();
@@ -1765,12 +1843,10 @@
 
     function clearMapFocus() {
       selectedLocationId = 0;
-      selectedSourcePoint = null;
       selectedCountryId = 0;
       mapState.focusCountry = 0;
       mapState.focusTradeGood = null;
       updateMetricScale(0);
-      hideLeaderLine();
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       countryDetails.hidden = true;
@@ -1792,7 +1868,7 @@
       if (shouldRedraw !== false) redraw();
     }
 
-    function showLocationDetails(id, hit) {
+    function showLocationDetails(id) {
       if (!locationsMeta[id] && !locByNumber.has(id)) return;
       const loc = locByNumber.get(id);
       if (currentMode === modes.trade && loc && loc.rawMaterial) {
@@ -1800,8 +1876,12 @@
         updateMetricScale(mapState.focusCountry);
       }
       if (loc && loc.owner) showCountryDetails(loc.owner, false);
+      // A sea/lake tile is never owned, so it can't ever hit the branch
+      // above - but a nation view from a PREVIOUS click can still be open.
+      // Clear it back to the global mapmode rather than leaving a stale
+      // nation highlight up while looking at an unrelated sea tile's panel.
+      else if (isWaterLUT[id] && selectedCountryId) clearCountryDetails();
       selectedLocationId = id;
-      selectedSourcePoint = hit && typeof hit.srcX === "number" && typeof hit.srcY === "number" ? { x: hit.srcX, y: hit.srcY } : null;
       details.hidden = false;
       details.innerHTML = locationDetailsHtml(id);
       const close = details.querySelector(".location-detail-close");
@@ -1817,7 +1897,6 @@
       });
       updateMapBodyClasses();
       redraw();
-      updateLeaderLine();
     }
 
     // Walks up the overlord chain (capped at 8 hops) and returns the
@@ -2036,7 +2115,6 @@
       const rect = canvasWrap.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
       renderViewport(ctx, canvas, rect.width, rect.height, DPR, view, idGrid, luts, selectedLocationId);
-      updateLeaderLine();
     }
 
     function renderLegend() {
@@ -2046,17 +2124,25 @@
       }
       const legend = currentMode.legend();
       if (legend.type === "gradient") {
-        const c0 = legend.colorAt(0);
-        const c1 = legend.colorAt(0.33);
-        const c2 = legend.colorAt(0.66);
-        const c3 = legend.colorAt(1);
-        const gradient = `linear-gradient(to right, rgb(${c0[0]},${c0[1]},${c0[2]}) 0%, rgb(${c1[0]},${c1[1]},${c1[2]}) 33%, rgb(${c2[0]},${c2[1]},${c2[2]}) 66%, rgb(${c3[0]},${c3[1]},${c3[2]}) 100%)`;
+        // Sampled at 9 points (not the old fixed 4) so a non-linear curve -
+        // e.g. Markets' access gradient, which peaks at 75% instead of
+        // rising monotonically to 100% - actually shows its real shape
+        // instead of getting smoothed away between two far-apart stops.
+        const STEPS = 8;
+        const stops = [];
+        for (let i = 0; i <= STEPS; i++) {
+          const t = i / STEPS;
+          const c = legend.colorAt(t);
+          stops.push(`rgb(${c[0]},${c[1]},${c[2]}) ${(t * 100).toFixed(1)}%`);
+        }
+        const gradient = `linear-gradient(to right, ${stops.join(", ")})`;
+        const note = legend.note ? `<div class="map-legend-note">${escapeHtml(legend.note)}</div>` : "";
         legendEl.innerHTML = `
           <div class="map-legend-gradient">
             <span>${escapeHtml(legend.minLabel)}</span>
             <div class="map-legend-gradient-bar" style="background:${gradient}"></div>
             <span>${escapeHtml(legend.maxLabel)}</span>
-          </div>`;
+          </div>${note}`;
         return;
       }
       const items = legend.items
@@ -2066,7 +2152,8 @@
         )
         .join("");
       const overflow = legend.overflow > 0 ? `<span class="map-legend-overflow">+${legend.overflow} more</span>` : "";
-      legendEl.innerHTML = items + overflow;
+      const note = legend.note ? `<div class="map-legend-note">${escapeHtml(legend.note)}</div>` : "";
+      legendEl.innerHTML = items + overflow + note;
     }
 
     const redraw = () => {
@@ -2291,7 +2378,7 @@
     canvas.addEventListener("click", (e) => {
       if (dragMoved) return;
       const hit = locationIdFromEvent(e);
-      if (hit && onLocationClick) onLocationClick(hit.id, hit);
+      if (hit && onLocationClick) onLocationClick(hit.id);
     });
     canvas.addEventListener("mouseleave", () => {
       tooltip.hidden = true;

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>EU5 Save Analyzer</title>
+  <title>Llamabeg</title>
   <link rel="icon" href="assets/llama-logo-avatar.png" onerror="this.remove()" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -11,7 +11,7 @@
   <header class="app-header">
     <div class="app-logo-frame"><img class="app-logo" src="assets/llama-logo-avatar.png" alt="" onerror="this.parentElement.style.display='none'" /></div>
     <div class="app-header-text">
-      <h1>EU5 Save Analyzer</h1>
+      <h1>Llamabeg</h1>
       <p class="subtitle">Drop in an Europa Universalis V save (compressed or melted) to see players, countries, and world stats.</p>
     </div>
     <a class="app-download-btn" href="https://github.com/samam624/EU5-Save-Analyzer/releases/download/llama-dashboard-v1.0.0/Llama-Score-Dashboard-win32-x64.zip" download>
@@ -97,7 +97,7 @@
         </section>
 
         <section class="panel" id="blackDeathPanel">
-          <h2>Black Death</h2>
+          <h2>Black Death Winner</h2>
           <p id="blackDeathSummary" class="panel-note"></p>
           <div id="blackDeathTable" class="table-wrap"></div>
         </section>
@@ -137,6 +137,37 @@
             Finished player wars are scored from the recorder's win/loss inference, including land-transfer peace results. Loading a
             save whose recorder data has already been connected once auto-tracks its campaign - no file picking needed.
           </p>
+          <details class="formula-note" id="llamaUserManual" open>
+            <summary>Llama Score User Manual</summary>
+            <ol class="llama-manual-steps">
+              <li>
+                Download the <strong>Llama Score Dashboard</strong> (the button at the top of this page) and unzip it anywhere on your
+                PC - it's a small Windows desktop app that embeds the same recorder described below, with a live view of ongoing and
+                concluded wars.
+              </li>
+              <li>
+                Run <code>Llama Score Dashboard.exe</code> from the unzipped folder and leave it running in the background while you
+                play (right-click the exe &rarr; "Send to" &rarr; "Desktop (create shortcut)" if you want it easy to relaunch next
+                time). It watches your EU5 <code>save games</code> folder automatically - no configuration needed unless your saves
+                live somewhere non-default.
+              </li>
+              <li>
+                Play normally. EU5 autosaves periodically; the Dashboard reads each new one as it lands and builds up a running log of
+                every war in your campaign - including wars that get cleared out of the save itself before you'd otherwise catch them
+                as "concluded."
+              </li>
+              <li>
+                Come back to this tab any time you want to check scores. Click <strong>"Connect campaign folder&hellip;"</strong> below
+                (one-time per browser) and pick the <code>data</code> folder inside wherever you unzipped the Dashboard - after that,
+                loading any save from a linked campaign shows its Llama Score automatically, no more picking required.
+              </li>
+              <li>
+                <strong>Multiplayer note:</strong> there's no server and no automatic syncing between different players' computers -
+                each person who wants to see live scores runs their own copy of the Dashboard against their own save folder. Since
+                everyone's client is autosaving the same shared campaign, everyone ends up tracking the same wars independently.
+              </li>
+            </ol>
+          </details>
           <div class="llama-mode-tabs" role="group" aria-label="Score mode">
             <button type="button" class="llama-mode-tab active" id="llamaModePvp" data-mode="pvp">PVP</button>
             <button type="button" class="llama-mode-tab" id="llamaModePve" data-mode="pve">PVE</button>
@@ -185,14 +216,11 @@
                 for one another, even though it's the exact same formula either way.
               </dd>
               <dt>White Peace</dt>
-              <dd>When nothing in the data points to a winner either way, the war is scored as a flat <code>0</code> for both sides rather than guessing - shown separately below from wars that were actually decided.</dd>
-              <dt>"Leftover one-sided war score"</dt>
               <dd>
-                One of the "How decided" reasons a war's winner gets picked. EU5 normally clears BOTH sides' in-game war score together once a war
-                ends, but occasionally only one side's value survives (the other already reset to nothing) by the time the recorder captures it -
-                that lone leftover number is used as a last-resort guess (low confidence) when nothing more direct (land/gold/prestige changing
-                hands, battle losses) is available. It's a weaker signal than the others since a partial-clear artifact, not a real two-sided
-                comparison, is what's actually being read.
+                When nothing in the data points to a winner either way, the war is scored as a flat <code>0</code> for both sides rather than
+                guessing - shown separately below from wars that were actually decided. This also covers the case where EU5's own in-game war
+                score only survives for one side by the time the recorder captures it (the other already reset to nothing) - a lone leftover
+                number isn't a real two-sided comparison, so it's no longer used to guess a winner; it falls through to White Peace instead.
               </dd>
             </dl>
           </details>
@@ -226,14 +254,14 @@
     <p>Runs entirely in your browser - your save file is never uploaded anywhere.</p>
   </footer>
 
-  <script src="js/clausewitz.js"></script>
-  <script src="js/eu5-fixed-ids.js"></script>
-  <script src="js/clausewitz-binary.js"></script>
-  <script src="js/map.js"></script>
-  <script src="js/charts.js"></script>
-  <script src="js/llama-score.js"></script>
-  <script src="js/ledger-connect.js"></script>
-  <script src="js/save-library.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/clausewitz.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/eu5-fixed-ids.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/clausewitz-binary.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/map.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/charts.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/llama-score.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/ledger-connect.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/save-library.js?v=ui-20260712-mapfixes5"></script>
+  <script src="js/app.js?v=ui-20260712-country-colors"></script>
 </body>
 </html>

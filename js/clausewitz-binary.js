@@ -636,7 +636,9 @@
           const assetObj = dec.readBareValue();
           if (assetObj && typeof assetObj === "object" && !Array.isArray(assetObj) && !("fixedNum" in assetObj)) {
             const asset = Clausewitz.extractEstateAssetFields(numResolved, assetObj);
-            if (asset && (asset.building || asset.roadType || typeof asset.rgo === "number")) onAsset(asset);
+            // Roads dropped here too - see the matching comment in
+            // js/clausewitz.js's copy of this filter.
+            if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
           }
         }
       } else {

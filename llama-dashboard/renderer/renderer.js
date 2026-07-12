@@ -22,17 +22,12 @@ const REASON_LABELS = {
   "post-war-prestige-swing": "Prestige swung between sides",
   "battle-losses-inflicted": "Battle losses (no economic signal)",
   "last-known-war-score": "Last known in-game war score",
-  "last-known-single-sided-attacker-score": "Leftover one-sided war score (attacker)",
-  "last-known-single-sided-defender-score": "Leftover one-sided war score (defender)",
   "white-peace": "No decisive signal - treated as white peace",
   "war-disappeared-without-decisive-signal": "No signal before the war disappeared",
   unknown: "Unknown",
 };
-// Hover tooltips for the less-obvious reason codes - added after the user
-// asked what "leftover one-sided war score" actually means.
+// Hover tooltips for the less-obvious reason codes.
 const REASON_TOOLTIPS = {
-  "last-known-single-sided-attacker-score": "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct (land/gold/prestige changing hands, battle losses) is available.",
-  "last-known-single-sided-defender-score": "EU5 normally clears both sides' war score together when a war ends - occasionally only one side's value survives. That lone leftover number is a last-resort, low-confidence guess used only when nothing more direct (land/gold/prestige changing hands, battle losses) is available.",
   "post-war-land-transfer-coalition": "Land changed hands, but only measured across the whole side (including any vassals/allies dragged in) rather than just the war's original two declared belligerents - a real signal, just less precise than a clean 1-on-1 comparison.",
 };
 function reasonLabel(reason) {

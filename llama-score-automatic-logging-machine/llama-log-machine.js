@@ -34,7 +34,7 @@ const DEFAULT_CONFIG = {
 
 function usage() {
   return [
-    "Llama Score Automatic Logging Machine",
+    "🪓 Llama Score Logging Machine",
     "",
     "Usage:",
     "  node llama-log-machine.js --save-dir \"C:\\\\path\\\\to\\\\EU5\\\\save games\"",
@@ -709,10 +709,9 @@ function inferOutcome(war, disappeared, economy) {
     });
   }
 
-  // Occupation, the economic signal, and the two-sided score all had
-  // nothing decisive to say - a clear battle-losses margin is a better bet
-  // than the single-sided leftover score checked next, since it's derived
-  // from the whole side's actual combat performance across every
+  // Occupation and the economic signal both had nothing decisive to say -
+  // a clear battle-losses margin is the last real signal left, since it's
+  // derived from the whole side's actual combat performance across every
   // participant, not a possibly-stale residual value.
   if (lossSignal) {
     return finalize({
@@ -725,26 +724,15 @@ function inferOutcome(war, disappeared, economy) {
     });
   }
 
-  if (typeof aScore === "number" && aScore !== 0 && typeof dScore !== "number") {
-    return finalize({
-      winnerSide: aScore > 0 ? "Attacker" : "Defender",
-      loserSide: aScore > 0 ? "Defender" : "Attacker",
-      confidence: "low",
-      reason: "last-known-single-sided-attacker-score",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    });
-  }
-  if (typeof dScore === "number" && dScore !== 0 && typeof aScore !== "number") {
-    return finalize({
-      winnerSide: dScore > 0 ? "Defender" : "Attacker",
-      loserSide: dScore > 0 ? "Attacker" : "Defender",
-      confidence: "low",
-      reason: "last-known-single-sided-defender-score",
-      attackerScore: aScore,
-      defenderScore: dScore,
-    });
-  }
+  // Deliberately NOT falling back to a lone single-sided leftover
+  // attacker_score/defender_score here (removed per user request, was
+  // "last-known-single-sided-attacker/defender-score"). EU5 normally
+  // clears both sides' war score together when a war ends; a single
+  // surviving value is a partial-clear artifact, not a real two-sided
+  // comparison, and guessing a winner off it was a weaker signal than
+  // everything else in this function - falls through to the no-winner
+  // default below instead. The genuine two-sided score check earlier in
+  // this function is untouched, only this single-sided fallback is gone.
 
   return {
     winnerSide: null,
@@ -1199,7 +1187,7 @@ async function main() {
   migrateLegacyLedgerIfNeeded(config);
   hydrateStateFromSnapshots(config, state);
 
-  console.log("Llama Score Automatic Logging Machine");
+  console.log("🪓 Llama Score Logging Machine");
   console.log(`Watching: ${config.saveDir}`);
   console.log(`Output:   ${config.dataDir}`);
 
