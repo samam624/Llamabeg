@@ -475,8 +475,12 @@
     return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
   }
 
+  // Returns { decisive, contributing }: `decisive` is the single strongest
+  // qualifying signal (or null), `contributing` is every OTHER signal that
+  // also qualified but lost out - real evidence, just outweighed, so it's
+  // still worth surfacing (see inferOutcome's contributingFactors).
   function economicOutcomeSignal(war, economy) {
-    if (!economy || !economy.Attacker || !economy.Defender) return null;
+    if (!economy || !economy.Attacker || !economy.Defender) return { decisive: null, contributing: [] };
     const attackerPrincipals = principalCountrySet(war.originalAttacker);
     const defenderPrincipals = principalCountrySet(war.originalDefenders);
 
@@ -484,12 +488,34 @@
     const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
     const aGoldR = resolveSideField(economy.Attacker, attackerPrincipals, "goldDelta");
     const dGoldR = resolveSideField(economy.Defender, defenderPrincipals, "goldDelta");
+    const aPrestR = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta");
+    const dPrestR = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta");
 
     const aLocations = aLoc.value;
     const dLocations = dLoc.value;
     const aGold = aGoldR.value;
     const dGold = dGoldR.value;
+    const aPrestige = aPrestR.value;
+    const dPrestige = dPrestR.value;
     const signals = [];
+
+    // A genuine land cession comes with a prestige swing in roughly the same
+    // direction too (winner gains standing, loser loses it) - requiring that
+    // agreement catches a land-transfer signal that LOOKS clean (both sides
+    // nonzero, opposite sign, per the fix below) but is actually coincidental
+    // territorial noise from something else concluding in the same snapshot
+    // window. Only a real, opposite-direction prestige reading blocks the
+    // land signal - missing data on either side, or a prestige delta of
+    // exactly 0, isn't a contradiction, just silence. Deliberately sign-only
+    // (not magnitude-matched): prestige and location count are incommensurate
+    // units, so "ballpark" here means "doesn't point the other way," not
+    // "similar-sized number."
+    function prestigeContradicts(winnerSide) {
+      if (typeof aPrestige !== "number" || typeof dPrestige !== "number") return false;
+      const prestigeSpread = aPrestige - dPrestige;
+      if (prestigeSpread === 0) return false;
+      return (prestigeSpread > 0 ? "Attacker" : "Defender") !== winnerSide;
+    }
 
     if (typeof aLocations === "number" && typeof dLocations === "number") {
       const spread = aLocations - dLocations;
@@ -505,10 +531,17 @@
       // sides' counts in real, opposite directions (e.g. -24 / +24, an exact
       // mirror); one side sitting at exactly 0 proves nothing came from/went
       // to this opponent, whatever the other side's unrelated change was.
-      if (aLocations !== 0 && dLocations !== 0 && Math.abs(spread) >= 2 && Math.sign(aLocations) !== Math.sign(dLocations)) {
+      const winnerSide = spread > 0 ? "Attacker" : "Defender";
+      if (
+        aLocations !== 0 &&
+        dLocations !== 0 &&
+        Math.abs(spread) >= 2 &&
+        Math.sign(aLocations) !== Math.sign(dLocations) &&
+        !prestigeContradicts(winnerSide)
+      ) {
         const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
         signals.push({
-          winnerSide: spread > 0 ? "Attacker" : "Defender",
+          winnerSide,
           reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
           strength: Math.abs(spread) * 1000,
         });
@@ -517,9 +550,10 @@
       const side = typeof aLocations === "number" ? "Attacker" : "Defender";
       const value = typeof aLocations === "number" ? aLocations : dLocations;
       const clean = side === "Attacker" ? aLoc.usedPrincipal : dLoc.usedPrincipal;
-      if (Math.abs(value) >= 1) {
+      const winnerSide = value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker";
+      if (Math.abs(value) >= 1 && !prestigeContradicts(winnerSide)) {
         signals.push({
-          winnerSide: value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker",
+          winnerSide,
           reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
           strength: Math.abs(value) * 1000,
         });
@@ -537,32 +571,23 @@
       if (value > 100) signals.push({ winnerSide: side, reason: "post-war-treasury-gain", strength: value });
     }
 
-    // Prestige deliberately NOT considered here anymore - see prestigeSignal
-    // below and inferOutcome's comment for why it's a contributing factor
-    // only, never decisive on its own.
+    // Same nonzero-both-sides + opposite-sign rigor as land-transfer above -
+    // the OLD prestige check here only compared the aggregate spread, which
+    // had the identical false-positive shape the location-delta bug did (one
+    // side sitting at exactly 0 could still "win" against a nonzero,
+    // unrelated swing on the other side). Fixed the same way: both principal
+    // sides must show a real, opposite-direction prestige change before it
+    // counts as a decisive signal.
+    if (typeof aPrestige === "number" && typeof dPrestige === "number") {
+      const spread = aPrestige - dPrestige;
+      if (aPrestige !== 0 && dPrestige !== 0 && Math.abs(spread) >= 5 && Math.sign(aPrestige) !== Math.sign(dPrestige)) {
+        signals.push({ winnerSide: spread > 0 ? "Attacker" : "Defender", reason: "post-war-prestige-swing", strength: Math.abs(spread) * 10 });
+      }
+    }
 
-    if (!signals.length) return null;
+    if (!signals.length) return { decisive: null, contributing: [] };
     signals.sort((a, b) => b.strength - a.strength);
-    return signals[0];
-  }
-
-  // Prestige swing alone (diplomatic reputation, not land or gold) - kept as
-  // a CONTRIBUTING factor only (see inferOutcome), never decisive: unlike
-  // land/gold, prestige moves constantly for reasons that have nothing to do
-  // with a specific war (tech, religion, other diplomacy elsewhere), so
-  // trusting it to crown a winner risks the exact same false-positive shape
-  // economicOutcomeSignal's own nonzero-both-sides fix just had to correct
-  // for location counts.
-  function prestigeSignal(war, economy) {
-    if (!economy || !economy.Attacker || !economy.Defender) return null;
-    const attackerPrincipals = principalCountrySet(war.originalAttacker);
-    const defenderPrincipals = principalCountrySet(war.originalDefenders);
-    const aPrestige = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta").value;
-    const dPrestige = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta").value;
-    if (typeof aPrestige !== "number" || typeof dPrestige !== "number") return null;
-    const spread = aPrestige - dPrestige;
-    if (Math.abs(spread) < 5) return null;
-    return { winnerSide: spread > 0 ? "Attacker" : "Defender" };
+    return { decisive: signals[0], contributing: signals.slice(1) };
   }
 
   // Battle-inflicted casualties (Battle+Capture, NOT Attrition) compared
@@ -594,6 +619,19 @@
     return CONFIDENCE_ORDER[Math.max(0, Math.min(CONFIDENCE_ORDER.length - 1, idx + delta))];
   }
 
+  // Maps an economicOutcomeSignal reason code to the short label used in
+  // contributingFactors, so a land/treasury/prestige signal that LOST out to
+  // a stronger one (see economicOutcomeSignal's `contributing`) still shows
+  // up as "considered but not decisive" the same way war-score/battle-losses
+  // do.
+  const CONTRIBUTING_SIGNAL_FROM_REASON = {
+    "post-war-land-transfer": "land-transfer",
+    "post-war-land-transfer-coalition": "land-transfer",
+    "post-war-treasury-swing": "treasury",
+    "post-war-treasury-gain": "treasury",
+    "post-war-prestige-swing": "prestige-swing",
+  };
+
   function inferOutcome(war, economy) {
     const aScore = war.attackerScore;
     const dScore = war.defenderScore;
@@ -602,21 +640,18 @@
       typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore
         ? { winnerSide: aScore > dScore ? "Attacker" : "Defender" }
         : null;
-    const prestSignal = prestigeSignal(war, economy);
 
-    // Per your call: war score, prestige, and battle losses never decide a
-    // winner on their own anymore - each one moves for reasons that don't
-    // reliably track who actually won THIS specific war (a two-sided war
-    // score is frequently a partial-clear artifact from EU5's own
-    // end-of-war cleanup; prestige swings constantly from unrelated
-    // diplomacy/tech/religion - see prestigeSignal's comment; a winning
-    // invader can still rack up heavy battle losses). Only land or gold
-    // actually changing hands between the two principals
-    // (economicOutcomeSignal) decides who won a war; everything else is
-    // attached below as contributingFactors so the reasoning stays visible/
-    // auditable without ever being trusted to pick a side by itself - not
-    // even when several of them happen to agree.
-    function finalize(result) {
+    // Per your call: war score and battle losses never decide a winner on
+    // their own - each one moves for reasons that don't reliably track who
+    // actually won THIS specific war (a two-sided war score is frequently a
+    // partial-clear artifact from EU5's own end-of-war cleanup; a winning
+    // invader can still rack up heavy battle losses). Land, gold, and
+    // prestige (economicOutcomeSignal, all using the same nonzero-both-
+    // sides/opposite-direction rigor) are what decide who won; war-score and
+    // battle-losses are attached below as contributingFactors so the
+    // reasoning stays visible/auditable without ever being trusted to pick a
+    // side by themselves - not even when several of them happen to agree.
+    function finalize(result, extraContributing) {
       let confidence = result.confidence;
       let lossSignalAgrees = null;
       if (lossSignal && result.winnerSide != null) {
@@ -628,26 +663,31 @@
       }
       const contributingFactors = [];
       if (scoreSignal) contributingFactors.push({ signal: "war-score", winnerSide: scoreSignal.winnerSide });
-      if (prestSignal) contributingFactors.push({ signal: "prestige-swing", winnerSide: prestSignal.winnerSide });
       if (lossSignal) contributingFactors.push({ signal: "battle-losses", winnerSide: lossSignal.winnerSide });
+      for (const s of extraContributing || []) {
+        contributingFactors.push({ signal: CONTRIBUTING_SIGNAL_FROM_REASON[s.reason] || s.reason, winnerSide: s.winnerSide });
+      }
       return { ...result, confidence, lossSignalAgrees, contributingFactors };
     }
 
-    // The only decisive check in this function: before/after territory and
-    // treasury change, restricted to the war's two original principals (see
-    // economicOutcomeSignal's own comments for the nonzero-both-sides fix
-    // and the principal/coalition split). Land transfer gets "high"
-    // confidence (about as unambiguous as this game's data gets); a
-    // gold-only signal gets "medium" (real, but a country's treasury swings
-    // for other reasons too, just less commonly by this much right as a war
-    // ends).
+    // The only decisive checks in this function: before/after territory,
+    // treasury, and prestige change, restricted to the war's two original
+    // principals (see economicOutcomeSignal's own comments for the
+    // nonzero-both-sides fix, the land/prestige cross-check, and the
+    // principal/coalition split). Land transfer gets "high" confidence
+    // (about as unambiguous as this game's data gets); gold- or
+    // prestige-only signals get "medium" (real, but each swings for other
+    // reasons too, just less commonly by this much right as a war ends).
     const economicSignal = economicOutcomeSignal(war, economy);
-    if (economicSignal) {
-      return finalize({
-        winnerSide: economicSignal.winnerSide,
-        confidence: economicSignal.reason === "post-war-land-transfer" ? "high" : "medium",
-        reason: economicSignal.reason,
-      });
+    if (economicSignal.decisive) {
+      return finalize(
+        {
+          winnerSide: economicSignal.decisive.winnerSide,
+          confidence: economicSignal.decisive.reason === "post-war-land-transfer" ? "high" : "medium",
+          reason: economicSignal.decisive.reason,
+        },
+        economicSignal.contributing
+      );
     }
 
     // Deliberately NOT falling back to war.occupation (who's occupying more
@@ -659,17 +699,17 @@
     // comparison) can tell those apart, so this heuristic is retired rather
     // than kept as a lower-confidence guess.
 
-    // No land or gold actually changed hands between the two principals -
-    // default to White Peace. Confirmed on real data that this genuinely
-    // happens (a real war fought entirely against non-player countries near
-    // "Strasinet" ended with no score/occupation/economic signal at all
-    // pointing either way, and really was a white peace in game), and per
-    // your call it's also the right default when the ONLY things pointing
-    // either way are war score/prestige/battle-losses - those are still
-    // attached as contributingFactors above for anyone auditing the call,
-    // but a white peace costs nothing to get right, and the per-row manual
-    // override still corrects it if this genuinely was decisive.
-    return finalize({ winnerSide: null, confidence: "medium", reason: "white-peace", whitePeace: true });
+    // No land, gold, or prestige actually changed hands between the two
+    // principals - default to White Peace. Confirmed on real data that this
+    // genuinely happens (a real war fought entirely against non-player
+    // countries near "Strasinet" ended with no score/occupation/economic
+    // signal at all pointing either way, and really was a white peace in
+    // game), and per your call it's also the right default when the ONLY
+    // things pointing either way are war score/battle-losses - those are
+    // still attached as contributingFactors above for anyone auditing the
+    // call, but a white peace costs nothing to get right, and the per-row
+    // manual override still corrects it if this genuinely was decisive.
+    return finalize({ winnerSide: null, confidence: "medium", reason: "white-peace", whitePeace: true }, economicSignal.contributing);
   }
 
   // Automatic "player has left" detection for the ledger view, so an

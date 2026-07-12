@@ -38,7 +38,13 @@ function reasonLabel(reason) {
 // attached to every outcome as contributingFactors so the reasoning stays
 // auditable even though only a land or gold exchange between the two
 // principals can crown a winner. Surfaced here as an extra tooltip line.
-const CONTRIBUTING_FACTOR_LABELS = { "war-score": "war score", "prestige-swing": "prestige", "battle-losses": "battle losses" };
+const CONTRIBUTING_FACTOR_LABELS = {
+  "war-score": "war score",
+  "prestige-swing": "prestige",
+  "battle-losses": "battle losses",
+  "land-transfer": "land change",
+  treasury: "treasury",
+};
 function contributingFactorsNote(w) {
   const factors = w.contributingFactors || [];
   if (!factors.length) return "";

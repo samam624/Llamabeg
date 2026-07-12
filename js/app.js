@@ -654,7 +654,13 @@
   // winner. Surfaced here as an extra tooltip line rather than a silent
   // internal-only field, per the user's "list them as contributing factors"
   // request.
-  const CONTRIBUTING_FACTOR_LABELS = { "war-score": "war score", "prestige-swing": "prestige", "battle-losses": "battle losses" };
+  const CONTRIBUTING_FACTOR_LABELS = {
+    "war-score": "war score",
+    "prestige-swing": "prestige",
+    "battle-losses": "battle losses",
+    "land-transfer": "land change",
+    treasury: "treasury",
+  };
   function contributingFactorsNote(w) {
     const factors = w.contributingFactors || [];
     if (!factors.length) return "";
