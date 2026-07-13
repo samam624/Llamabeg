@@ -11,7 +11,7 @@
 
   const MAP_W = 16384;
   const MAP_H = 8192;
-  const OUTSIDE_MAP_COLOR = [12, 16, 21];
+  const OUTSIDE_MAP_COLOR = [21, 16, 12]; // matches .map-canvas-wrap's CSS letterbox background
   const MAX_RENDER_DPR = 1.5;
   const LOCATION_BOUNDARY_MIN_SCALE = 0.33;
   const PLAYER_LABEL_FONT = "'Cinzel', 'Trajan Pro', 'Times New Roman', Georgia, serif";

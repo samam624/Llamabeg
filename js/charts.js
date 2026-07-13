@@ -4,13 +4,35 @@
 (function (root) {
   "use strict";
 
-  // Dark-mode categorical palette (validated: worst adjacent CVD ~10.3,
-  // clears 3:1 on a dark surface) - fixed order, never cycled per-series.
-  const SERIES_COLORS = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"];
+  // Dark-surface categorical palette (validated against the chart surface
+  // #2b2015) - used only as a fallback if the CSS custom properties below
+  // are somehow missing; the light-mode equivalent (also validated) lives in
+  // css/style.css as --chart-series-1..8 under :root[data-theme="light"],
+  // not duplicated here - see chartTokens(). Dark is this app's default
+  // theme (a product choice, not tied to OS preference).
+  const SERIES_COLORS_FALLBACK = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"];
 
-  const SURFACE = "#1c222c"; // --panel-bg
-  const GRIDLINE = "#2a3240"; // --panel-border
-  const AXIS_TEXT = "#9aa5b5"; // --text-dim
+  // Reads the *current* theme's chart tokens from CSS custom properties
+  // (css/style.css's :root / :root[data-theme="light"]) at the moment a
+  // chart is rendered, rather than hardcoding two parallel JS palettes that
+  // could drift out of sync with the CSS ones - toggling the theme just
+  // means re-running whichever render function last drew a given chart (see
+  // js/app.js's theme toggle handler).
+  function chartTokens() {
+    const cs = getComputedStyle(document.documentElement);
+    const g = (name) => (cs.getPropertyValue(name) || "").trim();
+    const series = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => g(`--chart-series-${i}`) || SERIES_COLORS_FALLBACK[i - 1]);
+    const isDark = document.documentElement.dataset.theme !== "light";
+    return {
+      surface: g("--chart-surface") || "#2b2015",
+      gridline: g("--chart-gridline") || "#b7a877",
+      axisText: g("--chart-axis-text") || "#c9b98c",
+      labelText: g("--chart-label-text") || "#f1e6c8",
+      totalBar: g("--chart-total-bar") || "#c25b4f",
+      series,
+      isDark,
+    };
+  }
 
   function fmtCompact(n) {
     const abs = Math.abs(n);
@@ -22,9 +44,77 @@
     return n.toFixed(0);
   }
 
+  // Rounds a raw "span / target count" step up to the nearest 1/2/5/10 (at
+  // whatever power of ten it falls in) - the standard "nice axis" trick, so
+  // gridlines land on round numbers (0, 5, 10, 15...) instead of whatever an
+  // even division of the padded data range happens to produce (22.7, 17.0,
+  // 11.3...) - the latter is exactly what makes a chart read as an
+  // un-styled spreadsheet default rather than something someone designed.
+  function niceStep(rawStep) {
+    if (!(rawStep > 0)) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const norm = rawStep / mag;
+    const niceNorm = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+    return niceNorm * mag;
+  }
+
+  // Nice round tick VALUES that fall inside [min, max] - doesn't change the
+  // chart's own scale/domain (each chart's own headroom-padding logic stays
+  // as-is), just picks better values within it to draw gridlines/labels at.
+  function pickNiceTicks(min, max, targetCount) {
+    if (!(max > min)) return [min];
+    const step = niceStep((max - min) / (targetCount || 4));
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) {
+      ticks.push(Math.round(v / step) * step);
+    }
+    return ticks.length ? ticks : [min];
+  }
+
+  function parseCssColor(str) {
+    if (!str) return null;
+    const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(str);
+    return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
+  }
+
+  // A country's real flag/map color can be pale enough (cream, light tan,
+  // off-white) to nearly vanish against this app's own light parchment
+  // chart surface - darken it just enough to stay legible as a line or a
+  // filled bar, leave already-dark colors untouched. In dark mode the risk
+  // runs the other way (a near-black color vanishing against the dark
+  // surface), so the direction this pushes a color flips with the theme.
+  // Chart-local concern (the map itself, and the country-tag color swatches
+  // elsewhere in the UI, still show the real unmodified color).
+  function legibleChartColor(cssColor, isDark) {
+    const rgb = parseCssColor(cssColor);
+    if (!rgb) return null;
+    const luminance = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+    if (isDark) {
+      const MIN_LUMINANCE = 95;
+      if (luminance >= MIN_LUMINANCE) return cssColor;
+      const blend = Math.min(0.65, ((MIN_LUMINANCE - luminance) / 255) * 1.3);
+      return `rgb(${rgb.map((c) => Math.round(c + (255 - c) * blend)).join(",")})`;
+    }
+    const MAX_LUMINANCE = 190;
+    if (luminance <= MAX_LUMINANCE) return cssColor;
+    const factor = MAX_LUMINANCE / luminance;
+    return `rgb(${rgb.map((c) => Math.round(c * factor)).join(",")})`;
+  }
+
+  // A fixed-fraction-darker shade of a color, for a bar/segment's own
+  // hairline border - keeps every bar visually defined against the chart
+  // surface and its neighbors regardless of how light or dark its own fill
+  // happens to be, without introducing an unrelated border color.
+  function darkenColor(cssColor, amount) {
+    const rgb = parseCssColor(cssColor);
+    if (!rgb) return cssColor;
+    return `rgb(${rgb.map((c) => Math.round(c * (1 - amount))).join(",")})`;
+  }
+
   // series: [{ label, color, points: number[] }], all points arrays the
   // same length, aligned to `years` (same length, ascending).
   function renderLineChart(container, { title, years, series, yScale, yMin, yMax }) {
+    const theme = chartTokens();
     const W = 720,
       H = 300;
     const padL = 52,
@@ -71,26 +161,24 @@
       return padT + plotH - t * plotH;
     };
 
-    const GRID_STEPS = 4;
     let gridLines = "";
     let yLabels = "";
-    for (let g = 0; g <= GRID_STEPS; g++) {
-      const v = minY + ((maxY - minY) / GRID_STEPS) * g;
+    pickNiceTicks(minY, maxY, 4).forEach((v) => {
       const y = yAt(v);
-      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${GRIDLINE}" stroke-width="1" opacity="0.72"/>`;
-      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${AXIS_TEXT}">${fmtCompact(v)}</text>`;
-    }
+      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${theme.gridline}" stroke-width="1" opacity="0.72"/>`;
+      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${theme.axisText}">${fmtCompact(v)}</text>`;
+    });
 
     const xTickEvery = Math.max(1, Math.round(years.length / 8));
     let xLabels = "";
     for (let i = 0; i < years.length; i += xTickEvery) {
-      xLabels += `<text x="${xAt(i)}" y="${H - padB + 18}" text-anchor="middle" font-size="10" fill="${AXIS_TEXT}">${years[i]}</text>`;
+      xLabels += `<text x="${xAt(i)}" y="${H - padB + 18}" text-anchor="middle" font-size="10" fill="${theme.axisText}">${years[i]}</text>`;
     }
 
     let lines = "";
     let dots = "";
     series.forEach((s, si) => {
-      const color = s.color || SERIES_COLORS[si % SERIES_COLORS.length];
+      const color = legibleChartColor(s.color, theme.isDark) || theme.series[si % theme.series.length];
       const segments = [];
       let current = [];
       s.points.forEach((v, i) => {
@@ -108,13 +196,13 @@
       const lastIdx = s.points.map((v, i) => (typeof v === "number" ? i : -1)).filter((i) => i >= 0).pop();
       const lastVal = lastIdx !== undefined ? s.points[lastIdx] : undefined;
       if (typeof lastVal === "number") {
-        dots += `<circle cx="${xAt(lastIdx)}" cy="${yAt(lastVal)}" r="4.2" fill="${color}" stroke="${SURFACE}" stroke-width="2"/>`;
+        dots += `<circle cx="${xAt(lastIdx)}" cy="${yAt(lastVal)}" r="4.2" fill="${color}" stroke="${theme.surface}" stroke-width="2"/>`;
       }
     });
 
     const legend = series
       .map((s, si) => {
-        const color = s.color || SERIES_COLORS[si % SERIES_COLORS.length];
+        const color = legibleChartColor(s.color, theme.isDark) || theme.series[si % theme.series.length];
         return `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${color}"></span>${escapeHtml(s.label)}</span>`;
       })
       .join("");
@@ -123,13 +211,13 @@
     container.innerHTML = `
       <div class="chart-title">${escapeHtml(title)}</div>
       <svg id="${svgId}" viewBox="0 0 ${W} ${H}" class="trend-chart" role="img" aria-label="${escapeHtml(title)}">
-        <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="rgba(255,255,255,0.012)" rx="4"/>
+        <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="rgba(46,42,34,0.025)" rx="4"/>
         ${gridLines}
         ${yLabels}
         ${xLabels}
         ${lines}
         ${dots}
-        <line class="chart-crosshair" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="${AXIS_TEXT}" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>
+        <line class="chart-crosshair" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="${theme.axisText}" stroke-width="1" stroke-dasharray="3,3" visibility="hidden"/>
       </svg>
       <div class="chart-tooltip" hidden></div>
       <div class="chart-legend">${legend}</div>
@@ -150,7 +238,7 @@
 
       const rows = series
         .map((s, si) => {
-          const color = s.color || SERIES_COLORS[si % SERIES_COLORS.length];
+          const color = legibleChartColor(s.color, theme.isDark) || theme.series[si % theme.series.length];
           const v = s.points[idx];
           return `<div class="chart-tooltip-row"><span class="chart-legend-swatch" style="background:${color}"></span>${escapeHtml(s.label)}: <b>${
             typeof v === "number" ? fmtCompact(v) : "—"
@@ -181,6 +269,7 @@
   // above (or below, for negative scores) each bar, color key in a legend
   // underneath rather than axis labels (player names can be long).
   function renderBarChart(container, { title, items }) {
+    const theme = chartTokens();
     const sorted = (items || []).slice().sort((a, b) => b.value - a.value);
     const n = Math.max(1, sorted.length);
 
@@ -217,22 +306,20 @@
     const yAt = (v) => padT + plotH - ((v - minV) / (maxV - minV)) * plotH;
     const zeroY = yAt(0);
 
-    const GRID_STEPS = 4;
     let gridLines = "",
       yLabels = "";
-    for (let g = 0; g <= GRID_STEPS; g++) {
-      const v = minV + ((maxV - minV) / GRID_STEPS) * g;
+    pickNiceTicks(minV, maxV, 4).forEach((v) => {
       const y = yAt(v);
-      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${GRIDLINE}" stroke-width="1"/>`;
-      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${AXIS_TEXT}">${fmtScore(v)}</text>`;
-    }
+      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${theme.gridline}" stroke-width="1"/>`;
+      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${theme.axisText}">${fmtScore(v)}</text>`;
+    });
 
     const barW = Math.min(60, slotW - 16);
     let bars = "",
       valueLabels = "";
     const legendItems = [];
     sorted.forEach((it, i) => {
-      const color = SERIES_COLORS[i % SERIES_COLORS.length];
+      const color = theme.series[i % theme.series.length];
       const cx = padL + slotW * i + slotW / 2;
       const barX = cx - barW / 2;
       const positive = it.value >= 0;
@@ -240,9 +327,9 @@
       const barBottom = yAt(Math.min(0, it.value));
       const h = Math.max(0, barBottom - barTop);
       const titleTag = it.tooltip ? `<title>${escapeHtml(it.tooltip)}</title>` : "";
-      bars += `<rect x="${barX}" y="${barTop}" width="${barW}" height="${h}" fill="${color}" rx="2">${titleTag}</rect>`;
+      bars += `<rect x="${barX}" y="${barTop}" width="${barW}" height="${h}" fill="${color}" stroke="${darkenColor(color, 0.25)}" stroke-width="1" rx="2">${titleTag}</rect>`;
       const labelY = positive ? barTop - 6 : barBottom + 14;
-      valueLabels += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="12" font-weight="600" fill="${AXIS_TEXT}">${fmtScore(it.value)}${titleTag}</text>`;
+      valueLabels += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="12" font-weight="600" fill="${theme.axisText}">${fmtScore(it.value)}${titleTag}</text>`;
       legendItems.push({ color, label: it.label });
     });
 
@@ -253,17 +340,16 @@
     container.innerHTML = `
       <div class="chart-title">${escapeHtml(title)}</div>
       <svg viewBox="0 0 ${W} ${H}" class="bar-chart" role="img" aria-label="${escapeHtml(title)}">
+        <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="rgba(46,42,34,0.025)" rx="4"/>
         ${gridLines}
         ${yLabels}
-        <line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="${AXIS_TEXT}" stroke-width="1.5"/>
+        <line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="${theme.axisText}" stroke-width="1.5"/>
         ${bars}
         ${valueLabels}
       </svg>
       <div class="chart-legend">${legend}</div>
     `;
   }
-
-  const LABEL_TEXT = "#e6e9ef"; // --text - primary ink for the identity label under each bar, kept off the series colors
 
   const RANK_MEDALS = ["\u{1F947}", "\u{1F948}", "\u{1F949}"]; // gold/silver/bronze, ranks 1-3 only
 
@@ -301,8 +387,6 @@
     return estWidth > maxWidth ? ` textLength="${maxWidth.toFixed(1)}" lengthAdjust="spacingAndGlyphs"` : "";
   }
 
-  const TOTAL_BAR_COLOR = "#5b9dd9"; // --accent - a single neutral tone for the collapsed default bar; sign is already shown by which side of the zero line it's on
-
   // Final ranking as a scoreboard: one plain bar per player by default (just
   // the total Llama Score, so the ranking itself reads at a glance without
   // three colors competing for attention) - hovering a bar swaps it for the
@@ -314,6 +398,7 @@
   // label rides it rather than duplicating it in a separate legend the
   // reader has to cross-reference.
   function renderStackedBarChart(container, { title, items }) {
+    const theme = chartTokens();
     const sorted = (items || []).slice().sort((a, b) => b.total - a.total);
     const n = Math.max(1, sorted.length);
     const padL = 44,
@@ -349,15 +434,13 @@
     const yAt = (v) => padT + plotH - ((v - minV) / (maxV - minV)) * plotH;
     const zeroY = yAt(0);
 
-    const GRID_STEPS = 4;
     let gridLines = "",
       yLabels = "";
-    for (let g = 0; g <= GRID_STEPS; g++) {
-      const v = minV + ((maxV - minV) / GRID_STEPS) * g;
+    pickNiceTicks(minV, maxV, 4).forEach((v) => {
       const y = yAt(v);
-      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${GRIDLINE}" stroke-width="1"/>`;
-      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${AXIS_TEXT}">${fmtScore(v)}</text>`;
-    }
+      gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="${theme.gridline}" stroke-width="1"/>`;
+      yLabels += `<text x="${padL - 8}" y="${y + 3}" text-anchor="end" font-size="10" fill="${theme.axisText}">${fmtScore(v)}</text>`;
+    });
 
     const barW = Math.min(36, slotW - 30);
     const SEGMENT_GAP = 2;
@@ -393,12 +476,17 @@
         const isBottom = seg === bottomNegSeg;
         const titleTag = `<title>${escapeHtml(`${it.label}: ${seg.label} ${fmtScore(seg.value)}; total ${fmtScore(it.total)}`)}</title>`;
         const path = seg.value >= 0 ? roundedBarSegment(barX, y1, barW, h, isTop, false) : roundedBarSegment(barX, y1, barW, h, false, isBottom);
-        segmentPaths += `<path d="${path}" fill="${seg.color}">${titleTag}</path>`;
+        segmentPaths += `<path d="${path}" fill="${seg.color}" stroke="${darkenColor(seg.color, 0.25)}" stroke-width="1">${titleTag}</path>`;
       });
 
-      // The default-visible layer: one plain bar, same rounding rule as a
-      // single "outer" segment would get (rounded at the far-from-zero end,
-      // square at the baseline).
+      // The default-visible layer: one plain bar per player, colored by that
+      // player's own country (falling back to the neutral accent when no
+      // country color is available, e.g. a ledger-only campaign) - a hairline
+      // border a shade darker than the fill keeps every bar visually defined
+      // regardless of how light or dark its own color happens to be. Same
+      // rounding rule as a single "outer" segment would get (rounded at the
+      // far-from-zero end, square at the baseline).
+      const barColor = legibleChartColor(it.color, theme.isDark) || theme.totalBar;
       const totalPositive = it.total >= 0;
       const totalY1 = yAt(Math.max(0, it.total));
       const totalY2 = yAt(Math.min(0, it.total));
@@ -407,13 +495,13 @@
       const totalTitleTag = `<title>${escapeHtml(`${it.label}: total ${fmtScore(it.total)} - hover for the GP Score / War Score breakdown`)}</title>`;
 
       bars += `<g class="llama-score-bar">
-        <path class="bar-total-shape" d="${totalPath}" fill="${TOTAL_BAR_COLOR}">${totalTitleTag}</path>
+        <path class="bar-total-shape" d="${totalPath}" fill="${barColor}" stroke="${darkenColor(barColor, 0.25)}" stroke-width="1">${totalTitleTag}</path>
         <g class="bar-segments-shape">${segmentPaths}</g>
       </g>`;
 
       const totalY = yAt(it.total);
       const labelY = it.total >= 0 ? totalY - 6 : totalY + 14;
-      valueLabels += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="12" font-weight="600" fill="${AXIS_TEXT}">${fmtScore(it.total)}</text>`;
+      valueLabels += `<text x="${cx}" y="${labelY}" text-anchor="middle" font-size="12" font-weight="600" fill="${theme.axisText}">${fmtScore(it.total)}</text>`;
 
       const labelTop = padT + plotH + padB + labelGap;
       const rank = i + 1;
@@ -422,8 +510,8 @@
       const tagLine = it.countryTag ? ` (${it.countryTag})` : "";
       const nameFull = `${nameLine}${tagLine}`;
       const maxLabelW = slotW - 8;
-      axisLabels += `<text x="${cx}" y="${labelTop + 13}" text-anchor="middle" font-size="13" fill="${AXIS_TEXT}">${escapeHtml(rankMark)}</text>`;
-      axisLabels += `<text x="${cx}" y="${labelTop + 30}" text-anchor="middle" font-size="11" fill="${LABEL_TEXT}"${fitTextAttr(
+      axisLabels += `<text x="${cx}" y="${labelTop + 13}" text-anchor="middle" font-size="13" fill="${theme.axisText}">${escapeHtml(rankMark)}</text>`;
+      axisLabels += `<text x="${cx}" y="${labelTop + 30}" text-anchor="middle" font-size="11" fill="${theme.labelText}"${fitTextAttr(
         nameFull,
         maxLabelW,
         11
@@ -431,9 +519,9 @@
     });
 
     const segmentLegend = [
-      { label: "GP contribution", color: "#5b9dd9" },
-      { label: "War contribution", color: "#6fcf97" },
-      { label: "Negative war score", color: "#eb5757" },
+      { label: "GP contribution", color: "#a9822f" },
+      { label: "War contribution", color: "#1f7a3d" },
+      { label: "Negative war score", color: "#a1442f" },
     ]
       .map((l) => `<span class="chart-legend-item"><span class="chart-legend-swatch" style="background:${l.color}"></span>${escapeHtml(l.label)}</span>`)
       .join("");
@@ -441,9 +529,10 @@
     container.innerHTML = `
       <div class="chart-title">${escapeHtml(title)}</div>
       <svg viewBox="0 0 ${W} ${H}" class="bar-chart bar-chart-scoreboard" role="img" aria-label="${escapeHtml(title)}">
+        <rect x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="rgba(46,42,34,0.025)" rx="4"/>
         ${gridLines}
         ${yLabels}
-        <line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="${AXIS_TEXT}" stroke-width="1.5"/>
+        <line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" stroke="${theme.axisText}" stroke-width="1.5"/>
         ${bars}
         ${valueLabels}
         ${axisLabels}

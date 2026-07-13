@@ -733,8 +733,11 @@ monitor that's a very short, very wide banner. Now `aspect-ratio: 16/10` with a
 **Black Death "Lost %" color gradient**, green (least population lost) to red (most),
 scaled to the *loaded save's own* min/max rather than a fixed 0–100% axis — real
 per-country tallies cluster in a fairly narrow band (e.g. 20–40% in one test campaign),
-which would all read as a near-identical color against the full range. Recomputed by
-`renderBlackDeath()` into a shared `blackDeathLossRange` on every render.
+which would all read as a near-identical color against the full range. Originally its
+own bespoke text-color gradient (`lossPctColor()`); now goes through the same
+`metric-heat` background-fill mechanism every other heat column uses instead (see the
+Campaign Ledger section below for why and how) — no bespoke color code left for this
+column at all.
 
 **Fixed: unescaped error text passed to `innerHTML`.** `showError()`
 (`js/app.js`) writes its argument straight into `errorBox.innerHTML`, which
@@ -749,6 +752,160 @@ stops being safe the moment a future error message includes more context
 (a tag, a file name) without someone re-deriving that history first. All
 three now wrap the dynamic `.message` in `escapeHtml()`, consistent with how
 the format-code and map-loading error paths already did it.
+
+### Visual design — the "Campaign Ledger" reskin
+
+The app's original look was a fairly generic dark-mode-SaaS palette (`#14181f`
+background, `#5b9dd9` accent blue, system-font stack) — asked to be redesigned
+into something less "default AI-generated." Three concrete directions were
+mocked up as a Claude.ai artifact (a parchment/wax-seal "Campaign Ledger," a
+navy/brass instrument-panel "Chart Room," and a warm-stone editorial "Field
+Report") using the app's own real components (header, tab nav, a country
+table, the Llama Score leaderboard) rather than abstract swatches, so the
+choice was made against how it'd actually look, not a mood board. **Campaign
+Ledger** — parchment, wax-seal red, gold-tan hairlines, italic serif
+headers, monospace numeric columns — was picked as the closest fit for a
+Paradox/EU5 tool.
+
+**Token architecture.** Everything routes through the same `:root` CSS
+custom-property set already in place before the reskin (`--bg`, `--panel-bg`,
+`--panel-border`, `--text`, `--text-dim`, `--accent`, `--good`, `--bad`, plus
+new `--gold`, `--rule-strong`, `--row-hover`, `--font-mono`) — no build step,
+no CSS framework, just new values. Border-radius flattened to 2–3px
+everywhere (was 4–10px) to read as ledger-page corners rather than the
+rounded-card look most default UI kits share.
+
+**Dark mode is the actual default**, not merely an OS-preference fallback —
+`:root` itself holds the dark "leather-bound ledger at night" palette
+(`--bg #1c150e`, `--panel-bg #2b2015`, `--text #f1e6c8`, `--accent #c25b4f`,
+etc.), and `:root[data-theme="light"]` is the opt-in override for the
+parchment-by-day palette (`--bg #e7dcc0`, `--accent #7a2e2e`, …) — the
+reverse of how the first pass shipped it, swapped after the user asked for
+dark specifically rather than as an OS-preference-driven default. A
+`#themeToggleBtn` in the header (☾/☀, flips direction with the theme) stamps
+`document.documentElement.dataset.theme` and persists it to
+`localStorage["eu5-analyzer-theme"]`; a small inline `<script>` in
+`index.html`'s `<head>` (before the stylesheet) applies any saved choice
+synchronously so a returning visitor never flashes the other theme first.
+Gold-tan hairlines (`--panel-border`, `--rule-strong`) are the same value in
+both themes — proven to read fine on dark already, since the map's floating
+HUD chrome (below) already used this exact gold on a dark background before
+dark mode existed as an option.
+
+**The map's floating panels stay dark regardless of page theme** —
+`.map-toolbar`, `.map-legend`, `.map-tooltip`, `.location-details`/
+`.country-details` float over the game map canvas itself, so they're a fixed
+warm-brown-black HUD (not tied to `--bg`) either way. Done by **scoping
+`--text`/`--text-dim`/`--accent` overrides directly on those container
+selectors** rather than writing per-rule dark/light variants — every
+descendant already referencing `var(--text)` etc. picks up the HUD-local
+values automatically through normal CSS inheritance.
+
+**`js/charts.js` reads its palette from CSS custom properties at render
+time** (`chartTokens()` calls `getComputedStyle(document.documentElement)`
+for `--chart-surface`/`--chart-gridline`/`--chart-axis-text`/
+`--chart-label-text`/`--chart-total-bar`/`--chart-series-1..8`) instead of
+hardcoding two parallel JS palettes that could drift out of sync with the
+CSS ones. Toggling the theme just means re-running whichever render function
+last drew a chart (`renderTrends()`/the Llama Score leaderboard's
+`currentLlamaDraw()`, both called from the toggle's click handler) — no
+separate "repaint" API needed. The categorical series palette (used for the
+Graphs-tab trend lines) is the exact 8-color set the app used before this
+reskin for its one and only theme; both the light and dark versions were
+validated with the `dataviz` skill's `scripts/validate_palette.js` against
+this app's *actual* chart surfaces (`#f7f2e2` / `#2b2015`), not the skill's
+generic neutral defaults.
+
+**A gradient must never fade toward the surface color** — this bit the app
+twice from opposite directions and is worth knowing if a third heat-style
+element gets added. `td.metric-heat` (the Income/Profit/Efficiency/
+Population/Manpower/Black-Death-"Lost %" heat-fill cells) originally faded
+alpha 0.65→0.3 left-to-right, which fades toward black on a dark surface
+(fine) but toward *invisible* on light parchment (looks uncolored). Fixed by
+keeping both gradient stops at high, near-equal alpha (0.9/0.75) and only
+stepping *lightness* between them, with light and dark mode needing opposite
+lightness directions (pale saturated fill + dark text vs. dark saturated
+fill + light text) — `:root[data-theme="light"] td.metric-heat` overrides
+the dark default. The Black Death "Lost %" column used to have its own
+bespoke gradient (`lossPctColor()`, a hand-rolled green→neutral-gray→red
+RGB lerp) for the same reason, before being folded into this same
+`metric-heat` mechanism — `heatScoreFor()` gained a `col.lowerIsBetter` flag
+(more population lost is worse, the opposite of every other heat column's
+"higher is better"), and a single `heatColumn: true` flag on the column
+definition was enough to opt in.
+
+**Country-colored chart elements needed a contrast safety net.** The
+Graphs-tab trend lines and the Llama Score leaderboard bars both color
+themselves by the relevant country's real in-game color
+(`country.color`, a `"rgb(r, g, b)"` string) rather than a generic
+categorical palette — a nice touch (a player's own line/bar matches
+their nation's map color) that can go wrong when a country's real color
+happens to be too close to the chart surface's own color (a pale country on
+light parchment, or a near-black one on the dark leather surface).
+`legibleChartColor()` (`js/charts.js`) darkens (light theme) or lightens
+(dark theme) a color only when its luminance is too close to the surface's,
+leaving already-legible colors untouched; bars additionally get a hairline
+border a fixed fraction darker than their own fill (`darkenColor()`) so they
+stay visually defined regardless of how light or dark a given country's
+color is.
+
+**Ledger-mode leaderboards (a recorder-connected campaign, see the Llama
+score section above) don't carry country color** — the recorder's compact
+snapshot format (`llama-score-automatic-logging-machine/llama-log-machine.js`)
+never stored it. Rather than change that separate standalone script,
+`renderLlamaLeaderboardChart()` (`js/app.js`) falls back to looking the
+color up by tag in whichever save is actually loaded in the browser tab
+(`latestResult.countries`, always present, ledger mode or not) when the
+leaderboard item's own color is missing.
+
+**Gridlines snapped to round numbers.** Every chart's y-axis gridlines used
+to be an even division of the padded data range (e.g. `22.7, 17.0, 11.3,
+5.7, 0.0`), which is exactly what makes a chart read as an unstyled
+spreadsheet default rather than something someone designed. `pickNiceTicks()`/
+`niceStep()` (`js/charts.js`) snap to the nearest round 1/2/5/10 step instead
+(`0, 5, 10, 15, 20`) — picks tick *values* within the chart's existing
+scale/padding logic, not a change to the scale itself, so each chart's own
+headroom-padding tuning is untouched.
+
+**`assets/llama-logo-avatar.png` had a baked-in checkerboard, not real
+transparency.** Some earlier export step had flattened a "transparent
+background" preview checkerboard (two near-white grays, RGB ~254 and ~237)
+into real opaque pixels rather than actual alpha — so `object-fit: cover` on
+the (already-square) source didn't crop anything, and the *entire* canvas,
+checkerboard included, rendered into the circular header logo, with the
+character pushed to one side and a visible checkerboard patch filling the
+rest. Fixed by flood-filling from the image's border pixels inward (not a
+flat color threshold — that punched transparent speckle holes in the dark
+hair, since a naive threshold also matches isolated same-colored pixels deep
+inside the artwork that have nothing to do with the actual background) to
+restore real alpha, then recentering the crop on the character's own content
+bounds — keeping the *full* image height so the mane reaches the bottom edge
+of the circle with no gap, rather than a centroid-only centering that left
+one. The pristine original was recovered via
+`git show HEAD:assets/llama-logo-avatar.png` after a first crop attempt
+needed redoing, since it had already been committed.
+`llama-dashboard/assets/llama-logo-avatar.png` is a separate
+on-disk copy (confirmed via `md5sum`, not a symlink), so it needed the same
+fix applied a second time.
+
+**`llama-dashboard/renderer/style.css`** (the Electron desktop companion
+app's own ~200-line stylesheet — no CSS file is shared between it and the
+web app) was hand-ported to the same token values, border-radius, and
+italic-serif treatment as `css/style.css`, so the two apps stay visually
+consistent. Verified by opening `llama-dashboard/renderer/index.html`
+directly via `file://` in headless Chrome — Electron's IPC calls silently
+no-op outside an actual Electron process, but the static layout and CSS
+render enough to check visually; exercising it against live recorder data
+still needs an actual `npm start` launch.
+
+**Verification method**, worth noting since no project-level run-skill or
+`chromium-cli` existed here yet: every change in this section was checked by
+actually launching a headless Chrome instance (the system Chrome install via
+`playwright-core`, no bundled-browser download needed) against the real dev
+server, loading one of the real saves under `save games/`, and screenshotting
+each tab — not just reading the CSS. This is how the metric-heat fade-to-
+invisible bug, the ledger-mode leaderboard color gap, and the logo's baked-in
+checkerboard were actually found; none were visible from the source alone.
 
 ### Save history & shareable state
 
@@ -883,6 +1040,12 @@ you need to inspect the binary format directly.
   fully automated when a country changed hands mid-campaign, since
   `played_country` sessions carry no timestamp to line up against a specific
   war's dates (only the manual reassignment dropdown resolves that case).
+- **Visual design.** Built - see "Visual design — the 'Campaign Ledger' reskin"
+  above for the palette, the dark-mode-by-default toggle, and the chart-color
+  fixes that came out of it. The other two mocked-up directions (a navy/brass
+  instrument-panel "Chart Room," a warm-stone editorial "Field Report") are
+  still available if a future pivot away from Campaign Ledger is wanted -
+  neither was ever wired into the actual app, just mocked up for comparison.
 - **Hosted version.** Netlify (static) + Supabase, matching the MSV2 setup. A
   fully local (no-server) version of save history and shareable/restorable
   view state now exists (see "Save history & shareable state" above) - it
