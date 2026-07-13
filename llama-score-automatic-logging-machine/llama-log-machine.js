@@ -413,6 +413,12 @@ function countrySummary(c, overlordOf) {
     lastMonthGoldIncome: c.lastMonthGoldIncome,
     creditworthiness: c.creditworthiness,
     loanCapacity: c.loanCapacity,
+    // Total outstanding loan principal (js/clausewitz.js's/clausewitz-
+    // binary.js's attachCountryDebt(), summed from loan_manager.database) -
+    // used to net loan proceeds/repayments out of the treasury-swing signal
+    // below (sideEconomyDeltas) so taking out a loan doesn't look like
+    // winning gold, and repaying one doesn't look like losing it.
+    totalDebt: c.totalDebt,
     gpRank: c.greatPowerRank,
     scorePlace: c.scorePlace,
     locationCount: c.locationCount,
@@ -518,7 +524,19 @@ function sideEconomyDeltas(war, beforeCountries, afterCountries) {
       const before = beforeCountries[country];
       const after = afterCountries[country];
       if (!before || !after) continue;
-      const goldDelta = numDelta(after.gold, before.gold);
+      // Net OUT any change in outstanding debt from the raw treasury change -
+      // taking a loan hands you gold AND an equal liability at the same
+      // instant (no real gain), and repaying one removes both together (no
+      // real loss). Confirmed on real data: a player's gold rose across a
+      // war window purely from a fresh loan, which the old raw-gold check
+      // read as "winning" the war economically. `debtDelta` is null (not 0)
+      // when either snapshot predates totalDebt being recorded - falls back
+      // to the un-netted raw delta in that case (old ledger data), same as
+      // if debt simply hadn't changed, rather than losing the signal
+      // entirely.
+      const rawGoldDelta = numDelta(after.gold, before.gold);
+      const debtDelta = numDelta(after.totalDebt, before.totalDebt);
+      const goldDelta = typeof rawGoldDelta === "number" ? rawGoldDelta - (typeof debtDelta === "number" ? debtDelta : 0) : null;
       const prestigeDelta = numDelta(after.prestige, before.prestige);
       const locationDelta = numDelta(after.locationCount, before.locationCount);
       entries.push({ country, goldDelta, prestigeDelta, locationDelta });
@@ -560,6 +578,45 @@ function principalCountrySet(value) {
   else if (Array.isArray(value)) for (const n of value) if (typeof n === "number") set.add(n);
   return set;
 }
+// A vassal being attacked drags its Overlord into the war automatically
+// (confirmed by the user from real play - "the overlord will auto take over
+// if i attack a vassal") - the war's own participant list already records
+// this: the Overlord's own participant entry has `reason === "Overlord"` and
+// `calledAlly` pointing at the vassal it's defending. Looked up per-war (not
+// from a country's current `.overlord` field, which only reflects
+// present-day status) since that's the actual mechanic that pulled them in,
+// self-contained in data already on the war object.
+function overlordFor(war, vassalCountry) {
+  const participants = war.participants || [];
+  for (const p of participants) {
+    if (p.reason === "Overlord" && p.calledAlly === vassalCountry) return p.country;
+  }
+  return null;
+}
+// Land can genuinely move to/from either the vassal (their own conquered
+// provinces) or the Overlord (who negotiates the actual peace) - so the
+// location-delta principal set is the UNION of both.
+function principalsWithOverlords(base, war) {
+  const expanded = new Set(base);
+  for (const country of base) {
+    const overlord = overlordFor(war, country);
+    if (overlord != null) expanded.add(overlord);
+  }
+  return expanded;
+}
+// Gold is different: per the user's call, "you can never exchange money with
+// a vassal only with the overlord in a peace" - a vassal has no treasury
+// standing of its own in a peace deal, so when a principal has an Overlord
+// present, the Overlord REPLACES it for gold purposes rather than being
+// added alongside it (unlike location, this is not a union).
+function principalsForGold(base, war) {
+  const result = new Set();
+  for (const country of base) {
+    const overlord = overlordFor(war, country);
+    result.add(overlord != null ? overlord : country);
+  }
+  return result;
+}
 function principalFieldSum(sideInfo, principals, field) {
   if (!sideInfo || !sideInfo.countryDeltas || !principals.size) return null;
   let sum = 0;
@@ -585,41 +642,23 @@ function resolveSideField(sideInfo, principals, field) {
 // still worth surfacing (see inferOutcome's contributingFactors).
 function economicOutcomeSignal(war, economy) {
   if (!economy || !economy.Attacker || !economy.Defender) return { decisive: null, contributing: [] };
-  const attackerPrincipals = principalCountrySet(war.originalAttacker);
-  const defenderPrincipals = principalCountrySet(war.originalDefenders);
+  const attackerPrincipalsBase = principalCountrySet(war.originalAttacker);
+  const defenderPrincipalsBase = principalCountrySet(war.originalDefenders);
+  const attackerPrincipals = principalsWithOverlords(attackerPrincipalsBase, war);
+  const defenderPrincipals = principalsWithOverlords(defenderPrincipalsBase, war);
+  const attackerGoldPrincipals = principalsForGold(attackerPrincipalsBase, war);
+  const defenderGoldPrincipals = principalsForGold(defenderPrincipalsBase, war);
 
   const aLoc = resolveSideField(economy.Attacker, attackerPrincipals, "locationDelta");
   const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
-  const aGoldR = resolveSideField(economy.Attacker, attackerPrincipals, "goldDelta");
-  const dGoldR = resolveSideField(economy.Defender, defenderPrincipals, "goldDelta");
-  const aPrestR = resolveSideField(economy.Attacker, attackerPrincipals, "prestigeDelta");
-  const dPrestR = resolveSideField(economy.Defender, defenderPrincipals, "prestigeDelta");
+  const aGoldR = resolveSideField(economy.Attacker, attackerGoldPrincipals, "goldDelta");
+  const dGoldR = resolveSideField(economy.Defender, defenderGoldPrincipals, "goldDelta");
 
   const aGold = aGoldR.value;
   const dGold = dGoldR.value;
   const aLocations = aLoc.value;
   const dLocations = dLoc.value;
-  const aPrestige = aPrestR.value;
-  const dPrestige = dPrestR.value;
   const signals = [];
-
-  // A genuine land cession comes with a prestige swing in roughly the same
-  // direction too (winner gains standing, loser loses it) - requiring that
-  // agreement catches a land-transfer signal that LOOKS clean (both sides
-  // nonzero, opposite sign, per the fix below) but is actually coincidental
-  // territorial noise from something else concluding in the same snapshot
-  // window. Only a real, opposite-direction prestige reading blocks the
-  // land signal - missing data on either side, or a prestige delta of
-  // exactly 0, isn't a contradiction, just silence. Deliberately sign-only
-  // (not magnitude-matched): prestige and location count are incommensurate
-  // units, so "ballpark" here means "doesn't point the other way," not
-  // "similar-sized number."
-  function prestigeContradicts(winnerSide) {
-    if (typeof aPrestige !== "number" || typeof dPrestige !== "number") return false;
-    const prestigeSpread = aPrestige - dPrestige;
-    if (prestigeSpread === 0) return false;
-    return (prestigeSpread > 0 ? "Attacker" : "Defender") !== winnerSide;
-  }
 
   if (typeof aLocations === "number" && typeof dLocations === "number") {
     const spread = aLocations - dLocations;
@@ -640,8 +679,7 @@ function economicOutcomeSignal(war, economy) {
       aLocations !== 0 &&
       dLocations !== 0 &&
       Math.abs(spread) >= 2 &&
-      Math.sign(aLocations) !== Math.sign(dLocations) &&
-      !prestigeContradicts(winnerSide)
+      Math.sign(aLocations) !== Math.sign(dLocations)
     ) {
       const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
       signals.push({
@@ -656,7 +694,7 @@ function economicOutcomeSignal(war, economy) {
     const value = typeof aLocations === "number" ? aLocations : dLocations;
     const clean = side === "Attacker" ? aLoc.usedPrincipal : dLoc.usedPrincipal;
     const winnerSide = value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker";
-    if (Math.abs(value) >= 1 && !prestigeContradicts(winnerSide)) {
+    if (Math.abs(value) >= 1) {
       signals.push({
         winnerSide,
         loserSide: winnerSide === "Attacker" ? "Defender" : "Attacker",
@@ -685,25 +723,6 @@ function economicOutcomeSignal(war, economy) {
         loserSide: side === "Attacker" ? "Defender" : "Attacker",
         reason: "post-war-treasury-gain",
         strength: value,
-      });
-    }
-  }
-
-  // Same nonzero-both-sides + opposite-sign rigor as land-transfer above -
-  // the OLD prestige check here only compared the aggregate spread, which
-  // had the identical false-positive shape the location-delta bug did (one
-  // side sitting at exactly 0 could still "win" against a nonzero, unrelated
-  // swing on the other side). Fixed the same way: both principal sides must
-  // show a real, opposite-direction prestige change before it counts as a
-  // decisive signal.
-  if (typeof aPrestige === "number" && typeof dPrestige === "number") {
-    const spread = aPrestige - dPrestige;
-    if (aPrestige !== 0 && dPrestige !== 0 && Math.abs(spread) >= 5 && Math.sign(aPrestige) !== Math.sign(dPrestige)) {
-      signals.push({
-        winnerSide: spread > 0 ? "Attacker" : "Defender",
-        loserSide: spread > 0 ? "Defender" : "Attacker",
-        reason: "post-war-prestige-swing",
-        strength: Math.abs(spread) * 10,
       });
     }
   }
@@ -743,15 +762,14 @@ function shiftConfidence(level, delta) {
 }
 
 // Maps an economicOutcomeSignal reason code to the short label used in
-// contributingFactors, so a land/treasury/prestige signal that LOST out to a
-// stronger one (see economicOutcomeSignal's `contributing`) still shows up
-// as "considered but not decisive" the same way war-score/battle-losses do.
+// contributingFactors, so a land/treasury signal that LOST out to a stronger
+// one (see economicOutcomeSignal's `contributing`) still shows up as
+// "considered but not decisive" the same way war-score/battle-losses do.
 const CONTRIBUTING_SIGNAL_FROM_REASON = {
   "post-war-land-transfer": "land-transfer",
   "post-war-land-transfer-coalition": "land-transfer",
   "post-war-treasury-swing": "treasury",
   "post-war-treasury-gain": "treasury",
-  "post-war-prestige-swing": "prestige-swing",
 };
 
 function inferOutcome(war, disappeared, economy) {
@@ -764,13 +782,14 @@ function inferOutcome(war, disappeared, economy) {
       : null;
 
   // Per the user's call (js/llama-score.js's copy of this function has the
-  // full writeup, kept in sync deliberately): war score and battle losses
-  // never decide a winner on their own - each one moves for reasons that
-  // don't reliably track who actually won THIS specific war (a two-sided
-  // war score is frequently a partial-clear artifact from EU5's own
-  // end-of-war cleanup; a winning invader can still rack up heavy battle
-  // losses). Land, gold, and prestige (economicOutcomeSignal, all using the
-  // same nonzero-both-sides/opposite-direction rigor) are what decide who
+  // full writeup, kept in sync deliberately): war score, battle losses, and
+  // prestige never decide a winner on their own - each one moves for reasons
+  // that don't reliably track who actually won THIS specific war (a
+  // two-sided war score is frequently a partial-clear artifact from EU5's
+  // own end-of-war cleanup; a winning invader can still rack up heavy battle
+  // losses; prestige swings heavily from battles/events unrelated to the
+  // war's actual outcome). Only land and gold (economicOutcomeSignal, both
+  // using the same nonzero-both-sides/opposite-direction rigor) decide who
   // won; war-score and battle-losses are attached below as
   // contributingFactors so the reasoning stays visible/auditable without
   // ever being trusted to pick a side by themselves - not even when several
@@ -794,14 +813,17 @@ function inferOutcome(war, disappeared, economy) {
     return { ...result, confidence, lossSignalAgrees, contributingFactors, attackerScore: aScore, defenderScore: dScore };
   }
 
-  // The only decisive checks in this function: before/after territory,
-  // treasury, and prestige change, restricted to the war's two original
-  // principals (see economicOutcomeSignal's own comments for the
-  // nonzero-both-sides fix, the land/prestige cross-check, and the
-  // principal/coalition split). Land transfer gets "high" confidence (about
-  // as unambiguous as this game's data gets); gold- or prestige-only
-  // signals get "medium" (real, but each swings for other reasons too, just
-  // less commonly by this much right as a war ends).
+  // The only decisive checks in this function: before/after territory and
+  // treasury change, restricted to the war's two original principals (see
+  // economicOutcomeSignal's own comments for the nonzero-both-sides fix and
+  // the principal/coalition split). Prestige is deliberately NOT a decisive
+  // input here (see economicOutcomeSignal - it used to be, until real data
+  // showed prestige swings just as often come from unrelated battles/events
+  // as from the war's actual outcome, which produced confirmed-wrong calls).
+  // Land transfer gets "high" confidence (about as unambiguous as this
+  // game's data gets); a gold-only signal gets "medium" (real, but swings
+  // for other reasons too, just less commonly by this much right as a war
+  // ends).
   const economicSignal = economicOutcomeSignal(war, economy);
   if (economicSignal.decisive) {
     return finalize(
@@ -824,8 +846,8 @@ function inferOutcome(war, disappeared, economy) {
   // before/after comparison) can tell those apart, so this heuristic is
   // retired rather than kept as a lower-confidence guess.
 
-  // No land, gold, or prestige actually changed hands between the two
-  // principals - default to White Peace. War score/battle-losses are still
+  // No land or gold actually changed hands between the two principals -
+  // default to White Peace. War score/battle-losses/prestige are still
   // attached as contributingFactors above for anyone auditing the call, but
   // per the user's call none of them gets to crown a winner on its own - a
   // white peace costs nothing to get right, and the per-row manual override

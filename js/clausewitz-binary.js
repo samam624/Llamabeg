@@ -1088,6 +1088,56 @@
     }
   }
 
+  // Mirrors js/clausewitz.js's parseLoanManagerSection: each "database"
+  // entry is fully decoded then immediately reduced via
+  // Clausewitz.extractLoanFields and discarded (loan_manager is small - tens
+  // of KB even in a large late-game save - so unlike war_manager/locations
+  // this always runs, no includeXxx opt-in gate).
+  function parseLoanManagerSection(dec, view, onLoan) {
+    dec.pos += 2; // consume OPEN already peeked by caller
+    while (true) {
+      const peek = view.getUint16(dec.pos, true);
+      if (peek === CLOSE) {
+        dec.pos += 2;
+        break;
+      }
+      const resolved = dec.resolveToken();
+      const key = dec.keyToPropName(resolved);
+      const eq = view.getUint16(dec.pos, true);
+      if (eq !== EQUALS) throw new Error(`loan_manager desync at ${dec.pos}`);
+      dec.pos += 2;
+
+      if (key === "database") {
+        const openCode = view.getUint16(dec.pos, true);
+        dec.pos += 2;
+        if (openCode !== OPEN) throw new Error("expected loan_manager.database to be a subobject");
+        while (true) {
+          const p2 = view.getUint16(dec.pos, true);
+          if (p2 === CLOSE) {
+            dec.pos += 2;
+            break;
+          }
+          dec.resolveToken(); // entry number - not needed
+          const eq2 = view.getUint16(dec.pos, true);
+          if (eq2 !== EQUALS) throw new Error(`loan_manager.database desync at ${dec.pos}`);
+          dec.pos += 2;
+          const loanObj = dec.readBareValue();
+          // Cleared/tombstoned loan entries decode to a bare unresolved
+          // value (the literal "none" in melted text) rather than a
+          // subobject - same shape as war_manager's freed war IDs.
+          // extractLoanFields already returns null for a non-object, so
+          // this filters them the same way.
+          if (loanObj && typeof loanObj === "object" && !Array.isArray(loanObj) && !("fixedNum" in loanObj)) {
+            const loan = Clausewitz.extractLoanFields(loanObj);
+            if (loan) onLoan(loan);
+          }
+        }
+      } else {
+        dec.skipBareValue();
+      }
+    }
+  }
+
   function extractPlayer(obj) {
     return {
       name: obj.name,
@@ -1153,6 +1203,7 @@
       wars: [],
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
       provinceOwnerByDefinition: {},
+      countryDebt: new Map(),
     };
 
     // Normally "countries" and "played_country" are true top-level keys, but
@@ -1179,6 +1230,7 @@
     let warManagerSeen = false;
     let diseaseOutbreakManagerSeen = false;
     let provincesSeen = false;
+    let loanManagerSeen = false;
     function handleSpecialKey(key) {
       if (key === "countries" && !countriesSeen) {
         const beforePos = dec.pos;
@@ -1343,6 +1395,21 @@
         result.blackDeath.deathsByCountry = parseDiseaseOutbreakManagerSection(dec, gsView, result.blackDeath.identity);
         return true;
       }
+      if (key === "loan_manager" && !loanManagerSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        loanManagerSeen = true;
+        parseLoanManagerSection(dec, gsView, (loan) => {
+          result.countryDebt.set(loan.borrower, (result.countryDebt.get(loan.borrower) || 0) + loan.amount);
+        });
+        return true;
+      }
       if (key === "war_manager" && includeWars && !warManagerSeen) {
         const beforePos = dec.pos;
         const peek = gsView.getUint16(dec.pos, true);
@@ -1403,6 +1470,7 @@
     Clausewitz.attachLocationAssets(result);
     Clausewitz.attachLocationBuildings(result);
     Clausewitz.reconcileWarOccupation(result);
+    Clausewitz.attachCountryDebt(result);
 
     onProgress(1);
     return result;

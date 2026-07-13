@@ -62,6 +62,38 @@ Re-run `npm run dist` after changing `main.js`/`preload.js`/`renderer/` or
 after `js/llama-score.js`/the recorder itself changes upstream - the vendored
 copy is a snapshot, not a live link.
 
+## Cutting a distributable .zip (for other people to download)
+
+```powershell
+cd llama-dashboard
+npm run release
+```
+
+This runs `dist` and then zips the packaged output into
+`llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip` - the exact file
+the website's download link points at (see the root `index.html`'s hardcoded
+GitHub Releases URL). Upload that file as the release asset.
+
+**Always use `npm run release` for this - never rename/zip the
+`release/Llama Score Dashboard-win32-x64/` folder by hand.** A previous
+release was built by hand (build, rename the folder to remove the spaces,
+right-click -> zip, upload) and the manual rename step left a trailing space
+in the folder's name without anyone noticing. Every person who downloaded
+and unzipped that release got a folder Windows Explorer could see but could
+never delete or rename ("Item Not Found... this is no longer located in..."),
+because Win32's normal path-handling APIs (the ones Explorer's own delete
+uses) silently strip a trailing space before doing the actual filesystem
+lookup, while NTFS preserves the literal name - so the folder is real, but
+almost nothing can address it correctly by name. (The only fix, if this
+happens to you: prefix the path with `\\?\` to bypass that normalization,
+e.g. `Remove-Item -LiteralPath "\\?\C:\full\path\to\the folder "` in
+PowerShell - note the exact trailing character(s) must still match; use
+`Get-ChildItem`'s `.FullName` rather than retyping the name by hand.)
+`scripts/package-release-zip.js` sets the zip's internal folder name
+programmatically (via `archiver`, not a filesystem rename) specifically so
+there's no rename step left for a stray keystroke to hide in, and it
+self-checks that name for a trailing space/dot before writing anything.
+
 ## Settings
 
 The **Settings** button in the app lets you point it at a different save

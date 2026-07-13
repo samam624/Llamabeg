@@ -12,6 +12,26 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
+// Two copies of this app (e.g. one launched from an old unzipped folder, one
+// from a fresh re-download elsewhere) polling and writing to the same
+// sibling `data` folder at once is exactly the concurrent-write corruption
+// risk the comment above already warns about for the standalone CLI - a
+// single-instance lock keeps that to one running copy regardless of which
+// extracted folder it was started from (Electron keys this off the app's own
+// identity, not its install path). If a second copy is launched, focus the
+// existing window instead of starting a second recorder loop.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 // Ledger lives next to the exe in a packaged (unzipped-and-run) install, so
 // a fresh download "just works" - the web app's "Connect campaign folder..."
 // picker then points at that same sibling `data` folder to share one ledger
@@ -50,9 +70,20 @@ function buildConfig() {
   const settings = loadSettings();
   const args = {};
   if (settings.saveDir) args.saveDir = settings.saveDir;
-  if (settings.dataDir) args.dataDir = settings.dataDir;
+  // A saved dataDir can point at a NOW-GONE extraction of this app - e.g. the
+  // user unzipped a fresh copy somewhere else and deleted the old one. Simply
+  // opening Settings once (even without changing anything - see settings:get/
+  // settings:save below) used to be enough to permanently pin that session's
+  // sibling-of-the-CURRENT-exe path into this shared (per-user, not
+  // per-install) settings file, so every future run - including from a
+  // totally different unzipped copy - kept pointing at a folder that might no
+  // longer exist. Only honor a saved dataDir if it still actually exists;
+  // otherwise fall through to a fresh defaultDataDir() for THIS exe, same as
+  // if nothing had ever been saved.
+  const cachedDataDirValid = typeof settings.dataDir === "string" && settings.dataDir && fs.existsSync(settings.dataDir);
+  if (cachedDataDirValid) args.dataDir = settings.dataDir;
   const config = Recorder.readConfig(args);
-  if (!settings.dataDir) config.dataDir = defaultDataDir();
+  if (!cachedDataDirValid) config.dataDir = defaultDataDir();
   config.campaignsDir = path.join(config.dataDir, "campaigns");
   return config;
 }
@@ -391,15 +422,34 @@ ipcMain.handle("campaigns:select", (_event, campaignKey) => {
   return true;
 });
 
+// Separates an EXPLICIT override (only ever set by the user actually typing/
+// picking a different folder) from the auto-computed default, so the
+// Settings dialog can show the default as a placeholder/hint instead of a
+// real value that gets blindly re-saved as if it were an explicit choice
+// (see settings:save below and buildConfig's cachedDataDirValid comment -
+// that round-trip is what used to permanently pin a since-deleted folder).
 ipcMain.handle("settings:get", () => {
   const settings = loadSettings();
   return {
-    saveDir: settings.saveDir || Recorder.DEFAULT_CONFIG.saveDir,
-    dataDir: settings.dataDir || defaultDataDir(),
+    saveDir: settings.saveDir || "",
+    dataDir: settings.dataDir || "",
+    defaultSaveDir: Recorder.DEFAULT_CONFIG.saveDir,
+    defaultDataDir: defaultDataDir(),
   };
 });
 
-ipcMain.handle("settings:save", async (_event, settings) => {
+ipcMain.handle("settings:save", async (_event, incoming) => {
+  const settings = loadSettings();
+  // An empty field means "use the automatic default" - clear any previously
+  // saved override instead of writing the empty string itself, so this
+  // install (and any future one) keeps following its own fresh
+  // defaultDataDir() rather than getting pinned to whatever happened to be
+  // on screen when Save was clicked.
+  for (const key of ["saveDir", "dataDir"]) {
+    const value = typeof incoming[key] === "string" ? incoming[key].trim() : "";
+    if (value) settings[key] = value;
+    else delete settings[key];
+  }
   saveSettingsToDisk(settings);
   await restartRecorder();
   return true;

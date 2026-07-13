@@ -19,7 +19,6 @@ const REASON_LABELS = {
   "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
   "post-war-treasury-swing": "Treasury swung between sides",
   "post-war-treasury-gain": "One side gained a lot of gold",
-  "post-war-prestige-swing": "Prestige swung between sides",
   "battle-losses-inflicted": "Battle losses (no economic signal)",
   "last-known-war-score": "Last known in-game war score",
   "white-peace": "No decisive signal - treated as white peace",
@@ -40,7 +39,6 @@ function reasonLabel(reason) {
 // principals can crown a winner. Surfaced here as an extra tooltip line.
 const CONTRIBUTING_FACTOR_LABELS = {
   "war-score": "war score",
-  "prestige-swing": "prestige",
   "battle-losses": "battle losses",
   "land-transfer": "land change",
   treasury: "treasury",
@@ -340,18 +338,29 @@ document.getElementById("campaignsClose").addEventListener("click", () => campai
 const settingsDialog = document.getElementById("settingsDialog");
 document.getElementById("settingsBtn").addEventListener("click", async () => {
   const settings = await window.llamaAPI.getSettings();
-  document.getElementById("saveDirInput").value = settings.saveDir;
-  document.getElementById("dataDirInput").value = settings.dataDir;
+  // Only pre-fill the input with an EXPLICIT override the user actually set
+  // before - the auto-computed default is shown as a placeholder hint
+  // instead, so simply opening this dialog and clicking Save (without typing
+  // anything) no longer permanently pins that value (see main.js's
+  // settings:get/settings:save comments for the bug this used to cause).
+  const saveDirInput = document.getElementById("saveDirInput");
+  const dataDirInput = document.getElementById("dataDirInput");
+  saveDirInput.value = settings.saveDir || "";
+  saveDirInput.placeholder = settings.defaultSaveDir || "";
+  dataDirInput.value = settings.dataDir || "";
+  dataDirInput.placeholder = settings.defaultDataDir || "";
   settingsDialog.showModal();
 });
 document.getElementById("settingsCancel").addEventListener("click", () => settingsDialog.close());
 document.getElementById("pickSaveDir").addEventListener("click", async () => {
-  const picked = await window.llamaAPI.pickFolder(document.getElementById("saveDirInput").value);
-  if (picked) document.getElementById("saveDirInput").value = picked;
+  const input = document.getElementById("saveDirInput");
+  const picked = await window.llamaAPI.pickFolder(input.value || input.placeholder);
+  if (picked) input.value = picked;
 });
 document.getElementById("pickDataDir").addEventListener("click", async () => {
-  const picked = await window.llamaAPI.pickFolder(document.getElementById("dataDirInput").value);
-  if (picked) document.getElementById("dataDirInput").value = picked;
+  const input = document.getElementById("dataDirInput");
+  const picked = await window.llamaAPI.pickFolder(input.value || input.placeholder);
+  if (picked) input.value = picked;
 });
 document.getElementById("settingsForm").addEventListener("submit", async (e) => {
   e.preventDefault();

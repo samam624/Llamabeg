@@ -1338,9 +1338,58 @@
     }
   }
 
+  // A loan entry can be `=none` (a cleared/tombstoned loan - confirmed on
+  // real data) instead of an object, and can carry a "lender" field too
+  // (player-to-player loans, presumably) which isn't needed here - only
+  // amount+borrower matter for the llama war-scoring debt-netting use case
+  // (see economicOutcomeSignal's net-of-debt treasury signal).
+  function extractLoanFields(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const borrower = typeof obj.borrower === "number" ? obj.borrower : null;
+    const amount = typeof obj.amount === "number" ? obj.amount : null;
+    if (borrower === null || amount === null) return null;
+    return { borrower, amount };
+  }
+
+  function parseLoanManagerSection(scanner, onLoan) {
+    while (true) {
+      scanner.skipWs();
+      if (scanner.text[scanner.pos] === "}") {
+        scanner.pos++;
+        break;
+      }
+      if (scanner.eof()) break;
+      const key = scanner.readScalarToken().raw;
+      scanner.consumeIfPresent("=");
+      if (key === "database") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          while (true) {
+            scanner.skipWs();
+            if (scanner.text[scanner.pos] === "}") {
+              scanner.pos++;
+              break;
+            }
+            if (scanner.eof()) break;
+            scanner.readScalarToken(); // entry number - not needed
+            scanner.consumeIfPresent("=");
+            const obj = scanner.parseValue();
+            const loan = extractLoanFields(obj);
+            if (loan) onLoan(loan);
+          }
+        } else {
+          scanner.skipValue();
+        }
+      } else {
+        scanner.skipValue();
+      }
+    }
+  }
+
   // Top-level sections we fully or partially parse; everything else is
   // skipped without allocating.
-  const BASE_TOP_LEVEL_KEYS = ["metadata", "countries", "played_country", "diplomacy_manager", "situation_manager", "disease_outbreak_manager"];
+  const BASE_TOP_LEVEL_KEYS = ["metadata", "countries", "played_country", "diplomacy_manager", "situation_manager", "disease_outbreak_manager", "loan_manager"];
 
   function parseSave(text, options) {
     options = options || {};
@@ -1385,6 +1434,7 @@
       wars: [],
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
       provinceOwnerByDefinition: {},
+      countryDebt: new Map(),
     };
 
     let lastProgressPos = 0;
@@ -1539,6 +1589,16 @@
         } else {
           scanner.skipValue();
         }
+      } else if (key === "loan_manager") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          parseLoanManagerSection(scanner, (loan) => {
+            result.countryDebt.set(loan.borrower, (result.countryDebt.get(loan.borrower) || 0) + loan.amount);
+          });
+        } else {
+          scanner.skipValue();
+        }
       }
 
       if (scanner.pos - lastProgressPos > PROGRESS_STEP) {
@@ -1551,6 +1611,7 @@
     attachLocationAssets(result);
     attachLocationBuildings(result);
     reconcileWarOccupation(result);
+    attachCountryDebt(result);
 
     onProgress(1);
     return result;
@@ -1619,6 +1680,21 @@
     }
   }
 
+  // loan_manager.database is a flat, country-agnostic list (each entry only
+  // names its `borrower`), parsed independently of the `countries` section -
+  // this attaches the summed total back onto each country record after both
+  // are done, order-independent of which section the save happens to list
+  // first. Shared between the text and binary parsers (js/clausewitz-binary.js
+  // calls this too) since the fix applies identically to both. Used by the
+  // llama war-scoring engine to net loan proceeds/repayments out of a
+  // treasury-swing signal - see js/llama-score.js/llama-log-machine.js's
+  // economicOutcomeSignal.
+  function attachCountryDebt(result) {
+    for (const country of result.countries) {
+      country.totalDebt = result.countryDebt.get(country.number) || 0;
+    }
+  }
+
   return {
     Scanner,
     coerceScalar,
@@ -1632,9 +1708,11 @@
     extractMarketFields,
     extractBlackDeath,
     extractWarFields,
+    extractLoanFields,
     reconcileWarOccupation,
     attachLocationAssets,
     attachLocationBuildings,
     collapsePlayerSessions,
+    attachCountryDebt,
   };
 });

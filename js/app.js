@@ -636,7 +636,6 @@
     "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
     "post-war-treasury-swing": "Treasury swung between sides",
     "post-war-treasury-gain": "One side gained a lot of gold",
-    "post-war-prestige-swing": "Prestige swung between sides",
     "battle-losses-inflicted": "Battle losses (no economic signal)",
     "last-known-war-score": "Last known in-game war score",
     "white-peace": "No decisive signal - treated as white peace",
@@ -657,7 +656,6 @@
   // request.
   const CONTRIBUTING_FACTOR_LABELS = {
     "war-score": "war score",
-    "prestige-swing": "prestige",
     "battle-losses": "battle losses",
     "land-transfer": "land change",
     treasury: "treasury",

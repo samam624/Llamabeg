@@ -53,6 +53,7 @@
     "312f": "situation_manager",
     "31df": "war_manager",
     "2e6b": "building_manager",
+    "2ebc": "loan_manager",
 
     // war_manager.database entries. Derived by position-matching a
     // generically-decoded war object against the melted text of the exact
@@ -101,6 +102,23 @@
     // countries container
     "1cf": "tags",
     "5ab": "database",
+
+    // loan_manager.database entries (loan_manager.database itself reuses the
+    // same "5ab" database ID as war_manager.database/countries.tags above -
+    // confirmed, not war-specific). Derived by generically decoding
+    // loan_manager (test/debug-loan-manager.js) and position-matching entries
+    // 12-16 against the melted text of the same save
+    // (autosave_10729752-2bb9-4170-86a9-2bddb274563a) - exact value match
+    // (amount=16.12447, interest=0.1, month=32, borrower=4) confirmed all
+    // four fields at once. A loan entry can also carry a "lender" field
+    // (seen on a real entry, player-to-player loans presumably) - not
+    // resolved/needed since only amount+borrower matter for the llama
+    // war-scoring debt-netting use case; treat as an unknown "#hex" fallback
+    // if it ever needs reading.
+    "1a1": "amount",
+    "2ec0": "interest",
+    "7b": "month",
+    "2ebf": "borrower",
 
     // situation_manager.<situation_name> entries (situation names themselves,
     // e.g. black_death, are string_lookup refs, not fixed IDs). start/end

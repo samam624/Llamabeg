@@ -7,9 +7,12 @@
   "scripts": {
     "start": "electron .",
     "prepare-vendor": "node scripts/prepare-vendor.js",
-    "dist": "npm run prepare-vendor && electron-packager . \"Llama Score Dashboard\" --platform=win32 --arch=x64 --out=release --overwrite --icon=assets/llama-logo.ico --ignore=\"^/release\" --ignore=\"^/(?!main.js|preload.js|renderer|package.json|vendor|assets)\""
+    "dist": "npm run prepare-vendor && electron-packager . \"Llama Score Dashboard\" --platform=win32 --arch=x64 --out=release --overwrite --icon=assets/llama-logo.ico --ignore=\"^/release\" --ignore=\"^/(?!main.js|preload.js|renderer|package.json|vendor|assets)\"",
+    "package-zip": "node scripts/package-release-zip.js",
+    "release": "npm run dist && npm run package-zip"
   },
   "devDependencies": {
+    "archiver": "^7.0.1",
     "electron": "^32.0.0",
     "electron-packager": "^17.1.2"
   },
