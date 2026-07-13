@@ -578,7 +578,7 @@
     "player-departed": "Auto-excluded: this player was no longer controlling this country by the time the war ended (recorder saw the country revert to AI). Uncheck to score it anyway.",
     "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign by its end (fighting an abandoned country doesn't score). Uncheck to score it anyway.",
     "player-hidden": "Auto-excluded: you've hidden this player in the Players table (Hide button) as departed - unhide them there to include their wars again.",
-    "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. Uncheck to score it anyway.",
+    "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. PvP-only (not applied to PvE, where a win engineered through your vassals doing the fighting should still count). Uncheck to score it anyway.",
   };
   function autoExcludeBadge(reason) {
     if (!reason || !AUTO_EXCLUDE_TITLES[reason]) return "";
@@ -1114,8 +1114,19 @@
   });
   llamaShowToggleEl.checked = localStorage.getItem(LLAMA_SHOW_TOGGLE_KEY) === "1";
 
+  // A compacted (older, no-longer-actively-recorded) campaign's ledger is
+  // gzip-compressed on disk (see llama-log-machine.js's
+  // compactCampaignLedger) - the automatic "Connect campaign folder..." flow
+  // handles this transparently (js/ledger-connect.js), but this manual
+  // file-picker fallback needs its own check since <input type=file> hands
+  // back whatever raw bytes the user selected.
+  function readLedgerFileText(file) {
+    if (!/\.gz$/i.test(file.name)) return file.text();
+    return new Response(file.stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  }
+
   function loadLlamaLedgerFile(file, kind) {
-    file.text().then((text) => {
+    readLedgerFileText(file).then((text) => {
       const records = parseJsonl(text);
       if (kind === "snapshots") llamaSnapshotsLedger = records;
       else llamaEventsLedger = records;

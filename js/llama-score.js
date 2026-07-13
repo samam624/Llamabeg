@@ -249,13 +249,17 @@
         const ambiguous = candidates.length > 1;
 
         const enemySide = participant.side === "Attacker" ? "Defender" : "Attacker";
-        const enemyCountriesAll = sideCountryList(war.participants, enemySide).filter(fought);
+        // NOT fought-filtered here - isPvP below has to be computed from the
+        // real, full participant lists first (see its own comment for why),
+        // so fought-filtering only ever gets applied AFTER isPvP is already
+        // settled, never as an input to it.
+        const enemyCountriesAll = sideCountryList(war.participants, enemySide);
         const enemyEverPlayer = enemyCountriesAll.filter(isKnownPlayer);
-        const allyCountriesAll = sideCountryList(war.participants, participant.side, country).filter(fought);
+        const allyCountriesAll = sideCountryList(war.participants, participant.side, country);
         const allyEverPlayer = allyCountriesAll.filter(isKnownPlayer);
         // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
         // `presentList` param comment for why this is needed for A.
-        const allySideFull = sideCountryList(war.participants, participant.side).filter(fought);
+        const allySideFull = sideCountryList(war.participants, participant.side);
 
         // Same PvP-only gate as computeFromLedger below: a war only scores
         // if the enemy side has at least one country ever known to be
@@ -267,7 +271,12 @@
         // played", NOT current/hidden status - a war fought while an
         // opponent was still legitimately active shouldn't have its E/A
         // (and therefore its score) rewritten just because that player
-        // later got hidden.
+        // later got hidden. Deliberately computed BEFORE any fought-status
+        // filtering (see hasFoughtLosses/fought below) - a real player who
+        // let their vassals do 100% of the actual fighting is still a real
+        // player, and folding fought-status into this check would have
+        // silently reclassified a real PvP war as PvE (or vice versa)
+        // whenever the deciding side's own troops never personally engaged.
         const isPvP = enemyEverPlayer.length > 0;
         const matchesMode = mode === "pve" ? !isPvP : isPvP;
         // Keyed off the row's own true isPvP nature, NOT the requested
@@ -280,19 +289,27 @@
         // real bug via an end-to-end test with a real 30-country vassal
         // cluster, not just reasoning about it). PvP counts ONLY ever-player
         // enemies/allies (an AI call-in shouldn't dilute/inflate a PvP
-        // score). PvE's enemy side is by definition all-AI, so E is the
-        // full enemy country count instead - minus any vassal/subject whose
-        // own overlord is fighting alongside it on the same side (see
-        // excludeSubjectsOfPresentOverlords) so "the Ottomans + 3 vassals"
-        // reads as one fight against one empire, not four separate
-        // enemies; A gets the same subject-filtering treatment (the
-        // player's own vassals joining their PvE conquest shouldn't count
-        // as extra "allies" diluting the score either).
+        // score) - and, per the user's call, only those who actually fought
+        // (hasFoughtLosses) count toward that PvP total either, so a called
+        // ally who joined and left without a single battle doesn't inflate
+        // someone's PvP score. PvE's enemy side is by definition all-AI, so
+        // E is the full enemy country count instead - minus any
+        // vassal/subject whose own overlord is fighting alongside it on the
+        // same side (see excludeSubjectsOfPresentOverlords) so "the Ottomans
+        // + 3 vassals" reads as one fight against one empire, not four
+        // separate enemies; A gets the same subject-filtering treatment.
+        // Fought-status is deliberately NOT applied in PvE (unlike PvP
+        // above): a PvE win is very often engineered by having vassals do
+        // the actual fighting while the player's own troops never need to -
+        // that's still a real, deliberate win the player should get credit
+        // for, not something to exclude for lacking personal battle losses.
         // Kept as the actual lists (not just their .length) so a PvE row can
         // show WHO the enemy/allies were - see the identical comment in
         // computeFromLedger below for why.
-        const enemyList = isPvP ? enemyEverPlayer : excludeSubjectsOfPresentOverlords(enemyCountriesAll, overlordOf);
-        const allyList = isPvP ? allyEverPlayer : excludeSubjectsOfPresentOverlords(allyCountriesAll, overlordOf, allySideFull);
+        const enemyList = isPvP ? enemyEverPlayer.filter(fought) : excludeSubjectsOfPresentOverlords(enemyCountriesAll, overlordOf);
+        const allyList = isPvP
+          ? allyEverPlayer.filter(fought)
+          : excludeSubjectsOfPresentOverlords(allyCountriesAll, overlordOf, allySideFull);
         const E = enemyList.length;
         const A = allyList.length;
 
@@ -312,7 +329,7 @@
         const active = !war.concluded;
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !fought(country)
+          : isPvP && !fought(country)
             ? "no-battle-losses"
             : !matchesMode
               ? mode === "pve"
@@ -874,13 +891,15 @@
         const player = override.player || currentPlayers.get(country) || candidates[candidates.length - 1] || null;
         if (!player) continue;
         const enemySide = side === "Attacker" ? "Defender" : "Attacker";
-        const enemyCountriesAll = new Set([...sideCountries(war, enemySide)].filter(fought));
+        // NOT fought-filtered here - isPvP below has to be computed from the
+        // real, full participant lists first (see its own comment for why).
+        const enemyCountriesAll = sideCountries(war, enemySide);
         const enemyEverPlayer = [...enemyCountriesAll].filter((c) => playerCountries.has(c));
-        const allyCountriesAll = new Set([...sideCountries(war, side, country)].filter(fought));
+        const allyCountriesAll = sideCountries(war, side, country);
         const allyEverPlayer = [...allyCountriesAll].filter((c) => playerCountries.has(c));
         // Full side INCLUDING self - see excludeSubjectsOfPresentOverlords'
         // `presentList` param comment for why this is needed for A.
-        const allySideFull = new Set([...sideCountries(war, side)].filter(fought));
+        const allySideFull = sideCountries(war, side);
 
         // A war only "counts" as PvP if the enemy side has at least one
         // country that was ever recorded as player-controlled in this
@@ -895,26 +914,40 @@
         // non-PvP war still gets real E/A (the full participant counts)
         // so it stays useful as "player vs AI" reference data - it's just
         // not scored.
+        // Computed from the full, unfiltered lists above - see their own
+        // comment for why fought-status can't be an input to this without
+        // risking a real PvP war (where the deciding side's own troops never
+        // personally engaged, only their vassals) silently reclassifying as
+        // PvE.
         const isPvP = enemyEverPlayer.length > 0;
         const matchesMode = mode === "pve" ? !isPvP : isPvP;
         // Keyed off the row's own true isPvP nature, NOT the requested
         // `mode` - see computeLlamaScores' identical comment above for why
         // (a real bug otherwise: the same war could show different E/A
-        // depending on which tab you viewed it from). PvE mode's enemy side
-        // is by definition all-AI, so E is the full enemy country count
-        // instead of the (always-zero) ever-player count, minus any
+        // depending on which tab you viewed it from). PvP counts only
+        // ever-player enemies/allies who also actually fought
+        // (hasFoughtLosses) - a called-in ally who joined and left without a
+        // single battle doesn't inflate someone's PvP score. PvE mode's
+        // enemy side is by definition all-AI, so E is the full enemy country
+        // count instead of the (always-zero) ever-player count, minus any
         // vassal/subject whose own overlord is also present on that side
         // (excludeSubjectsOfPresentOverlords) - "the Ottomans + 3 vassals"
         // should read as one enemy, not four. A gets the same
         // subject-filtering (the player's own vassals joining shouldn't
-        // count as extra allies).
+        // count as extra allies). Fought-status is deliberately NOT applied
+        // in PvE (unlike PvP): a PvE win is very often engineered by having
+        // vassals do the actual fighting while the player's own troops never
+        // need to - that's still a real win the player should get credit
+        // for, not something to exclude for lacking personal battle losses.
         // Kept as the actual lists (not just their .length) so a PvE row can
         // show WHO the enemy/allies were - a PvE war has no opposing PLAYER
         // row to read that off of the way a PvP war's two rows can read
         // each other's countryTag, so summarizeWars() below needs this
         // spelled out explicitly per row.
-        const enemyList = isPvP ? enemyEverPlayer : excludeSubjectsOfPresentOverlords([...enemyCountriesAll], overlordOf);
-        const allyList = isPvP ? allyEverPlayer : excludeSubjectsOfPresentOverlords([...allyCountriesAll], overlordOf, [...allySideFull]);
+        const enemyList = isPvP ? enemyEverPlayer.filter(fought) : excludeSubjectsOfPresentOverlords([...enemyCountriesAll], overlordOf);
+        const allyList = isPvP
+          ? allyEverPlayer.filter(fought)
+          : excludeSubjectsOfPresentOverlords([...allyCountriesAll], overlordOf, [...allySideFull]);
         const E = enemyList.length;
         const A = allyList.length;
         // Three states now, not two: true (win), false (loss), or null (a
@@ -950,7 +983,7 @@
         const enemyActivePlayer = enemyEverPlayer.filter((c) => !departedBy(c, event.date) && !excludedPlayers.has(attributedPlayerFor(c)));
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
-          : !fought(country)
+          : isPvP && !fought(country)
             ? "no-battle-losses"
             : !matchesMode
               ? mode === "pve"

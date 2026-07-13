@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
+const zlib = require("zlib");
 const { Worker } = require("worker_threads");
 
 const Clausewitz = require("../js/clausewitz.js");
@@ -113,6 +114,73 @@ function campaignEventsFile(config, campaignKey) {
 
 function campaignArchiveDir(config, campaignKey) {
   return path.join(campaignDir(config, campaignKey), "archive");
+}
+
+// --- gzip compaction, so a campaign's ledger shrinks ~13-18x once it's no
+// longer being actively played (real JSONL is highly repetitive - same field
+// names/structure every line - so it compresses far better than typical
+// binary data). A campaign folder holds EITHER the plain "<name>.jsonl" OR
+// its compacted "<name>.jsonl.gz" twin, never both at once - every reader
+// below (readLedgerText/statLedgerFile) checks plain first, falls back to
+// .gz, so the distinction is invisible to every consumer of this data.
+
+function ledgerGzFile(plainFile) {
+  return plainFile + ".gz";
+}
+
+// Reads a ledger file's content whether it's currently plain or gzip-
+// compacted. Returns "" if neither exists (never having recorded anything
+// for this campaign yet is a normal, common state, not an error).
+function readLedgerText(plainFile) {
+  if (fs.existsSync(plainFile)) return fs.readFileSync(plainFile, "utf8");
+  const gzFile = ledgerGzFile(plainFile);
+  if (fs.existsSync(gzFile)) return zlib.gunzipSync(fs.readFileSync(gzFile)).toString("utf8");
+  return "";
+}
+
+// mtime/size of whichever form (plain or .gz) currently exists on disk - the
+// Dashboard's readCampaignLedger() cache keys off this instead of assuming
+// the plain file is always what's there.
+function statLedgerFile(plainFile) {
+  if (fs.existsSync(plainFile)) return fs.statSync(plainFile);
+  const gzFile = ledgerGzFile(plainFile);
+  if (fs.existsSync(gzFile)) return fs.statSync(gzFile);
+  return null;
+}
+
+// Compresses a campaign's snapshots.jsonl/war-events.jsonl to .gz and
+// removes the plain originals - safe to call on ANY campaign that isn't
+// being appended to THIS tick (see scan()'s call site, which only ever
+// compacts campaigns outside the set just processed this run). Idempotent:
+// a campaign with no plain file (never recorded, or already compacted) is a
+// no-op. Writes to a .tmp file and renames over the target so a crash
+// mid-write can never leave a half-written .gz on disk - worst case, the
+// next tick just finds the plain file still there and tries again.
+function compactCampaignLedger(config, campaignKey) {
+  for (const plainFile of [campaignSnapshotsFile(config, campaignKey), campaignEventsFile(config, campaignKey)]) {
+    if (!fs.existsSync(plainFile)) continue;
+    const gzFile = ledgerGzFile(plainFile);
+    const tmpFile = gzFile + ".tmp";
+    fs.writeFileSync(tmpFile, zlib.gzipSync(fs.readFileSync(plainFile), { level: 9 }));
+    fs.renameSync(tmpFile, gzFile);
+    fs.unlinkSync(plainFile);
+  }
+}
+
+// Reverses compactCampaignLedger - called before appending to a campaign
+// that might have been compacted (e.g. the user resumed a campaign that
+// hadn't seen a new autosave in a while). Gzip can't be appended to in
+// place, so this decompresses back to plain text first; the very next
+// appendJsonl() call then works exactly as it always has. A no-op if the
+// campaign was never compacted (or never recorded) in the first place.
+function decompactCampaignLedger(config, campaignKey) {
+  for (const plainFile of [campaignSnapshotsFile(config, campaignKey), campaignEventsFile(config, campaignKey)]) {
+    if (fs.existsSync(plainFile)) continue;
+    const gzFile = ledgerGzFile(plainFile);
+    if (!fs.existsSync(gzFile)) continue;
+    fs.writeFileSync(plainFile, zlib.gunzipSync(fs.readFileSync(gzFile)));
+    fs.unlinkSync(gzFile);
+  }
 }
 
 // One-time upgrade path: earlier versions of this recorder appended every
@@ -945,13 +1013,17 @@ function archiveSave(file, snapshot, config) {
   return out;
 }
 
+// Returns each campaign's LOGICAL snapshots.jsonl path (whether the plain
+// file or its .gz compaction is what's actually on disk right now) -
+// callers read the content via readLedgerText(), which resolves either form
+// transparently.
 function listCampaignSnapshotFiles(config) {
   if (!fs.existsSync(config.campaignsDir)) return [];
   const files = [];
   for (const d of fs.readdirSync(config.campaignsDir, { withFileTypes: true })) {
     if (!d.isDirectory()) continue;
     const file = path.join(config.campaignsDir, d.name, "snapshots.jsonl");
-    if (fs.existsSync(file)) files.push(file);
+    if (fs.existsSync(file) || fs.existsSync(ledgerGzFile(file))) files.push(file);
   }
   return files;
 }
@@ -961,7 +1033,7 @@ function hydrateStateFromSnapshots(config, state) {
   if (!files.length) return;
   const latestByCampaign = new Map();
   for (const file of files) {
-    const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    const lines = readLedgerText(file).split(/\r?\n/);
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
@@ -1052,6 +1124,12 @@ async function processParsedFile(file, stat, hash, result, config, state) {
   state.lastDateByCampaign = state.lastDateByCampaign || {};
   const lastDate = state.lastDateByCampaign[snapshot.campaignKey];
   ensureDir(campaignDir(config, snapshot.campaignKey));
+  // Undo any earlier compaction before the appendJsonl() calls below - gzip
+  // can't be appended to in place, and a campaign that's about to receive a
+  // new autosave is by definition active again (see scan()'s compaction
+  // call site, which only ever compacts campaigns NOT being processed this
+  // tick).
+  decompactCampaignLedger(config, snapshot.campaignKey);
 
   // A snapshot chronologically at-or-behind what's already tracked can
   // still happen even with parallel parsing (a source saving fast enough
@@ -1198,6 +1276,27 @@ async function scan(config, state) {
       console.warn(`Could not process ${path.basename(item.file)}: ${err.message}`);
     }
   }
+
+  // Compact every OTHER campaign's ledger to .gz - `saves` (computed above,
+  // before the stability/mtime filtering) already reflects every campaign
+  // this config's campaignMode considers in scope, so anything NOT in that
+  // set is definitely not getting an appendJsonl() call this tick (or any
+  // tick until it's back in scope, at which point processParsedFile's
+  // decompactCampaignLedger call undoes this). Cheap once already compacted
+  // (compactCampaignLedger no-ops when there's no plain file left), so
+  // running this every tick rather than on some schedule is fine.
+  const inScopeKeys = new Set(saves.map((entry) => safeCampaignKey(campaignKeyFromFile(entry.file))));
+  if (fs.existsSync(config.campaignsDir)) {
+    for (const d of fs.readdirSync(config.campaignsDir, { withFileTypes: true })) {
+      if (!d.isDirectory() || inScopeKeys.has(d.name)) continue;
+      try {
+        compactCampaignLedger(config, d.name);
+      } catch (err) {
+        console.warn(`Could not compact ledger for ${d.name}: ${err.message}`);
+      }
+    }
+  }
+
   return processed;
 }
 
@@ -1253,6 +1352,10 @@ module.exports = {
   campaignDir,
   campaignSnapshotsFile,
   campaignEventsFile,
+  readLedgerText,
+  statLedgerFile,
+  compactCampaignLedger,
+  decompactCampaignLedger,
 };
 
 // Guarded so this file can be require()'d (e.g. from a test script) without

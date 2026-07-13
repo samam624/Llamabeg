@@ -147,12 +147,13 @@ function parseJsonl(text) {
   return records;
 }
 
+// `file` is always the LOGICAL plain-file path (e.g. .../snapshots.jsonl) -
+// gz-aware, so it works whether that campaign is currently plain or
+// compacted to its .jsonl.gz twin (see llama-log-machine.js's
+// compactCampaignLedger).
 function statMtime(file) {
-  try {
-    return fs.statSync(file).mtimeMs;
-  } catch {
-    return 0;
-  }
+  const stat = Recorder.statLedgerFile(file);
+  return stat ? stat.mtimeMs : 0;
 }
 
 // Set via the renderer's Campaign picker (see ipcMain "campaigns:select"
@@ -185,17 +186,27 @@ function currentCampaignKey() {
 // last record's metadata for the campaign picker list - avoids parsing an
 // entire multi-megabyte ledger just to show a name and a date for every
 // campaign in the picker. Falls back to null (picker still shows the raw
-// folder name/mtime) if even the tail has no complete, parseable line.
+// folder name/mtime) if even the tail has no complete, parseable line. A
+// compacted (.gz) campaign skips the tail-seek entirely and just
+// decompresses+parses the whole thing - gzip can't be efficiently seeked
+// into near the end, but a compacted file is small by definition (that's
+// the point of compacting it), so this is cheap regardless.
 function readLastJsonlRecord(file, maxBytes) {
   maxBytes = maxBytes || 65536;
   try {
-    const size = fs.statSync(file).size;
-    const start = Math.max(0, size - maxBytes);
-    const fd = fs.openSync(file, "r");
-    const buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-    fs.closeSync(fd);
-    const lines = buf.toString("utf8").split(/\r?\n/).filter((l) => l.trim());
+    let text;
+    if (fs.existsSync(file)) {
+      const size = fs.statSync(file).size;
+      const start = Math.max(0, size - maxBytes);
+      const fd = fs.openSync(file, "r");
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+      text = buf.toString("utf8");
+    } else {
+      text = Recorder.readLedgerText(file);
+    }
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
         return JSON.parse(lines[i]);
@@ -215,7 +226,7 @@ function listCampaigns() {
   for (const d of fs.readdirSync(config.campaignsDir, { withFileTypes: true })) {
     if (!d.isDirectory()) continue;
     const snapFile = path.join(config.campaignsDir, d.name, "snapshots.jsonl");
-    if (!fs.existsSync(snapFile)) continue;
+    if (!fs.existsSync(snapFile) && !fs.existsSync(snapFile + ".gz")) continue;
     const last = readLastJsonlRecord(snapFile);
     results.push({
       campaignKey: d.name,
@@ -237,8 +248,8 @@ function readCampaignLedger(campaignKey) {
   const cached = ledgerCache.get(campaignKey);
   if (cached && cached.snapMtime === snapMtime && cached.eventMtime === eventMtime) return cached;
 
-  const snapshots = fs.existsSync(snapFile) ? parseJsonl(fs.readFileSync(snapFile, "utf8")) : [];
-  const events = fs.existsSync(eventFile) ? parseJsonl(fs.readFileSync(eventFile, "utf8")) : [];
+  const snapshots = parseJsonl(Recorder.readLedgerText(snapFile));
+  const events = parseJsonl(Recorder.readLedgerText(eventFile));
   const entry = { snapMtime, eventMtime, snapshots, events };
   ledgerCache.set(campaignKey, entry);
   return entry;

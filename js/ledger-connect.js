@@ -79,6 +79,18 @@
     return false;
   }
 
+  // The recorder gzip-compacts a campaign's ledger to "<name>.jsonl.gz" once
+  // it's no longer being actively appended to (see llama-log-machine.js's
+  // compactCampaignLedger) - checks the plain name first (the common case
+  // for whatever campaign is currently being played), falls back to the
+  // .gz twin. Returns null if neither exists.
+  async function getLedgerFileHandle(dirHandle, name) {
+    const plain = await dirHandle.getFileHandle(name).catch(() => null);
+    if (plain) return { handle: plain, gz: false };
+    const gz = await dirHandle.getFileHandle(name + ".gz").catch(() => null);
+    return gz ? { handle: gz, gz: true } : null;
+  }
+
   // The recorder writes data/campaigns/<uuid>/{snapshots,war-events}.jsonl
   // (see llama-score-automatic-logging-machine/README.md). Given a handle on
   // that top-level data/ folder, find the campaign whose snapshots.jsonl was
@@ -91,9 +103,9 @@
     let best = null;
     for await (const [name, handle] of campaignsDir.entries()) {
       if (handle.kind !== "directory") continue;
-      const snapshotsHandle = await handle.getFileHandle("snapshots.jsonl").catch(() => null);
-      if (!snapshotsHandle) continue;
-      const file = await snapshotsHandle.getFile();
+      const found = await getLedgerFileHandle(handle, "snapshots.jsonl");
+      if (!found) continue;
+      const file = await found.handle.getFile();
       if (!best || file.lastModified > best.lastModified) {
         best = { campaignKey: name, dirHandle: handle, lastModified: file.lastModified };
       }
@@ -111,17 +123,26 @@
     if (!campaignsDir) return null;
     const dirHandle = await campaignsDir.getDirectoryHandle(campaignKey).catch(() => null);
     if (!dirHandle) return null;
-    const snapshotsHandle = await dirHandle.getFileHandle("snapshots.jsonl").catch(() => null);
-    if (!snapshotsHandle) return null;
-    const file = await snapshotsHandle.getFile();
+    const found = await getLedgerFileHandle(dirHandle, "snapshots.jsonl");
+    if (!found) return null;
+    const file = await found.handle.getFile();
     return { campaignKey, dirHandle, lastModified: file.lastModified };
   }
 
+  // DecompressionStream("gzip") is a standard browser API (Chrome 80+,
+  // Firefox 113+, Safari 16.4+) - no bundled inflate library needed. Node's
+  // zlib.gzipSync output (what the recorder writes) is standard gzip, so
+  // this round-trips it directly.
+  async function gunzipToText(blob) {
+    const stream = blob.stream().pipeThrough(new DecompressionStream("gzip"));
+    return await new Response(stream).text();
+  }
+
   async function readJsonlFile(dirHandle, name) {
-    const fileHandle = await dirHandle.getFileHandle(name).catch(() => null);
-    if (!fileHandle) return { records: [], lastModified: 0 };
-    const file = await fileHandle.getFile();
-    const text = await file.text();
+    const found = await getLedgerFileHandle(dirHandle, name);
+    if (!found) return { records: [], lastModified: 0 };
+    const file = await found.handle.getFile();
+    const text = found.gz ? await gunzipToText(file) : await file.text();
     const records = [];
     for (const line of text.split(/\r?\n/)) {
       const trimmed = line.trim();

@@ -941,18 +941,24 @@
     // total per side - a useful corroborating signal for the win/loss
     // heuristic (js/llama-score.js) precisely because it doesn't get wiped
     // the way the war-level score fields do.
+    // Attrition is deliberately not summed/stored here (nor is a "total") -
+    // confirmed nothing in the codebase ever reads either (battleLossSignal
+    // and hasFoughtLosses in js/llama-score.js both only look at
+    // battle+capture, the actual combat-inflicted signal; attrition accrues
+    // to armies just standing in a warzone, not fighting). Dropping both
+    // keeps the ledger this gets persisted into smaller for zero functional
+    // loss - see the "how big does the ledger get" discussion.
     function sumLosses(lossesObj) {
-      const totals = { battle: 0, attrition: 0, capture: 0 };
+      const totals = { battle: 0, capture: 0 };
       const byUnit = lossesObj && lossesObj.losses;
       if (byUnit && typeof byUnit === "object") {
         for (const unit of Object.values(byUnit)) {
           if (!unit || typeof unit !== "object") continue;
           if (typeof unit.Battle === "number") totals.battle += unit.Battle;
-          if (typeof unit.Attrition === "number") totals.attrition += unit.Attrition;
           if (typeof unit.Capture === "number") totals.capture += unit.Capture;
         }
       }
-      return { ...totals, total: totals.battle + totals.attrition + totals.capture };
+      return totals;
     }
 
     return {
