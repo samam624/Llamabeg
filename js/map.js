@@ -22,6 +22,7 @@
     players: wikiIcon("Players.png"),
     development: wikiIcon("Tab production.png"),
     population: wikiIcon("Tab demography.png"),
+    tax: wikiIcon("Tax base.png"),
     trade: wikiIcon("Goods.png"),
     religion: wikiIcon("Religion.png"),
     culture: wikiIcon("Culture.png"),
@@ -73,6 +74,13 @@
     return Math.round(Number(raw) * 1000).toLocaleString() + " people";
   }
 
+  function fmtCompactPopulation(raw) {
+    if (raw === undefined || raw === null || Number.isNaN(raw)) return "&mdash;";
+    const value = Number(raw);
+    if (Math.abs(value) >= 1000) return fmtNum(value / 1000, value >= 10000 ? 1 : 2) + "M";
+    return fmtNum(value, value >= 100 ? 1 : 2) + "k";
+  }
+
   function humanize(value) {
     if (value === undefined || value === null || value === "") return "&mdash;";
     return escapeHtml(titleCaseName(value));
@@ -98,8 +106,15 @@
     });
   }
 
+  // Bump whenever map_data/ is regenerated (tools/build-location-data.js /
+  // bake-location-id-map.py) and redeployed - these are now shipped,
+  // immutable-cached assets (netlify.toml's /map_data/* rule), so a stale
+  // browser copy needs a changed query string to know to re-fetch, the same
+  // convention index.html's <script src>/<link> tags already use.
+  const MAP_DATA_VERSION = "v1.0.0";
+
   async function loadLocationIdGrid() {
-    const img = await loadImage("map_data/location_ids.png");
+    const img = await loadImage(`map_data/location_ids.png?v=${MAP_DATA_VERSION}`);
     const canvas = document.createElement("canvas");
     canvas.width = MAP_W;
     canvas.height = MAP_H;
@@ -115,14 +130,15 @@
   }
 
   async function loadLocationNames() {
-    // no-store, not just a cache-busting query string: this file changes
-    // whenever tools/build-location-data.js is re-run (e.g. the
-    // `impassable` flag added later), and a stale cached copy silently
-    // reproduces "fixed" bugs with zero indication why - confirmed exactly
-    // this happened once already (map.js's own logic was correct and
-    // reloaded fine via its own cache-busted script tag, but this fetch
-    // kept serving the pre-fix JSON with no `impassable` data at all).
-    const res = await fetch("map_data/locations.json", { cache: "no-store" });
+    // Was `{ cache: "no-store" }` (no versioning at all) - changed to the
+    // same query-string convention as MAP_DATA_VERSION above once this file
+    // became a real shipped/immutable-cached production asset (previously
+    // local-dev-only, where re-fetching on every load didn't matter). Bump
+    // MAP_DATA_VERSION whenever this file's content actually changes, or a
+    // stale cached copy will silently reproduce "fixed" bugs with zero
+    // indication why - confirmed this happened once already under the old
+    // no-cache-busting-at-all setup (see git history).
+    const res = await fetch(`map_data/locations.json?v=${MAP_DATA_VERSION}`);
     return res.json();
   }
 
@@ -161,6 +177,19 @@
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return colorForId(h);
+  }
+
+  function mixColor(a, b, amount) {
+    return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * amount));
+  }
+
+  // Trade goods need lots of distinct categorical hues, but the raw hashed
+  // colors are too saturated for the rest of the Llamabeg map treatment.
+  // Keep the hue identity, then pull it toward warm muted land and darken it
+  // slightly so the mode reads as data-rich instead of neon.
+  function tradeGoodDisplayColor(rawMaterial) {
+    const rgb = colorForString(rawMaterial);
+    return shadeColor(mixColor(rgb, NO_DATA_COLOR, 0.34), -0.16);
   }
 
   // Shifts a color toward white (amount > 0) or black (amount < 0), used to
@@ -229,7 +258,7 @@
     }
 
     // Heat gradients used to always run 0 -> max, but development/
-    // population/control/prosperity essentially never have any locations
+    // population/tax/control/prosperity essentially never have any locations
     // actually near 0 in a real save (the lowest real Population might be
     // a few hundred, not 0) - stretching the full color range across
     // "0 to max" when nothing ever gets close to 0 wastes most of that
@@ -238,7 +267,7 @@
     // Scaling min -> max instead (per user request) uses the FULL color
     // range for the actual spread of values that exist, so real
     // differences between locations are visible rather than compressed.
-    const HEAT_SCALE_FIELDS = ["development", "population", "control", "prosperity"];
+    const HEAT_SCALE_FIELDS = ["development", "population", "tax", "control", "prosperity"];
     function computeMetricScales(countryNumber) {
       const scales = {};
       for (const field of HEAT_SCALE_FIELDS) scales[field] = { min: Infinity, max: -Infinity };
@@ -547,6 +576,21 @@
           return gradientLegend(s.min, s.max, (v) => fmtPopulation(v));
         },
       },
+      tax: {
+        label: "Tax Base",
+        colorFor(id) {
+          return filteredHeatColor(locByNumber.get(id), "tax");
+        },
+        tooltipFor(id) {
+          const loc = locByNumber.get(id);
+          const value = ownedNumericOrZero(loc, "tax");
+          return typeof value === "number" ? `Tax Base: ${fmtNum(value, 3)} tax` : null;
+        },
+        legend: () => {
+          const s = scaleFor("tax");
+          return gradientLegend(s.min, s.max, (v) => fmtNum(v, 2) + " tax");
+        },
+      },
       control: {
         label: "Control",
         colorFor(id) {
@@ -612,7 +656,7 @@
           const loc = locByNumber.get(id);
           if (!loc || !loc.rawMaterial) return NO_DATA_COLOR;
           if (mapState.focusTradeGood && loc.rawMaterial !== mapState.focusTradeGood) return NON_PLAYER_MUTED;
-          return colorForString(loc.rawMaterial);
+          return tradeGoodDisplayColor(loc.rawMaterial);
         },
         tooltipFor(id) {
           const loc = locByNumber.get(id);
@@ -971,16 +1015,24 @@
           // doesn't need to independently rediscover the same edge.
           const rightRealmBorder = rightInMap && !rightLake && !water && !rightWater && ownedHere !== ownedRight && !rightSuppressedNeutral;
           const downRealmBorder = downInMap && !downLake && !water && !downWater && ownedHere !== ownedDown && !downSuppressedNeutral;
-          const rightCoastOutline = rightInMap && rightSea && ownedHere && !water;
-          const downCoastOutline = downInMap && downSea && ownedHere && !water;
+          // Coastlines need the same scan-order symmetry as realm borders.
+          // The old test only handled land-current/sea-neighbor pairs, so
+          // sea-current/land-neighbor edges were skipped and coastal player
+          // outlines looked intermittently patchy.
+          const rightCoastHere = rightInMap && rightSea && ownedHere && !water;
+          const rightCoastNeighbor = rightInMap && isSea[id] && ownedRight && !rightWater;
+          const downCoastHere = downInMap && downSea && ownedHere && !water;
+          const downCoastNeighbor = downInMap && isSea[id] && ownedDown && !downWater;
+          const rightCoastOutline = rightCoastHere || rightCoastNeighbor;
+          const downCoastOutline = downCoastHere || downCoastNeighbor;
           if (rightRealmBorder || rightCoastOutline) {
-            boundary[di] = 1;
-            if (rightRealmBorder) boundary[di + 1] = 1;
+            if (rightRealmBorder || rightCoastHere) boundary[di] = 1;
+            if (rightRealmBorder || rightCoastNeighbor) boundary[di + 1] = 1;
             hasPlayerBoundary = true;
           }
           if (downRealmBorder || downCoastOutline) {
-            boundary[di] = 1;
-            if (downRealmBorder) boundary[di + destW] = 1;
+            if (downRealmBorder || downCoastHere) boundary[di] = 1;
+            if (downRealmBorder || downCoastNeighbor) boundary[di + destW] = 1;
             hasPlayerBoundary = true;
           }
           if (!rightRealmBorder && !rightCoastOutline && !downRealmBorder && !downCoastOutline) {
@@ -1277,6 +1329,8 @@
     let currentMode = modes.political;
     let selectedLocationId = 0;
     let selectedCountryId = 0;
+    const countryDetailSort = { demographicTax: { key: "pop", dir: -1 } };
+    const locationDetailSort = { buildings: { key: "amount", dir: -1 } };
     let maxId = 0;
     for (let i = 0; i < idGrid.length; i++) if (idGrid[i] > maxId) maxId = idGrid[i];
 
@@ -1355,13 +1409,21 @@
       return POP_CLASS_COLORS[popClassKey(key)] || POP_CLASS_FALLBACK_COLOR;
     }
 
+    function popClassDisplayLabel(key, label) {
+      const raw = String(label || key || "").replace(/_estate$/, "");
+      const classKey = popClassKey(raw);
+      if (classKey === "peasants" || raw === "commoners" || raw === "common") return "Commoners";
+      return label ? humanize(label) : humanize(classKey);
+    }
+
     function popClassLabelHtml(key, label) {
       const classKey = popClassKey(key);
       const color = popClassColor(classKey);
-      const title = String(label || classKey).replace(/_/g, " ");
+      const displayLabel = popClassDisplayLabel(classKey, label);
+      const title = displayLabel;
       return `<span class="demographic-label" style="--demographic-color:${color}" title="${escapeHtml(title)}">
         <span class="demographic-swatch" aria-hidden="true"></span>
-        <span>${label ? humanize(label) : humanize(classKey)}</span>
+        <span>${escapeHtml(displayLabel)}</span>
       </span>`;
     }
 
@@ -1499,6 +1561,25 @@
       return idx === -1 ? POP_CLASS_ORDER.length : idx;
     }
 
+    function sortArrow(sortState, key) {
+      return sortState && sortState.key === key ? ` <span class="detail-sort-arrow">${sortState.dir === 1 ? "▲" : "▼"}</span>` : "";
+    }
+
+    function sortableTh(label, key, sortState) {
+      const active = sortState && sortState.key === key;
+      return `<th><button type="button" class="detail-sort-btn${active ? " active" : ""}" data-sort-key="${escapeHtml(key)}">${escapeHtml(label)}${sortArrow(sortState, key)}</button></th>`;
+    }
+
+    function compareDetailValues(a, b, dir) {
+      const aMissing = a === undefined || a === null || Number.isNaN(a);
+      const bMissing = b === undefined || b === null || Number.isNaN(b);
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      if (typeof a === "number" && typeof b === "number") return (a - b) * dir;
+      return String(a).localeCompare(String(b)) * dir;
+    }
+
     function buildingNameHtml(name, popType) {
       const color = popClassColor(popType);
       return `<span class="building-name" style="--demographic-color:${color}">
@@ -1543,7 +1624,11 @@
               popType: buildingPopType(name),
               count,
             }));
-      return items.sort((a, b) => popClassSortIndex(a.popType) - popClassSortIndex(b.popType) || String(a.name || "").localeCompare(String(b.name || "")));
+      return items.sort((a, b) => {
+        const aAmount = Array.isArray(loc.buildings) && loc.buildings.length ? a.level : a.count;
+        const bAmount = Array.isArray(loc.buildings) && loc.buildings.length ? b.level : b.count;
+        return popClassSortIndex(a.popType) - popClassSortIndex(b.popType) || (bAmount || 0) - (aAmount || 0) || String(a.name || "").localeCompare(String(b.name || ""));
+      });
     }
 
     function buildingTabsHtml(loc) {
@@ -1556,6 +1641,7 @@
         groups.get(key).push(item);
       }
       const orderedGroups = [...groups.entries()].sort((a, b) => popClassSortIndex(a[0]) - popClassSortIndex(b[0]));
+      const sortState = locationDetailSort.buildings;
       const tabs = orderedGroups
         .map(([key, group], index) => {
           const count = group.reduce((sum, item) => sum + (item.count || 1), 0);
@@ -1568,20 +1654,36 @@
         .join("");
       const panels = orderedGroups
         .map(([key, group], index) => {
-          const rows = group
+          const amountKey = Array.isArray(loc.buildings) && loc.buildings.length ? "level" : "count";
+          const sortedGroup = group.slice().sort((a, b) => {
+            const valueFor = (item) => {
+              if (sortState.key === "building") return buildingDisplayName(item.name);
+              if (sortState.key === "employed") return item.employed;
+              if (sortState.key === "profit") return item.profit;
+              return item[amountKey];
+            };
+            const primary = compareDetailValues(valueFor(a), valueFor(b), sortState.dir);
+            const fallbackAmount = compareDetailValues(b[amountKey], a[amountKey], 1);
+            return primary || fallbackAmount || String(a.name || "").localeCompare(String(b.name || ""));
+          });
+          const rows = sortedGroup
             .map((item) => {
               const amount = Array.isArray(loc.buildings) && loc.buildings.length ? item.level : item.count;
               return `<tr class="demographic-row" style="--demographic-color:${popClassColor(key)}">
                 <td>${buildingNameHtml(item.name, key)}</td>
                 <td class="num">${fmtNum(amount, 0)}</td>
                 <td class="num">${fmtNum(item.employed, 2)}</td>
-                <td>${humanize(item.status)}</td>
                 <td class="num">${fmtNum(item.profit, 2)}</td>
               </tr>`;
             })
             .join("");
           return `<div class="building-tab-panel" data-pop="${escapeHtml(key)}"${index === 0 ? "" : " hidden"}>
-            <table><thead><tr><th>Building</th><th>${Array.isArray(loc.buildings) && loc.buildings.length ? "Level" : "Count"}</th><th>Employed</th><th>Status</th><th>Profit</th></tr></thead><tbody>${rows}</tbody></table>
+            <table class="building-detail-table"><thead><tr>
+              ${sortableTh("Building", "building", sortState)}
+              ${sortableTh(Array.isArray(loc.buildings) && loc.buildings.length ? "Lvl" : "Count", "amount", sortState)}
+              ${sortableTh("Emp.", "employed", sortState)}
+              ${sortableTh("Profit", "profit", sortState)}
+            </tr></thead><tbody>${rows}</tbody></table>
           </div>`;
         })
         .join("");
@@ -1593,9 +1695,19 @@
       if (base === "burghers") return "burghers";
       if (base === "nobles") return "nobles";
       if (base === "clergy") return "clergy";
-      if (base === "peasants") return "peasants";
+      if (base === "peasants" || base === "commoners" || base === "common") return "peasants";
       if (base === "tribes") return "tribesmen";
       return base;
+    }
+
+    function demographicTaxGroup(key) {
+      const group = popClassKey(key);
+      return group === "laborers" ? "peasants" : group;
+    }
+
+    function demographicTaxLabelHtml(key) {
+      if (key === "peasants") return popClassLabelHtml(key, "Commoners");
+      return popClassLabelHtml(key);
     }
 
     function demographicTaxSummary(rows) {
@@ -1603,11 +1715,13 @@
       const tax = {};
       for (const loc of rows) {
         for (const p of loc.populationClasses || []) {
-          if (typeof p.total === "number") pop[p.name] = (pop[p.name] || 0) + p.total;
+          if (typeof p.total !== "number") continue;
+          const group = demographicTaxGroup(p.name);
+          pop[group] = (pop[group] || 0) + p.total;
         }
         for (const [estate, value] of Object.entries(loc.estateTax || {})) {
           if (typeof value !== "number") continue;
-          const group = estateToPopClass(estate);
+          const group = demographicTaxGroup(estate);
           tax[group] = (tax[group] || 0) + value;
         }
       }
@@ -1617,9 +1731,24 @@
       return { keys, pop, tax, totalPop, totalTax, overallEfficiency: totalPop > 0 ? totalTax / totalPop : undefined };
     }
 
+    function demographicTaxSortValue(summary, key, sortKey) {
+      const pop = summary.pop[key] || 0;
+      const tax = summary.tax[key] || 0;
+      if (sortKey === "group") return popClassDisplayLabel(key, key);
+      if (sortKey === "share") return summary.totalPop ? pop / summary.totalPop : undefined;
+      if (sortKey === "tax") return tax;
+      if (sortKey === "per1k") return pop > 0 ? tax / pop : undefined;
+      return pop;
+    }
+
     function demographicTaxChartHtml(rows) {
       const summary = demographicTaxSummary(rows);
       if (!summary.keys.length || !summary.totalPop) return "";
+      const sortState = countryDetailSort.demographicTax;
+      const sortedKeys = summary.keys.slice().sort((a, b) => {
+        const primary = compareDetailValues(demographicTaxSortValue(summary, a, sortState.key), demographicTaxSortValue(summary, b, sortState.key), sortState.dir);
+        return primary || popClassSortIndex(a) - popClassSortIndex(b) || String(a).localeCompare(String(b));
+      });
       let cursor = 0;
       const segments = summary.keys.map((key) => {
         const share = ((summary.pop[key] || 0) / summary.totalPop) * 100;
@@ -1636,15 +1765,15 @@
             return `${popClassColor(key)} ${start.toFixed(2)}% ${taxCursor.toFixed(2)}%`;
           })
         : ["rgba(255,255,255,0.08) 0% 100%"];
-      const rowsHtml = summary.keys
+      const rowsHtml = sortedKeys
         .map((key) => {
           const pop = summary.pop[key] || 0;
           const tax = summary.tax[key] || 0;
           const popShare = summary.totalPop ? pop / summary.totalPop : undefined;
           const efficiency = pop > 0 ? tax / pop : undefined;
           return `<tr class="demographic-row" style="--demographic-color:${popClassColor(key)}">
-            <td>${popClassLabelHtml(key)}</td>
-            <td class="num">${fmtPopulation(pop)}</td>
+            <td>${demographicTaxLabelHtml(key)}</td>
+            <td class="num">${fmtCompactPopulation(pop)}</td>
             <td class="num">${fmtPercent(popShare, 1)}</td>
             <td class="num">${fmtNum(tax, 3)}</td>
             <td class="num">${fmtNum(efficiency, 4)}</td>
@@ -1663,8 +1792,14 @@
               ${detailStat("Total Group Tax", fmtNum(summary.totalTax, 3))}
             </div>
           </div>
-          <table>
-            <thead><tr><th>Group</th><th>Population</th><th>Share</th><th>Tax</th><th>Tax/1k</th></tr></thead>
+          <table class="demographic-tax-table">
+            <thead><tr>
+              ${sortableTh("Group", "group", sortState)}
+              ${sortableTh("Pop.", "pop", sortState)}
+              ${sortableTh("Share", "share", sortState)}
+              ${sortableTh("Tax", "tax", sortState)}
+              ${sortableTh("/1k", "per1k", sortState)}
+            </tr></thead>
             <tbody>${rowsHtml}</tbody>
           </table>
         </section>`;
@@ -1785,7 +1920,7 @@
       const popRows = (loc.populationClasses || [])
         .map(
           (p) =>
-            `<tr class="demographic-row" style="--demographic-color:${popClassColor(p.name)}"><td>${popClassLabelHtml(p.name)}</td><td class="num">${fmtPopulation(p.total)}</td><td class="num">${fmtPopulation(p.unemployed)}</td><td class="num">${fmtPopulation(p.employedInRgo)}</td></tr>`
+            `<tr class="demographic-row" style="--demographic-color:${popClassColor(p.name)}"><td>${popClassLabelHtml(p.name)}</td><td class="num">${fmtCompactPopulation(p.total)}</td><td class="num">${fmtCompactPopulation(p.unemployed)}</td></tr>`
         )
         .join("");
 
@@ -1811,9 +1946,9 @@
           isWater
             ? ""
             : `
-        ${section("Demography", popRows ? `<table><thead><tr><th>Class</th><th>Total</th><th>Unemployed</th><th>RGO</th></tr></thead><tbody>${popRows}</tbody></table>` : "", "No population data")}
-        ${section("Estate Tax", estateTaxRows ? `<table><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
-        ${section("Institutions", institutionRows ? `<table><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
+        ${section("Demography", popRows ? `<table class="location-demography-table"><thead><tr><th>Class</th><th>Total</th><th>Unemp.</th></tr></thead><tbody>${popRows}</tbody></table>` : "", "No population data")}
+        ${section("Estate Tax", estateTaxRows ? `<table class="location-two-col-table"><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
+        ${section("Institutions", institutionRows ? `<table class="location-two-col-table"><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
         <section class="location-detail-section building-detail-section">
           <h4>Buildings</h4>
           ${buildingTabsHtml(loc)}
@@ -1864,6 +1999,15 @@
       countryDetails.innerHTML = countryDetailsHtml(countryNumber);
       const close = countryDetails.querySelector(".country-detail-close");
       if (close) close.addEventListener("click", clearCountryDetails);
+      countryDetails.querySelectorAll(".demographic-tax-table .detail-sort-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const key = btn.dataset.sortKey || "pop";
+          const sort = countryDetailSort.demographicTax;
+          sort.dir = sort.key === key ? -sort.dir : key === "group" ? 1 : -1;
+          sort.key = key;
+          showCountryDetails(countryNumber, false);
+        });
+      });
       updateMapBodyClasses();
       if (shouldRedraw !== false) redraw();
     }
@@ -1884,8 +2028,18 @@
       selectedLocationId = id;
       details.hidden = false;
       details.innerHTML = locationDetailsHtml(id);
-      const close = details.querySelector(".location-detail-close");
-      if (close) close.addEventListener("click", clearLocationDetails);
+      attachLocationDetailHandlers(id);
+      updateMapBodyClasses();
+      redraw();
+    }
+
+    function attachBuildingTabHandlers(activePop) {
+      if (activePop) {
+        details.querySelectorAll(".building-pop-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.pop === activePop));
+        details.querySelectorAll(".building-tab-panel").forEach((panel) => {
+          panel.hidden = panel.dataset.pop !== activePop;
+        });
+      }
       details.querySelectorAll(".building-pop-tab").forEach((btn) => {
         btn.addEventListener("click", () => {
           const pop = btn.dataset.pop;
@@ -1895,8 +2049,24 @@
           });
         });
       });
-      updateMapBodyClasses();
-      redraw();
+    }
+
+    function attachLocationDetailHandlers(id, activePop) {
+      const close = details.querySelector(".location-detail-close");
+      if (close) close.addEventListener("click", clearLocationDetails);
+      details.querySelectorAll(".building-detail-table .detail-sort-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const currentTab = details.querySelector(".building-pop-tab.active");
+          const currentPop = currentTab && currentTab.dataset.pop;
+          const key = btn.dataset.sortKey || "amount";
+          const sort = locationDetailSort.buildings;
+          sort.dir = sort.key === key ? -sort.dir : key === "building" ? 1 : -1;
+          sort.key = key;
+          details.innerHTML = locationDetailsHtml(id);
+          attachLocationDetailHandlers(id, currentPop);
+        });
+      });
+      attachBuildingTabHandlers(activePop);
     }
 
     // Walks up the overlord chain (capped at 8 hops) and returns the
@@ -2120,8 +2290,10 @@
     function renderLegend() {
       if (!currentMode.legend) {
         legendEl.innerHTML = "";
+        legendEl.hidden = true;
         return;
       }
+      legendEl.hidden = false;
       const legend = currentMode.legend();
       if (legend.type === "gradient") {
         // Sampled at 9 points (not the old fixed 4) so a non-linear curve -

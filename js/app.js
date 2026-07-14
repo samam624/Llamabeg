@@ -2,6 +2,7 @@
   "use strict";
 
   const fileInput = document.getElementById("fileInput");
+  const homeStartBtn = document.getElementById("homeStartBtn");
   const dropzone = document.getElementById("dropzone");
   const dropzoneText = document.getElementById("dropzoneText");
   const uploaderSummaryEl = document.getElementById("uploaderSummary");
@@ -49,6 +50,7 @@
   const tabButtons = document.querySelectorAll(".app-tab");
   const llamaTabBtn = document.getElementById("llamaTabBtn");
   const tabPanels = {
+    home: document.getElementById("homeTab"),
     load: document.getElementById("loadTab"),
     metrics: document.getElementById("metricsTab"),
     graphs: document.getElementById("graphsTab"),
@@ -65,7 +67,7 @@
   let mapRenderedForResult = false;
   let currentMetricGroup = "key";
   let currentPlayerMetricGroup = "key";
-  let currentTab = "load";
+  let currentTab = "home";
   let llamaSnapshotsLedger = null;
   let llamaEventsLedger = null;
   let ledgerConnection = null; // { dataDirHandle, campaignKey, lastModified } while auto-connected
@@ -96,8 +98,10 @@
   let pendingShareTab = "metrics";
 
   function activateTab(tab) {
+    if (!tabPanels[tab]) tab = "home";
     currentTab = tab;
     document.body.classList.toggle("map-view-active", tab === "map");
+    document.body.classList.toggle("home-view-active", tab === "home");
     if (tab === "map") window.scrollTo(0, 0);
     tabButtons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     Object.entries(tabPanels).forEach(([key, panel]) => {
@@ -123,19 +127,33 @@
     btn.addEventListener("click", () => activateTab(btn.dataset.tab));
   });
 
+  if (homeStartBtn) homeStartBtn.addEventListener("click", () => activateTab("load"));
+
   countryMetricTabs.forEach((btn) => {
     btn.addEventListener("click", () => {
+      const previousMetricGroup = currentMetricGroup;
       currentMetricGroup = btn.dataset.metrics || "key";
-      countryMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
-      drawCountryTable();
+      try {
+        drawCountryTable();
+        countryMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
+      } catch (err) {
+        currentMetricGroup = previousMetricGroup;
+        renderTableError(countriesTableEl, err);
+      }
     });
   });
 
   playerMetricTabs.forEach((btn) => {
     btn.addEventListener("click", () => {
+      const previousMetricGroup = currentPlayerMetricGroup;
       currentPlayerMetricGroup = btn.dataset.metrics || "key";
-      playerMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
-      drawPlayerTable();
+      try {
+        drawPlayerTable();
+        playerMetricTabs.forEach((b) => b.classList.toggle("active", b === btn));
+      } catch (err) {
+        currentPlayerMetricGroup = previousMetricGroup;
+        renderTableError(playersTableEl, err);
+      }
     });
   });
 
@@ -401,7 +419,7 @@
   function renderTrends(result) {
     if (typeof Charts === "undefined") return;
     const players = visiblePlayers(result);
-    const withHistory = players.filter((p) => Array.isArray(p.country.historicalPopulation) && p.country.historicalPopulation.length);
+    const withHistory = players.filter((p) => p.country.historicalPopulation && p.country.historicalPopulation.length);
     const popChartEl = document.getElementById("populationChart");
     const taxChartEl = document.getElementById("taxBaseChart");
     const taxPerPopChartEl = document.getElementById("taxBasePerPopChart");
@@ -575,8 +593,9 @@
 
   const AUTO_EXCLUDE_TITLES = {
     "vs-ai": "Auto-excluded: no country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score. Uncheck to score it anyway.",
-    "player-departed": "Auto-excluded: this player was no longer controlling this country by the time the war ended (recorder saw the country revert to AI). Uncheck to score it anyway.",
-    "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign by its end (fighting an abandoned country doesn't score). Uncheck to score it anyway.",
+    "vs-player": "Auto-excluded: the opposing side had a real player in this war, so it isn't a PvE result and doesn't count under Alpaca Points. Uncheck to score it anyway.",
+    "player-departed": "Auto-excluded: this player had already stopped controlling this country (recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it. Uncheck to score it anyway.",
+    "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign before this war even began (fighting an abandoned country doesn't score) - a war fought against a real opponent still counts even if they left partway through it. Uncheck to score it anyway.",
     "player-hidden": "Auto-excluded: you've hidden this player in the Players table (Hide button) as departed - unhide them there to include their wars again.",
     "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. PvP-only (not applied to PvE, where a win engineered through your vassals doing the fighting should still count). Uncheck to score it anyway.",
   };
@@ -632,12 +651,11 @@
   // (see inferOutcome() in either file) to plain-English labels - lets the
   // user spot-check HOW a winner was decided, not just the verdict.
   const LLAMA_REASON_LABELS = {
+    "post-war-reparations-enforced": "War reparations enforced (peace-treaty term)",
+    "post-war-independence-granted": "Independence granted (peace-treaty term)",
     "post-war-land-transfer": "Land changed hands (clean 1-on-1 data)",
     "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
-    "post-war-treasury-swing": "Treasury swung between sides",
-    "post-war-treasury-gain": "One side gained a lot of gold",
     "battle-losses-inflicted": "Battle losses (no economic signal)",
-    "last-known-war-score": "Last known in-game war score",
     "white-peace": "No decisive signal - treated as white peace",
     "war-disappeared-without-decisive-signal": "No signal before the war disappeared",
   };
@@ -659,6 +677,8 @@
     "battle-losses": "battle losses",
     "land-transfer": "land change",
     treasury: "treasury",
+    prestige: "prestige",
+    independence: "independence status",
   };
   function contributingFactorsNote(w) {
     const factors = w.contributingFactors || [];
@@ -1456,6 +1476,14 @@
     });
   }
 
+  function fmtPercent(n, digits) {
+    if (n === undefined || n === null || Number.isNaN(n)) return "-";
+    return (Number(n) * 100).toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }) + "%";
+  }
+
   function fmtPopulation(raw) {
     if (raw === undefined || raw === null || Number.isNaN(raw)) return "-";
     return Math.round(Number(raw) * 1000).toLocaleString();
@@ -1500,7 +1528,13 @@
   }
 
   function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function renderTableError(container, err) {
+    if (window.console && console.error) console.error(err);
+    const message = err && err.message ? err.message : String(err || "Unknown table error");
+    container.innerHTML = `<p class="panel-note">Could not render this table: ${escapeHtml(message)}</p>`;
   }
 
   // Hover-only explanations for column headers, shown via the native title
@@ -1578,11 +1612,96 @@
     { key: "greatPowerRank", label: "GP Rank", numeric: true, render: (c) => fmtNum(c.greatPowerRank, 0) },
   ];
 
+  const BASE_ESTATE_TAX_GROUPS = [
+    { key: "commoners", label: "Commoners" },
+    { key: "burghers", label: "Burghers" },
+    { key: "clergy", label: "Clergy" },
+    { key: "nobles", label: "Nobles" },
+    { key: "tribesmen", label: "Tribesmen" },
+    { key: "dhimmi", label: "Dhimmi" },
+    { key: "cossacks", label: "Cossacks" },
+    { key: "slaves", label: "Slaves" },
+  ];
+  const UNTAXED_ESTATE_METRIC_GROUPS = new Set(["soldiers", "slaves"]);
+  let activeEstateTaxGroups = BASE_ESTATE_TAX_GROUPS.slice();
+
+  function estateMetricGroup(name) {
+    const base = String(name || "").replace(/_estate$/, "");
+    if (base === "peasants" || base === "commoners" || base === "common" || base === "laborers") return "commoners";
+    if (base === "nobility") return "nobles";
+    if (base === "tribes") return "tribesmen";
+    return base;
+  }
+
+  function estateTaxMetricGroup(name) {
+    const base = String(name || "").replace(/_estate$/, "");
+    if (base === "soldiers") return "commoners";
+    return estateMetricGroup(base);
+  }
+
+  function estateMetricLabel(key) {
+    const known = BASE_ESTATE_TAX_GROUPS.find((group) => group.key === key);
+    if (known) return known.label;
+    return String(key || "")
+      .replace(/_estate$/, "")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function estateShareKey(key) {
+    return `${key}PopShare`;
+  }
+
+  function estateTaxPer1kKey(key) {
+    return `${key}TaxPer1k`;
+  }
+
+  function estateMetricValue(row, key) {
+    return row && typeof row[key] === "number" ? row[key] : undefined;
+  }
+
+  function appendColumns(target, columns) {
+    columns.forEach((column) => target.push(column));
+  }
+
+  function estateTaxColumnTitle(group) {
+    return `${group.label} tax per 1k ${group.label.toLowerCase()} population`;
+  }
+
+  function hasEstateTaxRateColumn(group) {
+    return !UNTAXED_ESTATE_METRIC_GROUPS.has(group.key);
+  }
+
+  function estateCountryColumns() {
+    const columns = [];
+    activeEstateTaxGroups.forEach((group) => {
+      columns.push({
+        key: estateShareKey(group.key),
+        label: `${group.label} %`,
+        title: `${group.label} share of population in the estate/taxation breakdown`,
+        numeric: true,
+        heatColumn: true,
+        render: (c) => fmtPercent(estateMetricValue(c, estateShareKey(group.key)), 1),
+      });
+      if (hasEstateTaxRateColumn(group)) {
+        columns.push({
+          key: estateTaxPer1kKey(group.key),
+          label: `${group.label} /1k`,
+          title: estateTaxColumnTitle(group),
+          numeric: true,
+          heatColumn: true,
+          render: (c) => fmtNum(estateMetricValue(c, estateTaxPer1kKey(group.key)), 4),
+        });
+      }
+    });
+    return columns;
+  }
+
   const PLAYER_COLUMNS = [
     { key: "name", label: "Player", render: (p) => escapeHtml(p.name || "-") },
     { key: "tag", label: "Tag", render: (p) => `<span class="tag-badge">${escapeHtml((p.country && p.country.tag) || "?")}</span>` },
     { key: "governmentType", label: "Government", render: (p) => escapeHtml((p.country && p.country.governmentType) || "-") },
-    { key: "scorePlace", label: "Rank", numeric: true, render: (p) => fmtNum(p.country && p.country.scorePlace, 0) },
+    { key: "scorePlace", label: "Rank", numeric: true, lowerIsBetter: true, render: (p) => fmtNum(p.country && p.country.scorePlace, 0) },
     { key: "locationCount", label: "Locations", numeric: true, render: (p) => fmtNum(p.country && p.country.locationCount, 0) },
     { key: "totalDevelopment", label: "Development", numeric: true, render: (p) => fmtNum(p.country && p.country.totalDevelopment, 1) },
     { key: "avgDevelopment", label: "Avg Dev/location", numeric: true, render: (p) => fmtNum(p.country && p.country.avgDevelopment, 2) },
@@ -1608,13 +1727,36 @@
     { key: "milScore", label: "MIL", numeric: true, render: (p) => fmtNum(p.country && p.country.milScore, 2) },
     { key: "stability", label: "Stability", numeric: true, render: (p) => fmtNum(p.country && p.country.stability, 1) },
     { key: "prestige", label: "Prestige", numeric: true, render: (p) => fmtNum(p.country && p.country.prestige, 1) },
-    { key: "greatPowerRank", label: "GP Rank", numeric: true, render: (p) => fmtNum(p.country && p.country.greatPowerRank, 0) },
+    { key: "greatPowerRank", label: "GP Rank", numeric: true, lowerIsBetter: true, render: (p) => fmtNum(p.country && p.country.greatPowerRank, 0) },
     {
       key: "__hide",
       label: "",
       render: (p) => `<button class="hide-player-btn" data-name="${escapeHtml(p.name || "")}" title="Hide this player (they left the campaign)">Hide</button>`,
     },
   ];
+
+  function estatePlayerColumns() {
+    const columns = [];
+    activeEstateTaxGroups.forEach((group) => {
+      columns.push({
+        key: estateShareKey(group.key),
+        label: `${group.label} %`,
+        title: `${group.label} share of population in the estate/taxation breakdown`,
+        numeric: true,
+        render: (p) => fmtPercent(estateMetricValue(p.country, estateShareKey(group.key)), 1),
+      });
+      if (hasEstateTaxRateColumn(group)) {
+        columns.push({
+          key: estateTaxPer1kKey(group.key),
+          label: `${group.label} /1k`,
+          title: estateTaxColumnTitle(group),
+          numeric: true,
+          render: (p) => fmtNum(estateMetricValue(p.country, estateTaxPer1kKey(group.key)), 4),
+        });
+      }
+    });
+    return columns;
+  }
 
   const PLAYER_COUNTRY_SORT_KEYS = [
     "scorePlace",
@@ -1672,6 +1814,7 @@
       "stability",
       "prestige",
     ],
+    estates: ["tag", "playerNames", "__estates"],
   };
 
   const PLAYER_METRIC_GROUPS = {
@@ -1679,16 +1822,37 @@
     economy: ["name", "tag", "gold", "lastMonthGoldIncome", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
     military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "__hide"],
     demographic: ["name", "tag", "greatPowerRank", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "__hide"],
+    estates: ["name", "tag", "__estates", "__hide"],
   };
 
   function countryColumnsForCurrentGroup() {
     const keys = COUNTRY_METRIC_GROUPS[currentMetricGroup] || COUNTRY_METRIC_GROUPS.key;
-    return keys.map((key) => COUNTRY_COLUMNS.find((col) => col.key === key)).filter(Boolean);
+    const columns = [];
+    keys.forEach((key) => {
+      if (key === "__estates") appendColumns(columns, estateCountryColumns());
+      else {
+        const column = COUNTRY_COLUMNS.find((col) => col.key === key);
+        if (column) columns.push(column);
+      }
+    });
+    return columns;
   }
 
   function playerColumnsForCurrentGroup() {
     const keys = PLAYER_METRIC_GROUPS[currentPlayerMetricGroup] || PLAYER_METRIC_GROUPS.key;
-    return keys.map((key) => PLAYER_COLUMNS.find((col) => col.key === key)).filter(Boolean);
+    const columns = [];
+    keys.forEach((key) => {
+      if (key === "__estates") appendColumns(columns, estatePlayerColumns());
+      else {
+        const column = PLAYER_COLUMNS.find((col) => col.key === key);
+        if (column) columns.push(column);
+      }
+    });
+    return columns;
+  }
+
+  function isEstateMetricKey(key) {
+    return /(?:PopShare|TaxPer1k)$/.test(key || "");
   }
 
   function sortValue(row, col) {
@@ -1697,6 +1861,7 @@
     if (PLAYER_COUNTRY_SORT_KEYS.includes(col.key) && row.country) {
       return row.country[col.key];
     }
+    if (row.country && isEstateMetricKey(col.key)) return row.country[col.key];
     return row[col.key];
   }
 
@@ -1738,6 +1903,7 @@
   // (unchanged fallback behavior).
   function defaultSortKeyFor(columns) {
     if (columns.some((col) => col.key === "lastMonthGoldIncome")) return "lastMonthGoldIncome";
+    if (columns.some((col) => col.key === estateTaxPer1kKey("commoners"))) return estateTaxPer1kKey("commoners");
     if (columns.some((col) => col.key === "scorePlace")) return "scorePlace";
     return columns[0] && columns[0].key;
   }
@@ -1763,7 +1929,7 @@
         .map((col) => {
           const isSorted = col.key === sortKey;
           const arrow = isSorted ? `<span class="arrow">${sortDir === 1 ? "▲" : "▼"}</span>` : "";
-          const desc = COLUMN_DESCRIPTIONS[col.key];
+          const desc = col.title || COLUMN_DESCRIPTIONS[col.key];
           const titleAttr = desc ? ` title="${escapeHtml(desc)}"` : "";
           const classes = [isSorted ? "sorted" : "", desc ? "has-desc" : ""].filter(Boolean).join(" ");
           return `<th data-key="${col.key}" class="${classes}"${titleAttr}>${escapeHtml(col.label)}${arrow}</th>`;
@@ -1776,7 +1942,7 @@
             .map((col) => {
               const classes = [col.numeric ? "num" : ""];
               let style = "";
-              if (options.colorKeyMetrics && (KEY_HEAT_COLUMNS.has(col.key) || col.heatColumn)) {
+              if (options.colorKeyMetrics && (options.colorAllNumericMetrics ? col.numeric : KEY_HEAT_COLUMNS.has(col.key) || col.heatColumn)) {
                 const value = metricValue(row, col);
                 const score = heatScoreFor(col, value, rows, options.relativeEfficiencyHeat);
                 if (typeof score === "number") {
@@ -1791,7 +1957,8 @@
         })
         .join("");
 
-      container.innerHTML = `<table><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
+      const tableClass = columns.length >= 12 ? ' class="dense-metric-table"' : "";
+      container.innerHTML = `<table${tableClass}><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
 
       container.querySelectorAll("th").forEach((th) => {
         th.addEventListener("click", () => {
@@ -1843,7 +2010,8 @@
     const columns = playerColumnsForCurrentGroup();
     renderSortableTable(playersTableEl, visible, columns, {
       defaultSortKey: defaultSortKeyFor(columns),
-      colorKeyMetrics: currentPlayerMetricGroup === "key",
+      colorKeyMetrics: true,
+      colorAllNumericMetrics: true,
       // Unlike the Countries table (1000+ rows, real risk of a catastrophic
       // outlier squishing everyone else into a thin green sliver - see
       // heatScoreFor), the Players table is a handful of rows where relative
@@ -1889,18 +2057,44 @@
   function computeCountryLocationMetrics(result) {
     const byCountry = new Map((result.countries || []).map((c) => [c.number, c]));
     const totals = new Map();
+    const discoveredEstateGroups = new Map(BASE_ESTATE_TAX_GROUPS.map((group) => [group.key, group.label]));
     for (const loc of result.locations || []) {
       if (!loc || typeof loc.owner !== "number") continue;
-      const row = totals.get(loc.owner) || { development: 0, locations: 0 };
+      const row = totals.get(loc.owner) || { development: 0, locations: 0, estateSharePop: {}, estateTaxPop: {}, estateTax: {} };
       if (typeof loc.development === "number") row.development += loc.development;
+      for (const popClass of loc.populationClasses || []) {
+        if (typeof popClass.total !== "number") continue;
+        const shareGroup = estateMetricGroup(popClass.name);
+        const taxGroup = estateTaxMetricGroup(popClass.name);
+        if (!discoveredEstateGroups.has(shareGroup)) discoveredEstateGroups.set(shareGroup, estateMetricLabel(shareGroup));
+        if (!discoveredEstateGroups.has(taxGroup)) discoveredEstateGroups.set(taxGroup, estateMetricLabel(taxGroup));
+        row.estateSharePop[shareGroup] = (row.estateSharePop[shareGroup] || 0) + popClass.total;
+        row.estateTaxPop[taxGroup] = (row.estateTaxPop[taxGroup] || 0) + popClass.total;
+      }
+      for (const [estate, value] of Object.entries(loc.estateTax || {})) {
+        if (typeof value !== "number") continue;
+        const group = estateTaxMetricGroup(estate);
+        if (group === "crown") continue;
+        if (!discoveredEstateGroups.has(group)) discoveredEstateGroups.set(group, estateMetricLabel(group));
+        row.estateTax[group] = (row.estateTax[group] || 0) + value;
+      }
       row.locations += 1;
       totals.set(loc.owner, row);
     }
+    activeEstateTaxGroups = [...discoveredEstateGroups.entries()].map(([key, label]) => ({ key, label }));
     for (const [countryNumber, row] of totals.entries()) {
       const country = byCountry.get(countryNumber);
       if (!country) continue;
       country.totalDevelopment = row.development;
       country.avgDevelopment = row.locations > 0 ? row.development / row.locations : undefined;
+      const totalEstatePop = Object.values(row.estateSharePop).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0);
+      for (const group of activeEstateTaxGroups) {
+        const sharePop = row.estateSharePop[group.key] || 0;
+        const taxPop = row.estateTaxPop[group.key] || 0;
+        const tax = row.estateTax[group.key] || 0;
+        country[estateShareKey(group.key)] = totalEstatePop > 0 ? sharePop / totalEstatePop : undefined;
+        country[estateTaxPer1kKey(group.key)] = taxPop > 0 ? tax / taxPop : undefined;
+      }
     }
   }
 
@@ -1921,7 +2115,7 @@
     const defaultSortKey = defaultSortKeyFor(columns);
     countriesController = renderSortableTable(countriesTableEl, filteredCountries(), columns, {
       defaultSortKey,
-      colorKeyMetrics: currentMetricGroup === "key",
+      colorKeyMetrics: currentMetricGroup === "key" || currentMetricGroup === "estates",
     });
   }
 
@@ -2066,6 +2260,7 @@
     const requestedTab = params.get("tab");
     pendingShareTab = VALID_TABS.includes(requestedTab) ? requestedTab : "metrics";
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) {
+      activateTab("load");
       showPendingShareNotice(id);
       return;
     }
@@ -2075,6 +2270,7 @@
         activateTab(pendingShareTab);
       } else {
         pendingShareId = id;
+        activateTab("load");
         showPendingShareNotice(id);
       }
     });
@@ -2131,6 +2327,7 @@
   });
   syncThemeToggleButton();
 
+  activateTab("home");
   updateLlamaPanelVisibility();
   initFromShareUrl();
   refreshSavesLibraryUI();

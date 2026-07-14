@@ -182,6 +182,29 @@ tbody tr:hover td { background: color-mix(in srgb, var(--row-hover) 55%, transpa
 
 tr.row-verified { opacity: 0.55; }
 tr.row-verified td { text-decoration: line-through; text-decoration-color: var(--panel-border); }
+
+.breakdown-toggle {
+  background: none;
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 5px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.breakdown-toggle:hover { background: var(--row-hover); color: var(--text); }
+.breakdown-toggle.open { color: var(--accent); border-color: var(--accent); }
+
+tr.breakdown-detail-row td { background: var(--row-hover); padding: 10px 14px; }
+.breakdown-table { width: auto; min-width: 360px; font-size: 12.5px; margin-bottom: 4px; }
+.breakdown-table th, .breakdown-table td { padding: 3px 10px 3px 0; border-bottom: none; background: transparent; }
+.breakdown-table th { text-transform: none; font-size: 11px; }
+.breakdown-table td.num, .breakdown-table th:nth-child(2), .breakdown-table th:nth-child(3) { text-align: right; font-family: var(--font-mono); }
+tr.factor-row-decisive td:first-child { font-weight: 700; color: var(--accent); }
+tr.factor-row-decisive { box-shadow: inset 3px 0 0 var(--accent); }
 tr.row-verified td:first-child { text-decoration: none; }
 
 .log-pane {

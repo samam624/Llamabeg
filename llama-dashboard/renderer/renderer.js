@@ -15,10 +15,10 @@ function fmtNum(n, digits) {
 // user asked for this specifically to be able to spot-check outcomes
 // against their own memory of the game in real time.
 const REASON_LABELS = {
+  "post-war-reparations-enforced": "War reparations enforced (peace-treaty term)",
+  "post-war-independence-granted": "Independence granted (peace-treaty term)",
   "post-war-land-transfer": "Land changed hands (clean 1-on-1 data)",
   "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
-  "post-war-treasury-swing": "Treasury swung between sides",
-  "post-war-treasury-gain": "One side gained a lot of gold",
   "battle-losses-inflicted": "Battle losses (no economic signal)",
   "last-known-war-score": "Last known in-game war score",
   "white-peace": "No decisive signal - treated as white peace",
@@ -32,17 +32,76 @@ const REASON_TOOLTIPS = {
 function reasonLabel(reason) {
   return REASON_LABELS[reason] || reason || "Unknown";
 }
-// War score/prestige/battle-losses no longer decide a winner on their own
-// (see inferOutcome() in js/llama-score.js or llama-log-machine.js) - they're
-// attached to every outcome as contributingFactors so the reasoning stays
-// auditable even though only a land or gold exchange between the two
-// principals can crown a winner. Surfaced here as an extra tooltip line.
+
+// Maps js/llama-score.js's computeFromLedger() `autoExcludeReason` codes to
+// plain-English tooltips - mirrors js/app.js's AUTO_EXCLUDE_TITLES (kept in
+// sync deliberately) so the dashboard shows WHY a row is excluded, not just
+// that it is. "player-hidden" is web-app-only (there's no Hide-player UI
+// here yet) but included for forward compatibility if that's ever added.
+const AUTO_EXCLUDE_TITLES = {
+  "vs-ai": "No country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score.",
+  "vs-player": "The opposing side had a real player - this is a PvP war, so it isn't scored under PvE/Alpaca Points.",
+  "player-departed": "This player had already stopped controlling this country (the recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it.",
+  "opponent-departed": "Every enemy in this war had already left the campaign before this war even began - a war fought against a real opponent still counts even if they left partway through it.",
+  "player-hidden": "This player has been hidden as departed.",
+  "no-battle-losses": "This country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought.",
+};
+function autoExcludeLabel(reason) {
+  return AUTO_EXCLUDE_TITLES[reason] ? reason.replace(/-/g, " ") : "excluded";
+}
+// War score/battle-losses/treasury/prestige never decide a winner on their
+// own (see inferOutcome() in js/llama-score.js or llama-log-machine.js) -
+// only an enforced reparations obligation, a granted independence, or a real
+// land transfer can. The rest are attached to every outcome as
+// contributingFactors so the reasoning stays auditable. Surfaced here as an
+// extra tooltip line, and in full numeric detail via the "Full breakdown"
+// dropdown (renderBreakdownDetail).
 const CONTRIBUTING_FACTOR_LABELS = {
   "war-score": "war score",
   "battle-losses": "battle losses",
   "land-transfer": "land change",
   treasury: "treasury",
+  prestige: "prestige",
+  independence: "independence status",
 };
+
+// The game's own internal war-goal label (war.warName - see
+// js/clausewitz.js's extractWarFields and test/debug-war-name.js). Not an
+// exhaustive list of every value EU5 can produce (dynasty/region-specific
+// flavor names exist too) - unrecognized values fall back to a de-snaked
+// prettified version of the raw string rather than hiding the column.
+const WAR_TYPE_LABELS = {
+  NORMAL_WAR_NAME: "Conquest",
+  INDEPENDENCE_WAR_NAME: "Independence",
+  CIVIL_WAR_NAME: "Civil War",
+  COALITION_WAR_NAME: "Coalition",
+  CLAIM_THRONE_WAR_NAME: "Claim Throne",
+  HUNDRED_YEARS_WAR_NAME: "Hundred Years' War",
+  AGRESSION_WAR_NAME: "Aggression",
+  COLONIAL_WAR_NAME: "Colonial",
+  CRUSADE_WAR_NAME: "Crusade",
+  EXCOM_WAR_NAME: "Excommunication",
+  UNIFY_ILKHANATE_WAR_NAME: "Unify Ilkhanate",
+  SHED_SHACKLES_OF_ILKHANATE_WAR_NAME: "Shed Ilkhanate Shackles",
+  FALSE_ILKHAN_CLAIMANT_WAR_NAME: "False Ilkhan Claimant",
+  CLAN_EXPANSION_WAR_NAME: "Clan Expansion",
+  SENGOKU_WAR_NAME: "Sengoku",
+  NANBOKUCHOU_WAR_NAME: "Nanbokuchou",
+  ANNEXING_ME_WAR_NAME: "Annexation",
+};
+function warTypeLabel(warName) {
+  if (!warName) return null;
+  if (WAR_TYPE_LABELS[warName]) return WAR_TYPE_LABELS[warName];
+  return warName
+    .replace(/_WAR_NAME$/i, "")
+    .toLowerCase()
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function renderWarType(warName) {
+  const label = warTypeLabel(warName);
+  return label ? escapeHtml(label) : '<span class="note">-</span>';
+}
 function contributingFactorsNote(w) {
   const factors = w.contributingFactors || [];
   if (!factors.length) return "";
@@ -59,9 +118,27 @@ function countrySideLabel(entry) {
   return `${players}<span class="tag-badge">${escapeHtml(entry.tag)}</span>`;
 }
 
+// Same "leader (+N allies)" collapse Concluded Wars applies (see
+// renderConcludedSide below) - an ongoing AI coalition war can list 20+
+// belligerents on one side, which was rendering as one <li> per country
+// (unreadable). A side with at least one real player still lists every
+// player individually (a human shouldn't disappear into an ally count on
+// their own war), just with its AI co-belligerents folded into a trailing
+// count instead of a badge each.
 function renderOngoingSide(entries) {
   if (!entries.length) return '<span class="note">-</span>';
-  return `<ul class="side-list">${entries.map((e) => `<li>${countrySideLabel(e)}</li>`).join("")}</ul>`;
+  const real = entries.filter((e) => e.players && e.players.length);
+  const ai = entries.filter((e) => !e.players || !e.players.length);
+  if (!real.length) {
+    const sorted = ai.slice().sort((a, b) => (b.locationCount || 0) - (a.locationCount || 0));
+    const [leader, ...rest] = sorted;
+    const alliesNote = rest.length > 0 ? ` <span class="note">(+${rest.length} ${rest.length === 1 ? "ally" : "allies"})</span>` : "";
+    return `<span class="tag-badge">${escapeHtml(leader.tag)}</span>${alliesNote}`;
+  }
+  const alliesNote = ai.length > 0 ? ` <span class="note">(+${ai.length} allied ${ai.length === 1 ? "nation" : "nations"})</span>` : "";
+  return `<ul class="side-list">${real
+    .map((e, i) => `<li>${countrySideLabel(e)}${i === real.length - 1 ? alliesNote : ""}</li>`)
+    .join("")}</ul>`;
 }
 
 function renderOngoingWars(mode, wars) {
@@ -76,12 +153,13 @@ function renderOngoingWars(mode, wars) {
       (w) => `
     <tr>
       <td>${escapeHtml(w.startDate || "-")}</td>
+      <td>${renderWarType(w.warName)}</td>
       <td>${renderOngoingSide(w.attackers)}</td>
       <td>${renderOngoingSide(w.defenders)}</td>
     </tr>`
     )
     .join("");
-  el.innerHTML = `<table><thead><tr><th>Started</th><th>Attacker(s)</th><th>Defender(s)</th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.innerHTML = `<table><thead><tr><th>Started</th><th>Type</th><th>Attacker(s)</th><th>Defender(s)</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 // A PvE war's opposing side has no real player row (see summarizeWars'
@@ -104,7 +182,11 @@ function renderConcludedSide(participants) {
   const items = participants.map((r) => {
     const name = `${escapeHtml(r.player || "-")} <span class="tag-badge">${escapeHtml(r.countryTag || "?")}</span>`;
     const alliesNote = r.A > 0 ? ` <span class="note">(+${r.A} ${r.A === 1 ? "ally" : "allies"})</span>` : "";
-    if (r.excluded) return `<li>${name}${alliesNote} <span class="note">(excluded)</span></li>`;
+    if (r.excluded) {
+      const title = r.autoExcludeReason && AUTO_EXCLUDE_TITLES[r.autoExcludeReason];
+      const noteAttrs = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<li>${name}${alliesNote} <span class="note"${noteAttrs}>(${escapeHtml(autoExcludeLabel(r.autoExcludeReason))})</span></li>`;
+    }
     if (typeof r.warScore !== "number") return `<li>${name}${alliesNote} <span class="note">-</span></li>`;
     const cls = r.warScore > 0 ? "score-positive" : r.warScore < 0 ? "score-negative" : "score-neutral";
     const sign = r.warScore > 0 ? "+" : "";
@@ -119,6 +201,100 @@ function renderResult(w) {
   if (w.winnerSide === "Defender") return '<span class="result-defender">Defender won</span>';
   return '<span class="note">Unknown</span>';
 }
+
+// Which factors ever get consulted, in priority order (matches
+// economicOutcomeSignal/inferOutcome in js/llama-score.js and
+// llama-log-machine.js) - the first three are DECISIVE-eligible (only one of
+// them can ever crown a winner), the rest are informational-only, shown for
+// context but never trusted to pick a side by themselves.
+const BREAKDOWN_FACTOR_ORDER = ["reparations", "independence", "land-transfer", "treasury", "prestige", "war-score", "battle-losses", "occupation"];
+// Maps a war's decisive `reason` code back to which breakdown factor
+// actually produced it, so that row can be visually marked as "this is what
+// decided it" among the full list.
+const DECISIVE_REASON_TO_FACTOR_KEY = {
+  "post-war-reparations-enforced": "reparations",
+  "post-war-independence-granted": "independence",
+  "post-war-land-transfer": "land-transfer",
+  "post-war-land-transfer-coalition": "land-transfer",
+};
+
+// Land transfer/treasury/prestige are real DELTAS (can be negative, "+/-"
+// and red/green convey something true: which way it moved). War score/
+// casualties/occupation are plain non-negative COUNTS at a point in time -
+// giving them a "+" prefix or green coloring would falsely imply "this is a
+// gain", when e.g. more casualties inflicted isn't a gain for the side that
+// inflicted them, just a raw tally.
+const BREAKDOWN_DELTA_KEYS = new Set(["land-transfer", "treasury", "prestige"]);
+function fmtFactorValue(value, isDelta) {
+  if (typeof value !== "number" || Number.isNaN(value)) return '<span class="note">-</span>';
+  const digits = Number.isInteger(value) ? 0 : 2;
+  if (!isDelta) return `<span>${fmtNum(value, digits)}</span>`;
+  const cls = value > 0 ? "score-positive" : value < 0 ? "score-negative" : "score-neutral";
+  const sign = value > 0 ? "+" : "";
+  return `<span class="${cls}">${sign}${fmtNum(value, digits)}</span>`;
+}
+
+// The full numeric account behind a war's outcome - every factor the engine
+// looked at, decisive or not, with both sides' raw values and which way (if
+// any) each one leans. Only ever built from w.breakdown (see inferOutcome's
+// `breakdown` field in both scoring engines) - a war scored before this
+// feature shipped simply has no breakdown data yet, same "can't retroactively
+// improve already-recorded ledger data" limitation as every other fix this
+// project has hit.
+function renderBreakdownDetail(w) {
+  const factors = w.breakdown || [];
+  if (!factors.length) {
+    return '<p class="note">No factor breakdown recorded for this war (scored before this feature shipped) - re-check once new wars conclude.</p>';
+  }
+  const decisiveKey = DECISIVE_REASON_TO_FACTOR_KEY[w.reason] || null;
+  const rows = BREAKDOWN_FACTOR_ORDER.map((key) => factors.find((f) => f.key === key))
+    .filter(Boolean)
+    .map((f) => {
+      const isDecider = f.key === decisiveKey;
+      const tierNote = f.decisive ? '<span class="note">(decisive-eligible)</span>' : '<span class="note">(informational)</span>';
+      const leanCell = f.winnerSide
+        ? `<span class="${f.winnerSide === "Attacker" ? "result-attacker" : "result-defender"}">${escapeHtml(f.winnerSide)}</span>`
+        : '<span class="note">-</span>';
+      let attackerCell;
+      let defenderCell;
+      if (f.key === "reparations") {
+        attackerCell = f.applies && f.winnerSide === "Defender" ? '<span class="score-negative">Paid</span>' : '<span class="note">-</span>';
+        defenderCell = f.applies && f.winnerSide === "Attacker" ? '<span class="score-negative">Paid</span>' : '<span class="note">-</span>';
+      } else if (f.key === "independence") {
+        // The attacker is always the vassal fighting for independence (see
+        // independenceSignal in js/llama-score.js/llama-log-machine.js) - so
+        // winnerSide=Attacker means they broke free, winnerSide=Defender
+        // means the overlord kept them subjugated.
+        attackerCell = f.applies ? (f.winnerSide === "Attacker" ? '<span class="score-positive">Granted</span>' : '<span class="score-negative">Denied</span>') : '<span class="note">-</span>';
+        defenderCell = f.applies ? (f.winnerSide === "Attacker" ? '<span class="score-negative">Lost vassal</span>' : '<span class="score-positive">Retained</span>') : '<span class="note">-</span>';
+      } else {
+        const isDelta = BREAKDOWN_DELTA_KEYS.has(f.key);
+        attackerCell = fmtFactorValue(f.attackerValue, isDelta);
+        defenderCell = fmtFactorValue(f.defenderValue, isDelta);
+      }
+      return `
+        <tr class="${isDecider ? "factor-row-decisive" : ""}">
+          <td>${escapeHtml(f.label)} ${tierNote}</td>
+          <td class="num">${attackerCell}</td>
+          <td class="num">${defenderCell}</td>
+          <td>${leanCell}</td>
+        </tr>`;
+    })
+    .join("");
+  return `
+    <table class="breakdown-table">
+      <thead><tr><th>Factor</th><th>Attacker</th><th>Defender</th><th>Leans</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="note">Only "War reparations", "Independence granted", and "Land transfer" can ever decide a winner - everything else is shown for context only. The highlighted row is what actually decided this war, if any.</p>`;
+}
+
+// Persists which wars' breakdown detail is expanded, per mode - a plain
+// in-memory Set (not localStorage) since this is a "let me peek" UI action,
+// not a durable preference, but it still needs to survive renderConcludedWars
+// being called again every recorder tick (~5s) or the detail row would
+// silently collapse itself out from under the user mid-read.
+const expandedBreakdowns = { pvp: new Set(), pve: new Set() };
 
 function verifiedKey(campaignKey, mode, warNumber) {
   return `eu5-llama-dashboard-verified:${campaignKey}:${mode}:${warNumber}`;
@@ -151,26 +327,42 @@ function renderConcludedWars(mode, wars) {
     el.innerHTML = '<p class="note">All wars checked off - uncheck "Hide checked-off wars" to see them again.</p>';
     return;
   }
+  const expanded = expandedBreakdowns[mode];
   const rows = visible
     .map((w) => {
       const checked = isVerified(currentCampaignKey, mode, w.warNumber);
       const confClass = CONFIDENCE_CLASS[w.confidence] || CONFIDENCE_CLASS.unknown;
-      return `
+      const isOpen = expanded.has(w.warNumber);
+      const mainRow = `
     <tr class="${checked ? "row-verified" : ""}">
       <td><input type="checkbox" class="verify-check" data-war="${w.warNumber}" ${checked ? "checked" : ""} title="Check off once you've confirmed this outcome"></td>
       <td>${escapeHtml(w.startDate || "-")}</td>
       <td>${escapeHtml(w.endDate || "-")}</td>
+      <td>${renderWarType(w.warName)}</td>
       <td>${renderConcludedSide(w.attackers)}</td>
       <td>${renderConcludedSide(w.defenders)}</td>
       <td>${renderResult(w)}</td>
-      <td><span class="${confClass}" title="${escapeHtml(reasonTooltip(w))}">${escapeHtml(reasonLabel(w.reason))}</span></td>
+      <td>
+        <span class="${confClass}" title="${escapeHtml(reasonTooltip(w))}">${escapeHtml(reasonLabel(w.reason))}</span>
+        <button type="button" class="breakdown-toggle ${isOpen ? "open" : ""}" data-war="${w.warNumber}" title="Show the full numeric breakdown of every factor considered">${isOpen ? "▴" : "▾"}</button>
+      </td>
     </tr>`;
+      const detailRow = isOpen ? `<tr class="breakdown-detail-row"><td colspan="8">${renderBreakdownDetail(w)}</td></tr>` : "";
+      return mainRow + detailRow;
     })
     .join("");
-  el.innerHTML = `<table><thead><tr><th>✓</th><th>Started</th><th>Ended</th><th>Attacker(s)</th><th>Defender(s)</th><th>Result</th><th>How decided</th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.innerHTML = `<table><thead><tr><th>✓</th><th>Started</th><th>Ended</th><th>Type</th><th>Attacker(s)</th><th>Defender(s)</th><th>Result</th><th>How decided</th></tr></thead><tbody>${rows}</tbody></table>`;
   el.querySelectorAll(".verify-check").forEach((cb) => {
     cb.addEventListener("change", () => {
       setVerified(currentCampaignKey, mode, cb.dataset.war, cb.checked);
+      renderConcludedWars(mode, latestByMode[mode]);
+    });
+  });
+  el.querySelectorAll(".breakdown-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const warNumber = Number(btn.dataset.war);
+      if (expanded.has(warNumber)) expanded.delete(warNumber);
+      else expanded.add(warNumber);
       renderConcludedWars(mode, latestByMode[mode]);
     });
   });
