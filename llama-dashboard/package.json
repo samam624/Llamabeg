@@ -17,7 +17,7 @@
     "electron-packager": "^17.1.2"
   },
   "build": {
-    "appId": "com.samca.llamascoredashboard",
+    "appId": "com.llamabeg.llamascoredashboard",
     "productName": "Llama Score Dashboard",
     "asar": false,
     "directories": {

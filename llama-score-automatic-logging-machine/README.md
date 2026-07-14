@@ -6,10 +6,15 @@ needed for war logging, and appends compact JSONL records.
 
 It does not modify the game, saves, or mods. It reads copied save files only.
 
+Most players should use the **Llama Score Dashboard** instead (see
+[llama-dashboard/README.md](../llama-dashboard/README.md)) - it's this same recorder
+wrapped in a Windows desktop app with a GUI, no command line needed. This script is for
+non-Windows use, headless/server setups, or anyone who'd rather run it directly.
+
 ## Run
 
 ```powershell
-node .\llama-score-automatic-logging-machine\llama-log-machine.js --save-dir "C:\Users\samca\Documents\Paradox Interactive\Europa Universalis V\save games"
+node .\llama-score-automatic-logging-machine\llama-log-machine.js --save-dir "C:\Users\<you>\Documents\Paradox Interactive\Europa Universalis V\save games"
 ```
 
 By default, output is written to:
