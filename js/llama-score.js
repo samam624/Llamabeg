@@ -552,12 +552,143 @@
     return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
   }
 
-  // Returns { decisive, contributing }: `decisive` is the single strongest
-  // qualifying signal (or null), `contributing` is every OTHER signal that
-  // also qualified but lost out - real evidence, just outweighed, so it's
-  // still worth surfacing (see inferOutcome's contributingFactors).
-  function economicOutcomeSignal(war, economy) {
-    if (!economy || !economy.Attacker || !economy.Defender) return { decisive: null, contributing: [] };
+  // The single strongest signal available: an ENFORCED war-reparations
+  // obligation (diplomacy_manager's war_reparations - see js/clausewitz.js's
+  // extractWarReparationsFields) directly records who lost and who won,
+  // straight from the peace treaty itself - unlike land/gold deltas, it isn't
+  // INFERRED from noisy before/after snapshot comparisons, and it persists
+  // ~10 in-game years, far longer than war_manager keeps a concluded war's
+  // own record around. "first"/payer is the war's LOSER, "second"/receiver is
+  // the WINNER - confirmed against a real save's already-independently-
+  // validated outcome, not assumed (see llama-log-machine.js's copy of this
+  // function, kept in sync deliberately, for the full derivation writeup).
+  // Uses the same gold-principal substitution as the treasury-swing signal (a
+  // vassal has no treasury standing in a peace), and only considers an
+  // obligation that started on or after this war's own start date - one from
+  // years earlier between the same two countries would be a leftover from a
+  // DIFFERENT war.
+  function reparationsSignal(war, warReparations, attackerGoldPrincipals, defenderGoldPrincipals) {
+    if (!Array.isArray(warReparations) || !warReparations.length) return null;
+    const startKey = dateKey(war.startDate);
+    let best = null;
+    let bestKey = null;
+    for (const rep of warReparations) {
+      if (typeof rep.payer !== "number" || typeof rep.receiver !== "number") continue;
+      const repKey = dateKey(rep.startDate);
+      if (repKey < startKey) continue;
+      let winnerSide = null;
+      if (attackerGoldPrincipals.has(rep.payer) && defenderGoldPrincipals.has(rep.receiver)) winnerSide = "Defender";
+      else if (defenderGoldPrincipals.has(rep.payer) && attackerGoldPrincipals.has(rep.receiver)) winnerSide = "Attacker";
+      if (!winnerSide) continue;
+      if (!best || repKey > bestKey) {
+        best = winnerSide;
+        bestKey = repKey;
+      }
+    }
+    if (!best) return null;
+    return {
+      winnerSide: best,
+      reason: "post-war-reparations-enforced",
+      // Deliberately larger than any land/gold strength value so this always
+      // wins the sort below when present.
+      strength: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  // Reads a resolved-side-field's two values and reports a directional LEAN
+  // only when both sides show real, opposite-signed movement of a real
+  // (>=100) magnitude on whichever side is gaining - the exact same rigor
+  // the old treasury-swing DECISIVE check used, just repurposed for a
+  // non-decisive lean (see economicOutcomeSignal's big comment on why
+  // treasury/prestige no longer get to crown a winner at all).
+  function goldLikeLean(aValue, dValue) {
+    if (typeof aValue !== "number" || typeof dValue !== "number") return null;
+    if (aValue === 0 || dValue === 0 || Math.sign(aValue) === Math.sign(dValue)) return null;
+    const gainerValue = aValue > 0 ? aValue : dValue;
+    if (Math.abs(gainerValue) < 100) return null;
+    return aValue > dValue ? "Attacker" : "Defender";
+  }
+
+  // A war whose own internal goal is literally "gain independence" - the
+  // game tags this directly (war.warName === "INDEPENDENCE_WAR_NAME", see
+  // js/clausewitz.js's extractWarFields and test/debug-war-name.js for the
+  // derivation), and by definition of this war type the ATTACKER is always
+  // the vassal fighting to break free, with the (former) overlord auto-
+  // joining the DEFENDER side. Land/gold rarely change hands in an
+  // independence peace (confirmed on real data: a real independence war
+  // showed 0/0 land and only a modest, non-decisive treasury swing, even
+  // though the outcome was completely unambiguous) - without this signal,
+  // that shape falls through to White Peace despite a real, decisive result.
+  //
+  // Deliberately does NOT need "before the war" snapshot data - EU5 already
+  // guarantees the pre-war relationship (that's what this war type means),
+  // so the only thing left to check is whether the vassal is STILL subject
+  // to one of the war's original defenders by the time the war disappears -
+  // if the AFTER snapshot's dependency data is gone (or points elsewhere),
+  // the vassal achieved independence; if it still points at one of the
+  // defenders, they lost and remain subjugated. (An earlier, more complex
+  // design compared dependency status before vs. after the war, using
+  // multi-snapshot history - abandoned once this simpler, more direct check
+  // was found: the vassal's own `overlord` field reads null almost
+  // immediately upon DECLARING an independence war, not just upon winning
+  // it, which would have made a before/after comparison unreliable for
+  // exactly the case this exists to catch.)
+  function independenceSignal(war, afterCountries) {
+    if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
+    const attacker = war.originalAttacker;
+    const defenders = war.originalDefenders || [];
+    if (typeof attacker !== "number" || !afterCountries) return null;
+    const info = afterCountries[attacker];
+    if (!info) return null;
+    const stillSubjugated = typeof info.overlord === "number" && defenders.includes(info.overlord);
+    return {
+      winnerSide: stillSubjugated ? "Defender" : "Attacker",
+      reason: "post-war-independence-granted",
+      // Same tier as reparations - a direct state check, not an inferred delta.
+      strength: Number.MAX_SAFE_INTEGER,
+    };
+  }
+
+  // Returns { decisive, contributing, breakdown }: `decisive` is the single
+  // strongest qualifying DECISIVE signal (or null - only reparations, land
+  // transfer, and independence are eligible, see below), `contributing` is
+  // every OTHER DECISIVE-eligible signal that also qualified but lost out,
+  // and `breakdown` is a full numeric account of every factor this function
+  // looked at (decisive or not) for the UI's expandable "how was this
+  // decided" detail view.
+  //
+  // Per the user's explicit call: treasury swing, like prestige before it,
+  // is being DEMOTED from decisive to informational-only. Real data this
+  // session found repeated false positives from it even after two rounds of
+  // tightening the threshold (a big campaigning army outspending a defender
+  // regardless of outcome; one side hemorrhaging money on unrelated war
+  // costs while the other only incidentally gained a little) - the user's
+  // read is that gold, like prestige, has too many reasons to swing that
+  // have nothing to do with who actually won THIS war. Only land transfer (a
+  // real before/after territory comparison), enforced war reparations, and
+  // granted independence (both literal, non-inferred peace-treaty facts) are
+  // trusted to crown a winner now. Treasury and prestige are still computed
+  // and surfaced - as contributingFactors/breakdown entries, same tier as
+  // war-score/battle-losses/occupation - just never decisive.
+  function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
+    const breakdown = [];
+    const signals = [];
+    const independence = independenceSignal(war, afterCountries);
+    if (independence) signals.push(independence);
+    breakdown.push({
+      key: "independence",
+      label: "Independence granted",
+      decisive: true,
+      applies: !!independence,
+      winnerSide: independence ? independence.winnerSide : null,
+      attackerValue: null,
+      defenderValue: null,
+    });
+    if (!economy || !economy.Attacker || !economy.Defender) {
+      if (!signals.length) return { decisive: null, contributing: [], breakdown };
+      signals.sort((a, b) => b.strength - a.strength);
+      return { decisive: signals[0], contributing: signals.slice(1), breakdown };
+    }
     const attackerPrincipalsBase = principalCountrySet(war.originalAttacker);
     const defenderPrincipalsBase = principalCountrySet(war.originalDefenders);
     const attackerPrincipals = principalsWithOverlords(attackerPrincipalsBase, war);
@@ -569,13 +700,34 @@
     const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
     const aGoldR = resolveSideField(economy.Attacker, attackerGoldPrincipals, "goldDelta");
     const dGoldR = resolveSideField(economy.Defender, defenderGoldPrincipals, "goldDelta");
+    // Prestige reuses the gold-principal substitution (an overlord replaces
+    // a vassal, per the same "a vassal has no standing of its own in a
+    // peace" reasoning) - it's informational only, so this is a judgment
+    // call, not a load-bearing one.
+    const aPrestigeR = resolveSideField(economy.Attacker, attackerGoldPrincipals, "prestigeDelta");
+    const dPrestigeR = resolveSideField(economy.Defender, defenderGoldPrincipals, "prestigeDelta");
 
     const aLocations = aLoc.value;
     const dLocations = dLoc.value;
     const aGold = aGoldR.value;
     const dGold = dGoldR.value;
-    const signals = [];
+    const aPrestige = aPrestigeR.value;
+    const dPrestige = dPrestigeR.value;
 
+    const reparations = reparationsSignal(war, warReparations, attackerGoldPrincipals, defenderGoldPrincipals);
+    if (reparations) signals.push(reparations);
+    breakdown.push({
+      key: "reparations",
+      label: "War reparations",
+      decisive: true,
+      applies: !!reparations,
+      winnerSide: reparations ? reparations.winnerSide : null,
+      attackerValue: null,
+      defenderValue: null,
+    });
+
+    let landApplies = false;
+    let landWinner = null;
     if (typeof aLocations === "number" && typeof dLocations === "number") {
       const spread = aLocations - dLocations;
       // Both principal sides must show a REAL (nonzero) location change for
@@ -598,6 +750,8 @@
         Math.sign(aLocations) !== Math.sign(dLocations)
       ) {
         const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
+        landApplies = true;
+        landWinner = winnerSide;
         signals.push({
           winnerSide,
           reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
@@ -610,6 +764,8 @@
       const clean = side === "Attacker" ? aLoc.usedPrincipal : dLoc.usedPrincipal;
       const winnerSide = value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker";
       if (Math.abs(value) >= 1) {
+        landApplies = true;
+        landWinner = winnerSide;
         signals.push({
           winnerSide,
           reason: clean ? "post-war-land-transfer" : "post-war-land-transfer-coalition",
@@ -617,21 +773,41 @@
         });
       }
     }
+    breakdown.push({
+      key: "land-transfer",
+      label: "Land transfer",
+      decisive: true,
+      applies: landApplies,
+      winnerSide: landWinner,
+      attackerValue: aLocations,
+      defenderValue: dLocations,
+    });
 
-    if (typeof aGold === "number" && typeof dGold === "number") {
-      const spread = aGold - dGold;
-      if (Math.abs(spread) >= 100) {
-        signals.push({ winnerSide: spread > 0 ? "Attacker" : "Defender", reason: "post-war-treasury-swing", strength: Math.abs(spread) });
-      }
-    } else if (typeof aGold === "number" || typeof dGold === "number") {
-      const side = typeof aGold === "number" ? "Attacker" : "Defender";
-      const value = typeof aGold === "number" ? aGold : dGold;
-      if (value > 100) signals.push({ winnerSide: side, reason: "post-war-treasury-gain", strength: value });
-    }
+    const treasuryLean = goldLikeLean(aGold, dGold);
+    breakdown.push({
+      key: "treasury",
+      label: "Treasury swing",
+      decisive: false,
+      applies: typeof aGold === "number" && typeof dGold === "number",
+      winnerSide: treasuryLean,
+      attackerValue: aGold,
+      defenderValue: dGold,
+    });
 
-    if (!signals.length) return { decisive: null, contributing: [] };
+    const prestigeLean = goldLikeLean(aPrestige, dPrestige);
+    breakdown.push({
+      key: "prestige",
+      label: "Prestige swing",
+      decisive: false,
+      applies: typeof aPrestige === "number" && typeof dPrestige === "number",
+      winnerSide: prestigeLean,
+      attackerValue: aPrestige,
+      defenderValue: dPrestige,
+    });
+
+    if (!signals.length) return { decisive: null, contributing: [], breakdown };
     signals.sort((a, b) => b.strength - a.strength);
-    return { decisive: signals[0], contributing: signals.slice(1) };
+    return { decisive: signals[0], contributing: signals.slice(1), breakdown };
   }
 
   // Battle-inflicted casualties (Battle+Capture, NOT Attrition) compared
@@ -664,18 +840,17 @@
   }
 
   // Maps an economicOutcomeSignal reason code to the short label used in
-  // contributingFactors, so a land/treasury signal that LOST out to a
-  // stronger one (see economicOutcomeSignal's `contributing`) still shows
-  // up as "considered but not decisive" the same way war-score/battle-losses
-  // do.
+  // contributingFactors, so a land signal that LOST out to reparations (see
+  // economicOutcomeSignal's `contributing`) still shows up as "considered
+  // but not decisive" the same way war-score/battle-losses do.
   const CONTRIBUTING_SIGNAL_FROM_REASON = {
+    "post-war-reparations-enforced": "reparations",
+    "post-war-independence-granted": "independence",
     "post-war-land-transfer": "land-transfer",
     "post-war-land-transfer-coalition": "land-transfer",
-    "post-war-treasury-swing": "treasury",
-    "post-war-treasury-gain": "treasury",
   };
 
-  function inferOutcome(war, economy) {
+  function inferOutcome(war, economy, warReparations, afterCountries) {
     const aScore = war.attackerScore;
     const dScore = war.defenderScore;
     const lossSignal = battleLossSignal(war);
@@ -683,19 +858,39 @@
       typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore
         ? { winnerSide: aScore > dScore ? "Attacker" : "Defender" }
         : null;
+    const aCombat = war.attackerLosses ? (war.attackerLosses.battle || 0) + (war.attackerLosses.capture || 0) : null;
+    const dCombat = war.defenderLosses ? (war.defenderLosses.battle || 0) + (war.defenderLosses.capture || 0) : null;
+    const occ = war.occupation;
+    const occupationLean =
+      occ && typeof occ.attackerLocations === "number" && typeof occ.defenderLocations === "number" && occ.attackerLocations !== occ.defenderLocations
+        ? occ.attackerLocations > occ.defenderLocations
+          ? "Attacker"
+          : "Defender"
+        : null;
 
-    // Per your call: war score, battle losses, and prestige never decide a
-    // winner on their own - each one moves for reasons that don't reliably
-    // track who actually won THIS specific war (a two-sided war score is
-    // frequently a partial-clear artifact from EU5's own end-of-war cleanup;
-    // a winning invader can still rack up heavy battle losses; prestige
-    // swings heavily from battles/events unrelated to the war's actual
-    // outcome). Only land and gold (economicOutcomeSignal, both using the
-    // same nonzero-both-sides/opposite-direction rigor) decide who won;
-    // war-score and battle-losses are attached below as contributingFactors
-    // so the reasoning stays visible/auditable without ever being trusted to
-    // pick a side by themselves - not even when several of them happen to
-    // agree.
+    // Per your explicit call: war score, battle losses, occupation,
+    // treasury, and prestige never decide a winner on their own - each one
+    // moves for reasons that don't reliably track who actually won THIS
+    // specific war (a two-sided war score is frequently a partial-clear
+    // artifact from EU5's own end-of-war cleanup; a winning invader can
+    // still rack up heavy battle losses; occupying land mid-war isn't the
+    // same as keeping it; treasury and prestige both swing from
+    // battles/events/unrelated spending as often as from the war's actual
+    // outcome). Only land transfer (a real before/after territory
+    // comparison) and enforced war reparations (economicOutcomeSignal, a
+    // literal peace-treaty term) decide who won; everything else is
+    // attached below as contributingFactors/breakdown so the reasoning stays
+    // visible/auditable without ever being trusted to pick a side by itself
+    // - not even when several of them happen to agree.
+    const economicSignal = economicOutcomeSignal(war, economy, warReparations, afterCountries);
+    const treasuryFactor = economicSignal.breakdown.find((f) => f.key === "treasury");
+    const prestigeFactor = economicSignal.breakdown.find((f) => f.key === "prestige");
+    const fullBreakdown = economicSignal.breakdown.concat([
+      { key: "war-score", label: "War score", decisive: false, applies: !!scoreSignal, winnerSide: scoreSignal ? scoreSignal.winnerSide : null, attackerValue: aScore, defenderValue: dScore },
+      { key: "battle-losses", label: "Casualties inflicted", decisive: false, applies: !!lossSignal, winnerSide: lossSignal ? lossSignal.winnerSide : null, attackerValue: dCombat, defenderValue: aCombat },
+      { key: "occupation", label: "Occupied enemy territory", decisive: false, applies: occupationLean != null, winnerSide: occupationLean, attackerValue: occ ? occ.attackerLocations : null, defenderValue: occ ? occ.defenderLocations : null },
+    ]);
+
     function finalize(result, extraContributing) {
       let confidence = result.confidence;
       let lossSignalAgrees = null;
@@ -709,29 +904,25 @@
       const contributingFactors = [];
       if (scoreSignal) contributingFactors.push({ signal: "war-score", winnerSide: scoreSignal.winnerSide });
       if (lossSignal) contributingFactors.push({ signal: "battle-losses", winnerSide: lossSignal.winnerSide });
+      if (treasuryFactor && treasuryFactor.winnerSide) contributingFactors.push({ signal: "treasury", winnerSide: treasuryFactor.winnerSide });
+      if (prestigeFactor && prestigeFactor.winnerSide) contributingFactors.push({ signal: "prestige", winnerSide: prestigeFactor.winnerSide });
       for (const s of extraContributing || []) {
         contributingFactors.push({ signal: CONTRIBUTING_SIGNAL_FROM_REASON[s.reason] || s.reason, winnerSide: s.winnerSide });
       }
-      return { ...result, confidence, lossSignalAgrees, contributingFactors };
+      return { ...result, confidence, lossSignalAgrees, contributingFactors, breakdown: fullBreakdown };
     }
 
-    // The only decisive checks in this function: before/after territory and
-    // treasury change, restricted to the war's two original principals (see
-    // economicOutcomeSignal's own comments for the nonzero-both-sides fix
-    // and the principal/coalition split). Prestige is deliberately NOT a
-    // decisive input here (see economicOutcomeSignal - it used to be, until
-    // real data showed prestige swings just as often come from unrelated
-    // battles/events as from the war's actual outcome, which produced
-    // confirmed-wrong calls). Land transfer gets "high" confidence (about as
-    // unambiguous as this game's data gets); a gold-only signal gets
-    // "medium" (real, but swings for other reasons too, just less commonly
-    // by this much right as a war ends).
-    const economicSignal = economicOutcomeSignal(war, economy);
+    // The only decisive checks in this function: an enforced reparations
+    // obligation (strongest - see reparationsSignal) and before/after
+    // territory change, restricted to the war's two original principals
+    // (see economicOutcomeSignal's own comments for the nonzero-both-sides
+    // fix and the principal/coalition split). Both get "high" confidence
+    // (about as unambiguous as this game's data gets).
     if (economicSignal.decisive) {
       return finalize(
         {
           winnerSide: economicSignal.decisive.winnerSide,
-          confidence: economicSignal.decisive.reason === "post-war-land-transfer" ? "high" : "medium",
+          confidence: "high",
           reason: economicSignal.decisive.reason,
         },
         economicSignal.contributing
@@ -739,48 +930,60 @@
     }
 
     // Deliberately NOT falling back to war.occupation (who's occupying more
-    // contested territory at the moment the war disappears) here - confirmed
-    // wrong on real data twice now: the module comment above already found
-    // it called 4 of 5 real wars for the wrong side even as the PRIMARY
-    // signal. Occupying land mid-war is not the same as keeping it - only
-    // the economic/land-transfer signal above (a real before/after
-    // comparison) can tell those apart, so this heuristic is retired rather
-    // than kept as a lower-confidence guess.
+    // contested territory at the moment the war disappears) to DECIDE
+    // anything here - confirmed wrong on real data twice now: the module
+    // comment above already found it called 4 of 5 real wars for the wrong
+    // side even as the PRIMARY signal. Occupying land mid-war is not the
+    // same as keeping it - only land TRANSFER (a real before/after
+    // comparison) and enforced reparations can tell those apart. Occupation
+    // is still surfaced above as a breakdown/contributingFactors entry
+    // (informational only, same tier as war-score/battle-losses/treasury/
+    // prestige), just never used to pick a winner.
 
-    // No land or gold actually changed hands between the two principals -
-    // default to White Peace. Confirmed on real data that this genuinely
-    // happens (a real war fought entirely against non-player countries near
-    // "Strasinet" ended with no score/occupation/economic signal at all
-    // pointing either way, and really was a white peace in game), and per
-    // your call it's also the right default when the ONLY things pointing
-    // either way are war score/battle-losses/prestige - those are still
-    // attached as contributingFactors above for anyone auditing the call,
-    // but a white peace costs nothing to get right, and the per-row manual
-    // override still corrects it if this genuinely was decisive.
+    // No reparations were enforced and no land actually changed hands
+    // between the two principals - default to White Peace. Confirmed on
+    // real data that this genuinely happens (a real war fought entirely
+    // against non-player countries near "Strasinet" ended with no
+    // score/occupation/economic signal at all pointing either way, and
+    // really was a white peace in game), and per your call it's also the
+    // right default when the ONLY things pointing either way are war
+    // score/battle-losses/occupation/treasury/prestige - those are still
+    // attached as contributingFactors/breakdown above for anyone auditing
+    // the call, but a white peace costs nothing to get right, and the
+    // per-row manual override still corrects it if this genuinely was
+    // decisive.
     return finalize({ winnerSide: null, confidence: "medium", reason: "white-peace", whitePeace: true }, economicSignal.contributing);
   }
 
-  // Automatic "player has left" detection for the ledger view, so an
-  // abandoned country's later wars don't score for OR against anyone -
-  // the concern that motivated this (see js/app.js) is a remaining player
-  // farming free wins off a teammate's now-AI-controlled shell once they've
-  // stopped playing. A single save can never tell "no longer played" apart
-  // from "still played, just not by anyone we've seen a session for" (see
-  // player_session_handling / the README's played_country writeup) - but
-  // the recorder takes a snapshot every time it notices a new autosave, so
-  // scanning that real history for a country that visibly had a live
-  // player and then visibly stopped (attributed via a LATER snapshot, not
-  // just a gap where the country wasn't otherwise mentioned) is a genuine,
-  // automatic signal, not a guess. A country that reappears with a player
-  // again later (a reconnect, or someone else taking the seat) un-departs.
+  // Automatic "who actually controlled this country when THIS war ended"
+  // detection for the ledger view - a country's controlling player can
+  // change more than once over a campaign (departs, reconnects, or a
+  // different human takes over the same seat entirely - confirmed real in
+  // the user's own data, see player_session_handling memory), and a war's
+  // outcome must be attributed to whoever was actually playing it at the
+  // time, not whoever happens to be playing it NOW. A single save can never
+  // tell "no longer played" apart from "still played, just not by anyone
+  // we've seen a session for" (see player_session_handling) - but the
+  // recorder takes a snapshot every time it notices a new autosave, so
+  // walking that real history in date order and recording every point where
+  // a country's `players` list actually changes builds a genuine per-country
+  // control TIMELINE, not just a guess.
   //
-  // Only countries this method actually re-observes with zero players get
-  // marked - a country that simply never comes up again (no war touches it)
-  // has no signal either way and is left alone rather than assumed departed.
-  function buildDepartureDates(snapshots) {
+  // This deliberately replaced an earlier design that tracked only a single
+  // "currently departed as of the latest snapshot" Map per country - that
+  // shape is fundamentally wrong for a country that changes hands more than
+  // once: the moment ANY later snapshot showed a new/returning player, the
+  // whole departure record for that country was deleted, silently
+  // un-excluding every war that concluded during the genuinely-abandoned
+  // window in between (confirmed via a synthetic repro: a reconnect at a
+  // LATER date retroactively made an earlier "farmed while abandoned" war
+  // score again, credited to the WRONG, later player who never fought it).
+  // A timeline of segments, queried by "who was in control as of date X",
+  // fixes both problems at once - see controlTimelineAsOf() below.
+  function buildControlTimeline(snapshots) {
     const sorted = (snapshots || []).slice().sort((a, b) => dateKey(a.date) - dateKey(b.date));
-    const everActive = new Set();
-    const departedAt = new Map();
+    const timeline = new Map(); // country -> [{date, players: string[]}], ascending
+    const sameRoster = (a, b) => a.length === b.length && a.every((p, i) => p === b[i]);
     for (const snapshot of sorted) {
       const countryBlocks = {};
       if (snapshot.countries && typeof snapshot.countries === "object") Object.assign(countryBlocks, snapshot.countries);
@@ -788,16 +991,16 @@
       for (const [numStr, info] of Object.entries(countryBlocks)) {
         const num = Number(numStr);
         if (!Number.isFinite(num) || !info) continue;
-        const hasPlayer = Array.isArray(info.players) && info.players.length > 0;
-        if (hasPlayer) {
-          everActive.add(num);
-          departedAt.delete(num);
-        } else if (everActive.has(num) && !departedAt.has(num)) {
-          departedAt.set(num, snapshot.date);
+        const players = Array.isArray(info.players) ? info.players : [];
+        const segments = timeline.get(num);
+        const last = segments && segments.length ? segments[segments.length - 1] : null;
+        if (!last || !sameRoster(last.players, players)) {
+          if (!segments) timeline.set(num, [{ date: snapshot.date, players }]);
+          else segments.push({ date: snapshot.date, players });
         }
       }
     }
-    return departedAt;
+    return timeline;
   }
 
   // `mode` ("pvp", the default, or "pve") - see the identical parameter on
@@ -818,6 +1021,15 @@
     // raw file/array order, or an out-of-order straggler appearing later
     // in the file could overwrite genuinely-latest data with stale values.
     const snapshotsByDate = snapshots.slice().sort((a, b) => dateKey(a.date) - dateKey(b.date));
+    // A war-disappeared event's own economyDelta is a pre-computed diff, but
+    // reparationsSignal (see inferOutcome below) needs the raw enforced-
+    // reparations list from the AFTER snapshot itself - looked up by
+    // sourceHash, the same identifier the event already carries for its own
+    // dedup key below.
+    const snapshotBySourceHash = new Map();
+    for (const snapshot of snapshotsByDate) {
+      if (snapshot && snapshot.sourceHash) snapshotBySourceHash.set(snapshot.sourceHash, snapshot);
+    }
 
     const latestCountryByNumber = new Map();
     const playerCountries = new Map();
@@ -851,15 +1063,46 @@
     }
 
     const latestSnapshot = snapshotsByDate[snapshotsByDate.length - 1] || null;
-    const currentPlayers = new Map();
-    for (const c of (latestSnapshot && latestSnapshot.playerCountries) || []) {
-      if (typeof c.number === "number" && c.players && c.players.length) currentPlayers.set(c.number, c.players[0]);
-    }
 
-    const departedAt = buildDepartureDates(snapshotsByDate);
-    function departedBy(country, byDate) {
-      const d = departedAt.get(country);
-      return typeof d === "string" && dateKey(d) <= dateKey(byDate);
+    // Looks up the country's control timeline for the last segment at-or-
+    // before `atDate` (falling back to the EARLIEST known segment if every
+    // segment postdates `atDate` - a war that concluded before the recorder
+    // ever captured this country has no better evidence to go on). Returns
+    // the roster active at that point, `[]` meaning AI-controlled/departed.
+    const controlTimeline = buildControlTimeline(snapshotsByDate);
+    function rosterAt(country, atDate) {
+      const segments = controlTimeline.get(country);
+      if (!segments || !segments.length) return [];
+      const atKey = dateKey(atDate);
+      let result = segments[0].players;
+      for (const seg of segments) {
+        if (dateKey(seg.date) > atKey) break;
+        result = seg.players;
+      }
+      return result;
+    }
+    function activePlayerAt(country, atDate) {
+      const roster = rosterAt(country, atDate);
+      return roster.length ? roster[0] : null;
+    }
+    // Display-only fallback for an excluded (nobody-in-control) row: "who
+    // used to play this country, most recently as of atDate" rather than
+    // "who plays it today" - so a war a departed player got farmed on shows
+    // THEIR name (why it's excluded), not a successor's who hadn't joined
+    // yet at the time. Falls back to the earliest-ever known controller only
+    // if the country had no live player at all by atDate.
+    function lastControllerAt(country, atDate) {
+      const segments = controlTimeline.get(country);
+      if (!segments || !segments.length) return null;
+      const atKey = dateKey(atDate);
+      let result = null;
+      for (const seg of segments) {
+        if (dateKey(seg.date) > atKey) break;
+        if (seg.players.length) result = seg.players[0];
+      }
+      if (result) return result;
+      const firstActive = segments.find((seg) => seg.players.length);
+      return firstActive ? firstActive.players[0] : null;
     }
 
     // See excludeSubjectsOfPresentOverlords()'s comment - PVE mode only.
@@ -885,7 +1128,9 @@
     finishedEvents.sort((a, b) => dateKey(a.date) - dateKey(b.date));
     for (const event of finishedEvents) {
       const war = event.lastWar;
-      const outcome = inferOutcome(war, event.economyDelta);
+      const afterSnapshot = event.sourceHash ? snapshotBySourceHash.get(event.sourceHash) : null;
+      const afterCountries = afterSnapshot ? Object.assign({}, afterSnapshot.countries, afterSnapshot.economyCountries) : null;
+      const outcome = inferOutcome(war, event.economyDelta, afterSnapshot ? afterSnapshot.warReparations : null, afterCountries);
       if (outcome.winnerSide !== "Attacker" && outcome.winnerSide !== "Defender" && !outcome.whitePeace) continue;
       const keyBase = `${event.sourceHash || event.date}:${event.warNumber}`;
       if (seen.has(keyBase)) continue;
@@ -899,7 +1144,11 @@
         if (side !== "Attacker" && side !== "Defender") continue;
         const candidates = [...players];
         const override = overrides[overrideKey(event.warNumber, country)] || {};
-        const player = override.player || currentPlayers.get(country) || candidates[candidates.length - 1] || null;
+        // Attributed to whoever actually controlled this country as of THIS
+        // war's own end date, not whoever controls it now - see
+        // buildControlTimeline's comment for why "now" was wrong for a
+        // country that's changed human hands more than once.
+        const player = override.player || activePlayerAt(country, event.date) || lastControllerAt(country, event.date) || candidates[candidates.length - 1] || null;
         if (!player) continue;
         const enemySide = side === "Attacker" ? "Defender" : "Attacker";
         // NOT fought-filtered here - isPvP below has to be computed from the
@@ -972,26 +1221,44 @@
         const win = hasOverrideWin ? overrideWin : outcome.whitePeace ? null : side === outcome.winnerSide;
 
         // Auto-exclude (overridable) unless this is a genuinely live PvP
-        // matchup as of the war's end: "vs-ai" (no enemy was ever a player -
-        // see isPvP above), "player-departed" (this row's own country had
-        // already left by the war's end - see buildDepartureDates()), or
+        // matchup as of the war's START: "vs-ai" (no enemy was ever a
+        // player - see isPvP above), "player-departed" (this row's own
+        // country already had nobody actively controlling it - reverted to
+        // AI - by the time THIS war BEGAN, see buildControlTimeline()), or
         // "opponent-departed" (every once-player enemy had already left OR
-        // is now a hidden/excluded player by the war's end - the farming
-        // case this was built to close off). "player-hidden" (the user's
-        // manual Hide button) takes priority over all of the above -
-        // buildDepartureDates() can only ever see a departure if a snapshot
-        // actually recorded the country's players list going empty, which
-        // never happens for a save-only "last known controller" (see
-        // player_session_handling memory) unless someone else takes over
-        // the seat, so a player who just stops showing up is otherwise
-        // invisible to this data and keeps scoring (and keeps counting as
-        // a live opponent for whoever's still fighting them) forever.
+        // is now a hidden/excluded player by the time THIS war BEGAN - the
+        // farming case this was built to close off).
+        //
+        // Deliberately keyed to the war's START, not its end (an earlier
+        // version checked the end date instead): a player who was actively
+        // playing when a war began and only disconnected partway through it
+        // fought a real fight, and that fight should still count for (or
+        // against) them - per the user's explicit call, only a LATER war,
+        // one that didn't even begin until after they'd already left for
+        // good, is fighting a phantom and should be excluded. Checking at
+        // the war's end wrongly zeroed out a war's entire score the moment
+        // a player disconnected anywhere near its conclusion, even after
+        // playing out the whole thing up to that point - confirmed as a
+        // real bug, not just a theoretical one, and the same fix applies
+        // symmetrically to "opponent-departed" (a war whose enemy stuck
+        // around for the start still counts, even if they too vanish
+        // before it concludes).
+        //
+        // "player-hidden" (the user's manual Hide button) takes priority
+        // over all of the above - the timeline can only ever see a departure
+        // if a snapshot actually recorded the country's players list going
+        // empty, which never happens for a save-only "last known controller"
+        // (see player_session_handling memory) unless someone else takes
+        // over the seat, so a player who just stops showing up with no
+        // successor is otherwise invisible to this data and keeps scoring
+        // (and keeps counting as a live opponent for whoever's still
+        // fighting them) forever.
         function attributedPlayerFor(c) {
           const cands = [...(playerCountries.get(c) || [])];
-          return currentPlayers.get(c) || cands[cands.length - 1] || null;
+          return activePlayerAt(c, war.startDate) || lastControllerAt(c, war.startDate) || cands[cands.length - 1] || null;
         }
-        const selfDeparted = departedBy(country, event.date);
-        const enemyActivePlayer = enemyEverPlayer.filter((c) => !departedBy(c, event.date) && !excludedPlayers.has(attributedPlayerFor(c)));
+        const selfDeparted = !activePlayerAt(country, war.startDate);
+        const enemyActivePlayer = enemyEverPlayer.filter((c) => activePlayerAt(c, war.startDate) && !excludedPlayers.has(attributedPlayerFor(c)));
         const autoExcludeReason = excludedPlayers.has(player)
           ? "player-hidden"
           : isPvP && !fought(country)
@@ -1043,9 +1310,11 @@
           warScore: score,
           startDate: war.startDate,
           endDate: event.date,
+          warName: war.warName || null,
           reason: outcome.reason || "unknown",
           confidence: outcome.confidence || "unknown",
           contributingFactors: outcome.contributingFactors || [],
+          breakdown: outcome.breakdown || [],
           locationDelta: event.economyDelta && event.economyDelta[side] ? event.economyDelta[side].locationDelta : null,
           goldDelta: event.economyDelta && event.economyDelta[side] ? event.economyDelta[side].goldDelta : null,
         });
@@ -1186,6 +1455,7 @@
         warNumber,
         startDate: warRows[0].startDate,
         endDate: warRows[0].endDate,
+        warName: warRows[0].warName || null,
         whitePeace: isWhitePeace,
         winnerSide: warRows[0].winnerSide || null,
         // Same for every row of this war (inferOutcome() runs once per
@@ -1196,6 +1466,7 @@
         reason: warRows[0].reason || null,
         confidence: warRows[0].confidence || null,
         contributingFactors: warRows[0].contributingFactors || [],
+        breakdown: warRows[0].breakdown || [],
         attackers,
         defenders,
       });

@@ -91,6 +91,11 @@
     "3050": "war_goal_held",
     "3053": "attacker_score",
     "3054": "defender_score",
+    // The game's own internal war-goal label ("INDEPENDENCE_WAR_NAME",
+    // "CIVIL_WAR_NAME", "NORMAL_WAR_NAME", etc. - see test/debug-war-name.js
+    // for the derivation) - "name" itself (the nested key holding this
+    // string) already resolves via an existing fixed ID used elsewhere.
+    "2b1a": "war_name",
     // War-wide casualty totals, unlike attacker_score/defender_score above -
     // confirmed these survive war conclusion (present with real values on a
     // real `previous=yes` war entry), which is exactly why they're useful:
@@ -283,6 +288,12 @@
     "3826": "named_targets",
     "6b": "target",
     "41": "object",
+    // diplomacy_manager / war_reparations records (see test/debug-war-reparations.js
+    // for the derivation) - "first" is the country PAYING (the war's loser),
+    // "second" is the country RECEIVING (the winner), confirmed against a real
+    // save's already-independently-validated war outcome, not assumed.
+    "36d7": "war_reparations",
+    "2827": "expiration_date",
 
     // played_country
     "1b": "name",

@@ -574,12 +574,12 @@
   }
 
   // Mirrors parseLocationsSection, but for "diplomacy_manager={ 0={...}
-  // dependency={...} ... }" - most entries are keyed by country number (a
-  // large per-pair trust/rivalry section we don't need and skip), with
-  // subject/overlord relationships appearing as repeated "dependency" keys
-  // mixed in among them. See js/clausewitz.js's parseDiplomacyManagerSection
-  // for the text-format twin.
-  function parseDiplomacyManagerSection(dec, view, onDependency) {
+  // dependency={...} war_reparations={...} ... }" - most entries are keyed by
+  // country number (a large per-pair trust/rivalry section we don't need and
+  // skip), with subject/overlord and enforced-reparations relationships
+  // appearing as repeated keys mixed in among them. See js/clausewitz.js's
+  // parseDiplomacyManagerSection for the text-format twin.
+  function parseDiplomacyManagerSection(dec, view, onDependency, onWarReparations) {
     dec.pos += 2; // consume OPEN already peeked by caller
     while (true) {
       const peek = view.getUint16(dec.pos, true);
@@ -598,6 +598,16 @@
         if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
           const dep = Clausewitz.extractDependencyFields(obj);
           if (typeof dep.overlord === "number" && typeof dep.subject === "number") onDependency(dep);
+        }
+      } else if (key === "war_reparations") {
+        const obj = dec.readBareValue();
+        if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
+          const rep = Clausewitz.extractWarReparationsFields(obj);
+          if (typeof rep.payer === "number" && typeof rep.receiver === "number") {
+            if (typeof rep.startDate === "number") rep.startDate = dateFromHours(rep.startDate);
+            if (typeof rep.expirationDate === "number") rep.expirationDate = dateFromHours(rep.expirationDate);
+            onWarReparations(rep);
+          }
         }
       } else {
         dec.skipBareValue();
@@ -1195,6 +1205,7 @@
       playerSessions: [],
       locations: [],
       dependencies: [],
+      warReparations: [],
       locationAssets: [],
       buildings: [],
       cultures: [],
@@ -1278,9 +1289,16 @@
         const peek = gsView.getUint16(dec.pos, true);
         if (peek !== OPEN) return false;
         diplomacySeen = true;
-        parseDiplomacyManagerSection(dec, gsView, (dep) => {
-          result.dependencies.push(dep);
-        });
+        parseDiplomacyManagerSection(
+          dec,
+          gsView,
+          (dep) => {
+            result.dependencies.push(dep);
+          },
+          (rep) => {
+            result.warReparations.push(rep);
+          }
+        );
         return true;
       }
       if (key === "estate_manager" && includeLocations && !estateManagerSeen) {

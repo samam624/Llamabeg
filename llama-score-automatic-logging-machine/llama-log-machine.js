@@ -510,20 +510,39 @@ function numDelta(after, before) {
 function sideEconomyDeltas(war, beforeCountries, afterCountries) {
   if (!war || !beforeCountries || !afterCountries) return null;
   const sides = war.sides || countriesBySide(war.participants || []);
+  const originalPrincipals = {
+    Attacker: typeof war.originalAttacker === "number" ? new Set([war.originalAttacker]) : new Set(),
+    Defender: new Set((war.originalDefenders || []).filter((n) => typeof n === "number")),
+  };
   const result = {};
   for (const side of ["Attacker", "Defender"]) {
     const countries = sides[side] || [];
-    const entries = [];
-    let gold = 0;
-    let prestige = 0;
-    let locations = 0;
-    let goldCount = 0;
-    let prestigeCount = 0;
-    let locationCount = 0;
+    const entryByCountry = new Map();
+    function entryFor(country) {
+      let entry = entryByCountry.get(country);
+      if (!entry) {
+        entry = { country, goldDelta: null, prestigeDelta: null, locationDelta: null };
+        entryByCountry.set(country, entry);
+      }
+      return entry;
+    }
     for (const country of countries) {
       const before = beforeCountries[country];
       const after = afterCountries[country];
-      if (!before || !after) continue;
+      if (!before) continue;
+      // A full annexation (or any other total wipeout) removes the loser's
+      // tag from the save entirely rather than leaving a locationCount:0
+      // stub behind - confirmed on real data (a fully-annexed defender)
+      // where `after` was simply absent even though buildSnapshot()
+      // deliberately keeps tracking a just-concluded war's participants for
+      // one more snapshot. Without this, the conquest's land transfer
+      // silently vanished from the comparison instead of counting as a
+      // total loss. Only locationCount is inferred as 0 here - a vanished
+      // country's gold/prestige has no well-defined "transfer" the way its
+      // province count does, so those stay null (no evidence) rather than
+      // guessing.
+      const vanished = !after && typeof before.locationCount === "number";
+      if (!after && !vanished) continue;
       // Net OUT any change in outstanding debt from the raw treasury change -
       // taking a loan hands you gold AND an equal liability at the same
       // instant (no real gain), and repaying one removes both together (no
@@ -534,22 +553,59 @@ function sideEconomyDeltas(war, beforeCountries, afterCountries) {
       // to the un-netted raw delta in that case (old ledger data), same as
       // if debt simply hadn't changed, rather than losing the signal
       // entirely.
-      const rawGoldDelta = numDelta(after.gold, before.gold);
-      const debtDelta = numDelta(after.totalDebt, before.totalDebt);
+      const rawGoldDelta = after ? numDelta(after.gold, before.gold) : null;
+      const debtDelta = after ? numDelta(after.totalDebt, before.totalDebt) : null;
       const goldDelta = typeof rawGoldDelta === "number" ? rawGoldDelta - (typeof debtDelta === "number" ? debtDelta : 0) : null;
-      const prestigeDelta = numDelta(after.prestige, before.prestige);
-      const locationDelta = numDelta(after.locationCount, before.locationCount);
-      entries.push({ country, goldDelta, prestigeDelta, locationDelta });
-      if (typeof goldDelta === "number") {
-        gold += goldDelta;
+      const prestigeDelta = after ? numDelta(after.prestige, before.prestige) : null;
+      const locationDelta = vanished ? -before.locationCount : numDelta(after.locationCount, before.locationCount);
+      const entry = entryFor(country);
+      entry.goldDelta = goldDelta;
+      entry.prestigeDelta = prestigeDelta;
+      entry.locationDelta = locationDelta;
+    }
+    // A brand-new subject (present only in `after`, absent from `before`
+    // entirely - a genuinely new tag, not a pre-existing nation that merely
+    // changed overlords) whose overlord is one of THIS side's ORIGINAL
+    // principal(s) - a real EU5 peace-deal choice (release conquered
+    // provinces into a new vassal instead of keeping them) that otherwise
+    // makes a decisive conquest invisible, since the principal's own
+    // locationCount never moves. Confirmed on real data: Castile released
+    // Portugal's ceded provinces into a brand-new vassal - Castile's own
+    // locationCount was static the entire war (251->251) while the actual
+    // 9-province conquest only ever showed up under the new vassal's own
+    // tag, which buildSnapshot() now tracks specifically so this pass has
+    // data to read. Folded directly into the PRINCIPAL's own locationDelta
+    // (not a separate countryDeltas entry) so economicOutcomeSignal's
+    // existing principal-only summation picks it up with no further changes
+    // - restricted to location only, since a new subject's gold/prestige
+    // isn't a comparable "gain" the same way its province count is.
+    for (const numStr of Object.keys(afterCountries)) {
+      const num = Number(numStr);
+      if (beforeCountries[num]) continue;
+      const info = afterCountries[numStr];
+      if (typeof info.overlord !== "number" || !originalPrincipals[side].has(info.overlord)) continue;
+      if (typeof info.locationCount !== "number" || info.locationCount === 0) continue;
+      const entry = entryFor(info.overlord);
+      entry.locationDelta = (typeof entry.locationDelta === "number" ? entry.locationDelta : 0) + info.locationCount;
+    }
+    const entries = [...entryByCountry.values()];
+    let gold = 0;
+    let prestige = 0;
+    let locations = 0;
+    let goldCount = 0;
+    let prestigeCount = 0;
+    let locationCount = 0;
+    for (const entry of entries) {
+      if (typeof entry.goldDelta === "number") {
+        gold += entry.goldDelta;
         goldCount++;
       }
-      if (typeof prestigeDelta === "number") {
-        prestige += prestigeDelta;
+      if (typeof entry.prestigeDelta === "number") {
+        prestige += entry.prestigeDelta;
         prestigeCount++;
       }
-      if (typeof locationDelta === "number") {
-        locations += locationDelta;
+      if (typeof entry.locationDelta === "number") {
+        locations += entry.locationDelta;
         locationCount++;
       }
     }
@@ -636,12 +692,150 @@ function resolveSideField(sideInfo, principals, field) {
   return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
 }
 
-// Returns { decisive, contributing }: `decisive` is the single strongest
-// qualifying signal (or null), `contributing` is every OTHER signal that
-// also qualified but lost out - real evidence, just outweighed, so it's
-// still worth surfacing (see inferOutcome's contributingFactors).
-function economicOutcomeSignal(war, economy) {
-  if (!economy || !economy.Attacker || !economy.Defender) return { decisive: null, contributing: [] };
+// The single strongest signal available: an ENFORCED war-reparations
+// obligation (diplomacy_manager's war_reparations - see js/clausewitz.js's
+// extractWarReparationsFields) directly records who lost and who won,
+// straight from the peace treaty itself - unlike land/gold deltas, it isn't
+// INFERRED from noisy before/after snapshot comparisons, and it persists
+// ~10 in-game years, far longer than war_manager keeps a concluded war's own
+// record around (confirmed on real data: matching war-disappeared events
+// for these exact wars had already been purged from war_manager by the time
+// the corresponding autosave was captured, yet the reparations record was
+// still sitting in diplomacy_manager). "first"/payer is the war's LOSER,
+// "second"/receiver is the WINNER - confirmed against a real save's already-
+// independently-validated outcome (England collecting from Castile), not
+// assumed. Uses the same gold-principal substitution as the treasury-swing
+// signal (a vassal has no treasury standing in a peace, so its Overlord is
+// who actually pays/collects), and only considers an obligation that started
+// on or after this war's own start date - one from years earlier between the
+// same two countries would be a leftover from a DIFFERENT war.
+function reparationsSignal(war, warReparations, attackerGoldPrincipals, defenderGoldPrincipals) {
+  if (!Array.isArray(warReparations) || !warReparations.length) return null;
+  const startKey = dateKey(war.startDate);
+  let best = null;
+  let bestKey = null;
+  for (const rep of warReparations) {
+    if (typeof rep.payer !== "number" || typeof rep.receiver !== "number") continue;
+    const repKey = dateKey(rep.startDate);
+    if (repKey === null || (startKey !== null && repKey < startKey)) continue;
+    let winnerSide = null;
+    if (attackerGoldPrincipals.has(rep.payer) && defenderGoldPrincipals.has(rep.receiver)) winnerSide = "Defender";
+    else if (defenderGoldPrincipals.has(rep.payer) && attackerGoldPrincipals.has(rep.receiver)) winnerSide = "Attacker";
+    if (!winnerSide) continue;
+    if (!best || repKey > bestKey) {
+      best = winnerSide;
+      bestKey = repKey;
+    }
+  }
+  if (!best) return null;
+  return {
+    winnerSide: best,
+    loserSide: best === "Attacker" ? "Defender" : "Attacker",
+    reason: "post-war-reparations-enforced",
+    // Deliberately larger than any land/gold strength value (land tops out
+    // around locationCount*1000, gold around raw treasury deltas in the
+    // thousands at most) so this always wins the sort below when present,
+    // per the user's explicit call that enforced reparations are even more
+    // reliable evidence than a land transfer.
+    strength: Number.MAX_SAFE_INTEGER,
+  };
+}
+
+// Reads a resolved-side-field's two values and reports a directional LEAN
+// only when both sides show real, opposite-signed movement of a real (>=100)
+// magnitude on whichever side is gaining - the exact same rigor the old
+// treasury-swing DECISIVE check used, just repurposed for a non-decisive
+// lean (see economicOutcomeSignal's big comment on why treasury/prestige no
+// longer get to crown a winner at all).
+function goldLikeLean(aValue, dValue) {
+  if (typeof aValue !== "number" || typeof dValue !== "number") return null;
+  if (aValue === 0 || dValue === 0 || Math.sign(aValue) === Math.sign(dValue)) return null;
+  const gainerValue = aValue > 0 ? aValue : dValue;
+  if (Math.abs(gainerValue) < 100) return null;
+  return aValue > dValue ? "Attacker" : "Defender";
+}
+
+// A war whose own internal goal is literally "gain independence" - the game
+// tags this directly (war.warName === "INDEPENDENCE_WAR_NAME", see
+// js/clausewitz.js's extractWarFields and test/debug-war-name.js for the
+// derivation), and by definition of this war type the ATTACKER is always
+// the vassal fighting to break free, with the (former) overlord auto-joining
+// the DEFENDER side. Land/gold rarely change hands in an independence peace
+// (confirmed on real data: a real independence war showed 0/0 land and only
+// a modest, non-decisive treasury swing, even though the outcome was
+// completely unambiguous) - without this signal, that shape falls through to
+// White Peace despite a real, decisive result.
+//
+// Deliberately does NOT need "before the war" snapshot data - EU5 already
+// guarantees the pre-war relationship (that's what this war type means), so
+// the only thing left to check is whether the vassal is STILL subject to one
+// of the war's original defenders by the time the war disappears - if the
+// AFTER snapshot's dependency data is gone (or points elsewhere), the vassal
+// achieved independence; if it still points at one of the defenders, they
+// lost and remain subjugated. (An earlier, more complex design compared
+// dependency status before vs. after the war, using multi-snapshot history -
+// abandoned once this simpler, more direct check was found: the vassal's own
+// `overlord` field reads null almost immediately upon DECLARING an
+// independence war, not just upon winning it, which would have made a
+// before/after comparison unreliable for exactly the case this exists to
+// catch.)
+function independenceSignal(war, afterCountries) {
+  if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
+  const attacker = war.originalAttacker;
+  const defenders = war.originalDefenders || [];
+  if (typeof attacker !== "number" || !afterCountries) return null;
+  const info = afterCountries[attacker];
+  if (!info) return null;
+  const stillSubjugated = typeof info.overlord === "number" && defenders.includes(info.overlord);
+  return {
+    winnerSide: stillSubjugated ? "Defender" : "Attacker",
+    loserSide: stillSubjugated ? "Attacker" : "Defender",
+    reason: "post-war-independence-granted",
+    // Same tier as reparations - a direct state check, not an inferred delta.
+    strength: Number.MAX_SAFE_INTEGER,
+  };
+}
+
+// Returns { decisive, contributing, breakdown }: `decisive` is the single
+// strongest qualifying DECISIVE signal (or null - only reparations, land
+// transfer, and independence are eligible, see below), `contributing` is
+// every OTHER DECISIVE-eligible signal that also qualified but lost out, and
+// `breakdown` is a full numeric account of every factor this function looked
+// at (decisive or not) for the UI's expandable "how was this decided" detail
+// view.
+//
+// Per the user's explicit call: treasury swing, like prestige before it, is
+// being DEMOTED from decisive to informational-only. Real data this session
+// found repeated false positives from it even after two rounds of
+// tightening the threshold (a big campaigning army outspending a defender
+// regardless of outcome; one side hemorrhaging money on unrelated war costs
+// while the other only incidentally gained a little) - the user's read is
+// that gold, like prestige, has too many reasons to swing that have nothing
+// to do with who actually won THIS war. Only land transfer (a real
+// before/after territory comparison), enforced war reparations, and granted
+// independence (both literal, non-inferred peace-treaty facts) are trusted
+// to crown a winner now. Treasury and prestige are still computed and
+// surfaced - as contributingFactors/breakdown entries, same tier as
+// war-score/battle-losses/occupation - just never decisive.
+function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
+  const breakdown = [];
+  const signals = [];
+  const independence = independenceSignal(war, afterCountries);
+  if (independence) signals.push(independence);
+  breakdown.push({
+    key: "independence",
+    label: "Independence granted",
+    decisive: true,
+    applies: !!independence,
+    winnerSide: independence ? independence.winnerSide : null,
+    attackerValue: null,
+    defenderValue: null,
+  });
+  if (!economy || !economy.Attacker || !economy.Defender) {
+    if (!signals.length) return { decisive: null, contributing: [], breakdown };
+    signals.sort((a, b) => b.strength - a.strength);
+    return { decisive: signals[0], contributing: signals.slice(1), breakdown };
+  }
   const attackerPrincipalsBase = principalCountrySet(war.originalAttacker);
   const defenderPrincipalsBase = principalCountrySet(war.originalDefenders);
   const attackerPrincipals = principalsWithOverlords(attackerPrincipalsBase, war);
@@ -653,13 +847,34 @@ function economicOutcomeSignal(war, economy) {
   const dLoc = resolveSideField(economy.Defender, defenderPrincipals, "locationDelta");
   const aGoldR = resolveSideField(economy.Attacker, attackerGoldPrincipals, "goldDelta");
   const dGoldR = resolveSideField(economy.Defender, defenderGoldPrincipals, "goldDelta");
+  // Prestige reuses the gold-principal substitution (an overlord replaces a
+  // vassal, per the same "a vassal has no standing of its own in a peace"
+  // reasoning) - it's informational only, so this is a judgment call, not a
+  // load-bearing one.
+  const aPrestigeR = resolveSideField(economy.Attacker, attackerGoldPrincipals, "prestigeDelta");
+  const dPrestigeR = resolveSideField(economy.Defender, defenderGoldPrincipals, "prestigeDelta");
 
   const aGold = aGoldR.value;
   const dGold = dGoldR.value;
   const aLocations = aLoc.value;
   const dLocations = dLoc.value;
-  const signals = [];
+  const aPrestige = aPrestigeR.value;
+  const dPrestige = dPrestigeR.value;
 
+  const reparations = reparationsSignal(war, warReparations, attackerGoldPrincipals, defenderGoldPrincipals);
+  if (reparations) signals.push(reparations);
+  breakdown.push({
+    key: "reparations",
+    label: "War reparations",
+    decisive: true,
+    applies: !!reparations,
+    winnerSide: reparations ? reparations.winnerSide : null,
+    attackerValue: null,
+    defenderValue: null,
+  });
+
+  let landApplies = false;
+  let landWinner = null;
   if (typeof aLocations === "number" && typeof dLocations === "number") {
     const spread = aLocations - dLocations;
     // Both principal sides must show a REAL (nonzero) location change for
@@ -682,6 +897,8 @@ function economicOutcomeSignal(war, economy) {
       Math.sign(aLocations) !== Math.sign(dLocations)
     ) {
       const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
+      landApplies = true;
+      landWinner = winnerSide;
       signals.push({
         winnerSide,
         loserSide: winnerSide === "Attacker" ? "Defender" : "Attacker",
@@ -695,6 +912,8 @@ function economicOutcomeSignal(war, economy) {
     const clean = side === "Attacker" ? aLoc.usedPrincipal : dLoc.usedPrincipal;
     const winnerSide = value > 0 ? side : side === "Attacker" ? "Defender" : "Attacker";
     if (Math.abs(value) >= 1) {
+      landApplies = true;
+      landWinner = winnerSide;
       signals.push({
         winnerSide,
         loserSide: winnerSide === "Attacker" ? "Defender" : "Attacker",
@@ -703,33 +922,41 @@ function economicOutcomeSignal(war, economy) {
       });
     }
   }
+  breakdown.push({
+    key: "land-transfer",
+    label: "Land transfer",
+    decisive: true,
+    applies: landApplies,
+    winnerSide: landWinner,
+    attackerValue: aLocations,
+    defenderValue: dLocations,
+  });
 
-  if (typeof aGold === "number" && typeof dGold === "number") {
-    const spread = aGold - dGold;
-    if (Math.abs(spread) >= 100) {
-      signals.push({
-        winnerSide: spread > 0 ? "Attacker" : "Defender",
-        loserSide: spread > 0 ? "Defender" : "Attacker",
-        reason: "post-war-treasury-swing",
-        strength: Math.abs(spread),
-      });
-    }
-  } else if (typeof aGold === "number" || typeof dGold === "number") {
-    const side = typeof aGold === "number" ? "Attacker" : "Defender";
-    const value = typeof aGold === "number" ? aGold : dGold;
-    if (value > 100) {
-      signals.push({
-        winnerSide: side,
-        loserSide: side === "Attacker" ? "Defender" : "Attacker",
-        reason: "post-war-treasury-gain",
-        strength: value,
-      });
-    }
-  }
+  const treasuryLean = goldLikeLean(aGold, dGold);
+  breakdown.push({
+    key: "treasury",
+    label: "Treasury swing",
+    decisive: false,
+    applies: typeof aGold === "number" && typeof dGold === "number",
+    winnerSide: treasuryLean,
+    attackerValue: aGold,
+    defenderValue: dGold,
+  });
 
-  if (!signals.length) return { decisive: null, contributing: [] };
+  const prestigeLean = goldLikeLean(aPrestige, dPrestige);
+  breakdown.push({
+    key: "prestige",
+    label: "Prestige swing",
+    decisive: false,
+    applies: typeof aPrestige === "number" && typeof dPrestige === "number",
+    winnerSide: prestigeLean,
+    attackerValue: aPrestige,
+    defenderValue: dPrestige,
+  });
+
+  if (!signals.length) return { decisive: null, contributing: [], breakdown };
   signals.sort((a, b) => b.strength - a.strength);
-  return { decisive: signals[0], contributing: signals.slice(1) };
+  return { decisive: signals[0], contributing: signals.slice(1), breakdown };
 }
 
 // Battle-inflicted casualties (Battle+Capture, NOT Attrition) compared
@@ -762,17 +989,17 @@ function shiftConfidence(level, delta) {
 }
 
 // Maps an economicOutcomeSignal reason code to the short label used in
-// contributingFactors, so a land/treasury signal that LOST out to a stronger
-// one (see economicOutcomeSignal's `contributing`) still shows up as
-// "considered but not decisive" the same way war-score/battle-losses do.
+// contributingFactors, so a land signal that LOST out to reparations (see
+// economicOutcomeSignal's `contributing`) still shows up as "considered but
+// not decisive" the same way war-score/battle-losses do.
 const CONTRIBUTING_SIGNAL_FROM_REASON = {
+  "post-war-reparations-enforced": "reparations",
+  "post-war-independence-granted": "independence",
   "post-war-land-transfer": "land-transfer",
   "post-war-land-transfer-coalition": "land-transfer",
-  "post-war-treasury-swing": "treasury",
-  "post-war-treasury-gain": "treasury",
 };
 
-function inferOutcome(war, disappeared, economy) {
+function inferOutcome(war, disappeared, economy, warReparations, afterCountries) {
   const aScore = war.attackerScore;
   const dScore = war.defenderScore;
   const lossSignal = battleLossSignal(war);
@@ -780,20 +1007,40 @@ function inferOutcome(war, disappeared, economy) {
     typeof aScore === "number" && typeof dScore === "number" && aScore !== dScore
       ? { winnerSide: aScore > dScore ? "Attacker" : "Defender" }
       : null;
+  const aCombat = war.attackerLosses ? (war.attackerLosses.battle || 0) + (war.attackerLosses.capture || 0) : null;
+  const dCombat = war.defenderLosses ? (war.defenderLosses.battle || 0) + (war.defenderLosses.capture || 0) : null;
+  const occ = war.occupation;
+  const occupationLean =
+    occ && typeof occ.attackerLocations === "number" && typeof occ.defenderLocations === "number" && occ.attackerLocations !== occ.defenderLocations
+      ? occ.attackerLocations > occ.defenderLocations
+        ? "Attacker"
+        : "Defender"
+      : null;
 
-  // Per the user's call (js/llama-score.js's copy of this function has the
-  // full writeup, kept in sync deliberately): war score, battle losses, and
-  // prestige never decide a winner on their own - each one moves for reasons
-  // that don't reliably track who actually won THIS specific war (a
-  // two-sided war score is frequently a partial-clear artifact from EU5's
-  // own end-of-war cleanup; a winning invader can still rack up heavy battle
-  // losses; prestige swings heavily from battles/events unrelated to the
-  // war's actual outcome). Only land and gold (economicOutcomeSignal, both
-  // using the same nonzero-both-sides/opposite-direction rigor) decide who
-  // won; war-score and battle-losses are attached below as
-  // contributingFactors so the reasoning stays visible/auditable without
-  // ever being trusted to pick a side by themselves - not even when several
-  // of them happen to agree.
+  // Per the user's explicit call (js/llama-score.js's copy of this function
+  // has the full writeup, kept in sync deliberately): war score, battle
+  // losses, occupation, treasury, and prestige never decide a winner on
+  // their own - each one moves for reasons that don't reliably track who
+  // actually won THIS specific war (a two-sided war score is frequently a
+  // partial-clear artifact from EU5's own end-of-war cleanup; a winning
+  // invader can still rack up heavy battle losses; occupying land mid-war
+  // isn't the same as keeping it; treasury and prestige both swing from
+  // battles/events/unrelated spending as often as from the war's actual
+  // outcome). Only land transfer (a real before/after territory comparison)
+  // and enforced war reparations (economicOutcomeSignal, a literal peace-
+  // treaty term) decide who won; everything else is attached below as
+  // contributingFactors/breakdown so the reasoning stays visible/auditable
+  // without ever being trusted to pick a side by itself - not even when
+  // several of them happen to agree.
+  const economicSignal = economicOutcomeSignal(war, economy, warReparations, afterCountries);
+  const treasuryFactor = economicSignal.breakdown.find((f) => f.key === "treasury");
+  const prestigeFactor = economicSignal.breakdown.find((f) => f.key === "prestige");
+  const fullBreakdown = economicSignal.breakdown.concat([
+    { key: "war-score", label: "War score", decisive: false, applies: !!scoreSignal, winnerSide: scoreSignal ? scoreSignal.winnerSide : null, attackerValue: aScore, defenderValue: dScore },
+    { key: "battle-losses", label: "Casualties inflicted", decisive: false, applies: !!lossSignal, winnerSide: lossSignal ? lossSignal.winnerSide : null, attackerValue: dCombat, defenderValue: aCombat },
+    { key: "occupation", label: "Occupied enemy territory", decisive: false, applies: occupationLean != null, winnerSide: occupationLean, attackerValue: occ ? occ.attackerLocations : null, defenderValue: occ ? occ.defenderLocations : null },
+  ]);
+
   function finalize(result, extraContributing) {
     let confidence = result.confidence;
     let lossSignalAgrees = null;
@@ -807,30 +1054,26 @@ function inferOutcome(war, disappeared, economy) {
     const contributingFactors = [];
     if (scoreSignal) contributingFactors.push({ signal: "war-score", winnerSide: scoreSignal.winnerSide });
     if (lossSignal) contributingFactors.push({ signal: "battle-losses", winnerSide: lossSignal.winnerSide });
+    if (treasuryFactor && treasuryFactor.winnerSide) contributingFactors.push({ signal: "treasury", winnerSide: treasuryFactor.winnerSide });
+    if (prestigeFactor && prestigeFactor.winnerSide) contributingFactors.push({ signal: "prestige", winnerSide: prestigeFactor.winnerSide });
     for (const s of extraContributing || []) {
       contributingFactors.push({ signal: CONTRIBUTING_SIGNAL_FROM_REASON[s.reason] || s.reason, winnerSide: s.winnerSide });
     }
-    return { ...result, confidence, lossSignalAgrees, contributingFactors, attackerScore: aScore, defenderScore: dScore };
+    return { ...result, confidence, lossSignalAgrees, contributingFactors, attackerScore: aScore, defenderScore: dScore, breakdown: fullBreakdown };
   }
 
-  // The only decisive checks in this function: before/after territory and
-  // treasury change, restricted to the war's two original principals (see
+  // The only decisive checks in this function: an enforced reparations
+  // obligation (strongest - see reparationsSignal) and before/after
+  // territory change, restricted to the war's two original principals (see
   // economicOutcomeSignal's own comments for the nonzero-both-sides fix and
-  // the principal/coalition split). Prestige is deliberately NOT a decisive
-  // input here (see economicOutcomeSignal - it used to be, until real data
-  // showed prestige swings just as often come from unrelated battles/events
-  // as from the war's actual outcome, which produced confirmed-wrong calls).
-  // Land transfer gets "high" confidence (about as unambiguous as this
-  // game's data gets); a gold-only signal gets "medium" (real, but swings
-  // for other reasons too, just less commonly by this much right as a war
-  // ends).
-  const economicSignal = economicOutcomeSignal(war, economy);
+  // the principal/coalition split). Both get "high" confidence (about as
+  // unambiguous as this game's data gets).
   if (economicSignal.decisive) {
     return finalize(
       {
         winnerSide: economicSignal.decisive.winnerSide,
         loserSide: economicSignal.decisive.loserSide,
-        confidence: economicSignal.decisive.reason === "post-war-land-transfer" ? "high" : "medium",
+        confidence: "high",
         reason: economicSignal.decisive.reason,
       },
       economicSignal.contributing
@@ -838,20 +1081,23 @@ function inferOutcome(war, disappeared, economy) {
   }
 
   // Deliberately NOT falling back to war.occupation (who's occupying more
-  // contested territory at the moment the war disappears) here - confirmed
-  // wrong on real data twice now (see js/llama-score.js's copy of this
-  // function): occupation called 4 of 5 real wars for the wrong side even
-  // as the PRIMARY signal. Occupying land mid-war is not the same as
-  // keeping it - only the economic/land-transfer signal above (a real
-  // before/after comparison) can tell those apart, so this heuristic is
-  // retired rather than kept as a lower-confidence guess.
+  // contested territory at the moment the war disappears) to DECIDE anything
+  // here - confirmed wrong on real data twice now (see js/llama-score.js's
+  // copy of this function): occupation called 4 of 5 real wars for the wrong
+  // side even as the PRIMARY signal. Occupying land mid-war is not the same
+  // as keeping it - only land TRANSFER (a real before/after comparison) and
+  // enforced reparations can tell those apart. Occupation is still surfaced
+  // above as a breakdown/contributingFactors entry (informational only, same
+  // tier as war-score/battle-losses/treasury/prestige), just never used to
+  // pick a winner.
 
-  // No land or gold actually changed hands between the two principals -
-  // default to White Peace. War score/battle-losses/prestige are still
-  // attached as contributingFactors above for anyone auditing the call, but
-  // per the user's call none of them gets to crown a winner on its own - a
-  // white peace costs nothing to get right, and the per-row manual override
-  // still corrects it if this genuinely was decisive.
+  // No reparations were enforced and no land actually changed hands between
+  // the two principals - default to White Peace. War score/battle-losses/
+  // occupation/treasury/prestige are still attached above as
+  // contributingFactors/breakdown for anyone auditing the call, but per the
+  // user's call none of them gets to crown a winner on its own - a white
+  // peace costs nothing to get right, and the per-row manual override still
+  // corrects it if this genuinely was decisive.
   return finalize(
     {
       winnerSide: null,
@@ -873,6 +1119,12 @@ function warSummary(war) {
     revolt: !!war.revolt,
     originalAttacker: war.originalAttacker,
     originalDefenders: war.originalDefenders || [],
+    // The game's own internal war-goal label (see js/clausewitz.js's
+    // extractWarFields) - "INDEPENDENCE_WAR_NAME", "CIVIL_WAR_NAME",
+    // "NORMAL_WAR_NAME", etc. Used directly by independenceSignal below, and
+    // surfaced to the UI as a "Type" column so a war's own real goal is
+    // visible, not just guessed at.
+    warName: war.warName || null,
     attackerScore: war.attackerScore,
     defenderScore: war.defenderScore,
     warGoalHeld: war.warGoalHeld,
@@ -946,6 +1198,19 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     for (const p of war.participants || []) if (typeof p.country === "number") interestingCountries.add(p.country);
   }
   const overlordOf = buildOverlordLookup(result);
+  // A brand-new subject of an already-interesting country (e.g. a player
+  // fully conquers an opponent's provinces and releases them straight into
+  // a new vassal instead of keeping them, a real EU5 peace-deal option) is
+  // otherwise invisible forever - it's not a player, and it was never a war
+  // participant since it didn't exist until the peace treaty created it, so
+  // it would never enter interestingCountries any other way. Tracking it
+  // from here on lets sideEconomyDeltas (below) attribute its land back to
+  // whichever principal formed it, instead of the conquest silently
+  // vanishing because the principal's OWN locationCount never moves.
+  for (const c of countries) {
+    const overlord = overlordOf.get(c.number);
+    if (typeof overlord === "number" && interestingCountries.has(overlord)) interestingCountries.add(c.number);
+  }
   const countryLookup = {};
   for (const n of interestingCountries) {
     const c = countryByNumber.get(n);
@@ -967,6 +1232,14 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     economyCountries,
     wars,
     warFilter: config.playerWarsOnly ? "player" : "all",
+    // Enforced war-reparations obligations (see js/clausewitz.js's
+    // extractWarReparationsFields) - small (hundreds of entries even
+    // late-game, ~50 bytes each), always kept, no includeXxx gate needed,
+    // same as dependencies above. Lasts ~10 in-game years per obligation, far
+    // longer than war_manager keeps a concluded war's own record around, so
+    // this is the most durable win/loss signal available (see
+    // economicOutcomeSignal's reparationsSignal, which reads this directly).
+    warReparations: result.warReparations || [],
   };
 }
 
@@ -976,6 +1249,19 @@ function classifyEvents(previousWars, snapshot) {
   const economyCountries = snapshot.economyCountries || snapshot.countries || {};
   for (const war of snapshot.wars) {
     const fp = warFingerprint(war);
+    const previous = previousWars[String(war.number)];
+    // EU5 clears attacker_score/defender_score partway through a war's life
+    // (sometimes one side, sometimes both) well before the war actually
+    // disappears - confirmed on real data: a war with real land/reparations
+    // evidence still had BOTH scores null by the time it disappeared, even
+    // though an earlier still-active snapshot had seen a real value for at
+    // least one side. Carry the LAST KNOWN non-null score forward across
+    // snapshots (per side, independently) instead of losing it the moment
+    // the live field goes blank, so a war-disappeared event's own lastWar
+    // (and the war-score breakdown/contributingFactor built from it) still
+    // has real evidence when the game itself once showed some.
+    const lastKnownAttackerScore = typeof war.attackerScore === "number" ? war.attackerScore : previous && typeof previous.lastKnownAttackerScore === "number" ? previous.lastKnownAttackerScore : null;
+    const lastKnownDefenderScore = typeof war.defenderScore === "number" ? war.defenderScore : previous && typeof previous.lastKnownDefenderScore === "number" ? previous.lastKnownDefenderScore : null;
     current[war.number] = {
       fingerprint: fp,
       startDate: war.startDate,
@@ -983,8 +1269,9 @@ function classifyEvents(previousWars, snapshot) {
       lastSnapshotHash: snapshot.sourceHash,
       lastWar: war,
       lastCountries: economyCountries,
+      lastKnownAttackerScore,
+      lastKnownDefenderScore,
     };
-    const previous = previousWars[String(war.number)];
     if (!previous) {
       events.push({ type: "war-start", warNumber: war.number, date: snapshot.date, sourceHash: snapshot.sourceHash, war });
     } else if (previous.fingerprint !== fp) {
@@ -993,7 +1280,16 @@ function classifyEvents(previousWars, snapshot) {
   }
   for (const [warNumber, previous] of Object.entries(previousWars)) {
     if (!current[warNumber]) {
-      const lastWar = previous.lastWar || null;
+      // Apply the same carried-forward score to the FINAL lastWar snapshot
+      // handed to inferOutcome/stored in the event - a shallow clone so the
+      // mutation can't leak back into `previous.lastWar` (not referenced
+      // anywhere else once this war has left `current`, but cloning keeps
+      // that true even if that ever changes).
+      const lastWar = previous.lastWar ? { ...previous.lastWar } : null;
+      if (lastWar) {
+        if (lastWar.attackerScore == null && typeof previous.lastKnownAttackerScore === "number") lastWar.attackerScore = previous.lastKnownAttackerScore;
+        if (lastWar.defenderScore == null && typeof previous.lastKnownDefenderScore === "number") lastWar.defenderScore = previous.lastKnownDefenderScore;
+      }
       const economy = lastWar ? sideEconomyDeltas(lastWar, previous.lastCountries, economyCountries) : null;
       const previousMeta = {
         fingerprint: previous.fingerprint,
@@ -1007,7 +1303,7 @@ function classifyEvents(previousWars, snapshot) {
         date: snapshot.date,
         sourceHash: snapshot.sourceHash,
         lastWar,
-        inferredOutcome: lastWar ? inferOutcome(lastWar, true, economy) : null,
+        inferredOutcome: lastWar ? inferOutcome(lastWar, true, economy, snapshot.warReparations, economyCountries) : null,
         economyDelta: economy,
         previous: previousMeta,
       });
@@ -1085,6 +1381,14 @@ function hydrateStateFromSnapshots(config, state) {
         lastSnapshotHash: snapshot.sourceHash,
         lastWar: war,
         lastCountries: countries,
+        // Only the LATEST snapshot per campaign is read here (see the loop
+        // above), so there's no deeper history to recover a score from if
+        // this one snapshot already shows null - same shape as
+        // classifyEvents' carry-forward fields (see its comment) so a
+        // restart mid-war doesn't lose the carrying mechanism itself, just
+        // whatever history predates this specific snapshot.
+        lastKnownAttackerScore: typeof war.attackerScore === "number" ? war.attackerScore : null,
+        lastKnownDefenderScore: typeof war.defenderScore === "number" ? war.defenderScore : null,
       };
     }
     state.activeWarsByCampaign[campaignKey] = wars;

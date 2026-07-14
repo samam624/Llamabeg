@@ -292,6 +292,7 @@ function countryLabel(countries, playerCountries, number) {
     number,
     tag: (info && info.tag) || "#" + number,
     players: info && info.players && info.players.length ? info.players : [],
+    locationCount: (info && info.locationCount) || 0,
   };
 }
 
@@ -330,7 +331,7 @@ function buildOngoingWars(latestSnapshot, mode) {
       const attackers = attackerNums.map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
       const defenders = defenderNums.map((n) => countryLabel(countries, latestSnapshot.playerCountries, n));
       const isPvP = attackers.some((a) => playerCountryNums.has(a.number)) && defenders.some((d) => playerCountryNums.has(d.number));
-      return { warNumber: w.number, startDate: w.startDate, attackers, defenders, isPvP };
+      return { warNumber: w.number, startDate: w.startDate, warName: w.warName || null, attackers, defenders, isPvP };
     })
     .filter((w) => (mode === "pve" ? !w.isPvP : w.isPvP))
     .sort((a, b) => String(b.startDate || "").localeCompare(String(a.startDate || "")));

@@ -341,6 +341,7 @@
       population: obj.last_months_population,
       historicalPopulation: Array.isArray(obj.historical_population) ? obj.historical_population : null,
       historicalTaxBase: Array.isArray(obj.historical_tax_base) ? obj.historical_tax_base : null,
+      historicalEconomicalBase: Array.isArray(obj.historical_economical_base) ? obj.historical_economical_base : null,
       players: [],
     };
   }
@@ -571,11 +572,25 @@
     return { overlord: obj.first, subject: obj.second, subjectType };
   }
 
-  // Parses "diplomacy_manager={ 0={...} 1={...} ... dependency={...} ... }" -
-  // a large section keyed mostly by country number (per-pair trust/rivalry
-  // data we don't need), with subject/overlord relationships appearing as
-  // repeated "dependency" entries mixed in among them. Skips everything else.
-  function parseDiplomacyManagerSection(scanner, onDependency) {
+  // Extracts an enforced war-reparations obligation from one
+  // "war_reparations" entry: { first=<payer number> second=<receiver number>
+  // start_date=... expiration_date=... }. Direction confirmed against a real
+  // save's already-independently-validated war outcome (see
+  // test/debug-war-reparations.js and eu5-fixed-ids.js's comment) - "first"
+  // is the LOSER who must pay, "second" is the WINNER who collects. A
+  // reparations obligation typically lasts 10 in-game years, far longer than
+  // war_manager keeps a concluded war's own record around, making this a
+  // much more durable win/loss signal than land/gold deltas.
+  function extractWarReparationsFields(obj) {
+    return { payer: obj.first, receiver: obj.second, startDate: obj.start_date, expirationDate: obj.expiration_date };
+  }
+
+  // Parses "diplomacy_manager={ 0={...} 1={...} ... dependency={...}
+  // war_reparations={...} ... }" - a large section keyed mostly by country
+  // number (per-pair trust/rivalry data we don't need), with subject/overlord
+  // and enforced-reparations relationships appearing as repeated entries
+  // mixed in among them. Skips everything else.
+  function parseDiplomacyManagerSection(scanner, onDependency, onWarReparations) {
     while (true) {
       scanner.skipWs();
       if (scanner.text[scanner.pos] === "}") {
@@ -590,6 +605,12 @@
         if (obj && typeof obj === "object") {
           const dep = extractDependencyFields(obj);
           if (typeof dep.overlord === "number" && typeof dep.subject === "number") onDependency(dep);
+        }
+      } else if (key === "war_reparations") {
+        const obj = scanner.parseValue();
+        if (obj && typeof obj === "object") {
+          const rep = extractWarReparationsFields(obj);
+          if (typeof rep.payer === "number" && typeof rep.receiver === "number") onWarReparations(rep);
         }
       } else {
         scanner.skipValue();
@@ -971,6 +992,12 @@
       endDate: typeof obj.end_date === "string" ? obj.end_date : null,
       concluded: obj.previous === true,
       warGoalHeld: typeof obj.war_goal_held === "number" ? obj.war_goal_held : null,
+      // The game's own internal war-goal label (e.g. "INDEPENDENCE_WAR_NAME",
+      // "CIVIL_WAR_NAME", "NORMAL_WAR_NAME") - see reparationsSignal-adjacent
+      // independence handling in economicOutcomeSignal, which uses this to
+      // detect an independence war directly instead of inferring it from a
+      // before/after vassal-status comparison.
+      warName: obj.war_name && typeof obj.war_name === "object" && typeof obj.war_name.name === "string" ? obj.war_name.name : null,
       attackerScore: typeof obj.attacker_score === "number" ? obj.attacker_score : null,
       defenderScore: typeof obj.defender_score === "number" ? obj.defender_score : null,
       occupation: { attackerLocations, defenderLocations, otherLocations, totalLocations },
@@ -1004,10 +1031,28 @@
   // behavior as before this existed. Shared by both parsers - called once
   // at the end of each one's top-level walk, after result.wars AND
   // result.locations are both fully populated.
+  //
+  // attackerLocations/defenderLocations count ONLY genuine cross-occupation
+  // (controller on one side, but OWNER on the other) - i.e. land actually
+  // seized from the enemy, not each side's own untouched home territory.
+  // Confirmed this distinction matters on real data: a war's roster
+  // previously reported "attackerLocations: 109, defenderLocations: 279" as
+  // if that meant something about who was winning, but a full owner-vs-
+  // controller breakdown showed defenderLocations was 279/279 the
+  // defender's OWN home provinces (zero enemy soil actually held) and
+  // attackerLocations was only 56/109 real enemy territory (the other 53
+  // was the attacker's own home turf sitting in the same roster) - the old
+  // numbers were dominated by whichever side simply has the bigger home
+  // empire, not by who was actually gaining ground. `otherLocations` now
+  // absorbs both untouched home turf on either side AND any third-party-
+  // owned land in the roster (a vassal, etc.) - the invariant
+  // `totalLocations = attackerLocations + defenderLocations + otherLocations`
+  // still holds, just with a more meaningful split.
   function reconcileWarOccupation(result) {
     const wars = result.wars || [];
-    const controllerByLocation =
-      result.locations && result.locations.length ? new Map(result.locations.map((l) => [l.number, l.controller])) : null;
+    const hasLocations = result.locations && result.locations.length;
+    const controllerByLocation = hasLocations ? new Map(result.locations.map((l) => [l.number, l.controller])) : null;
+    const ownerByLocation = hasLocations ? new Map(result.locations.map((l) => [l.number, l.owner])) : null;
     for (const war of wars) {
       const locationIds = war.locationIds;
       const sideByCountryMap = war.sideByCountryMap;
@@ -1021,9 +1066,11 @@
       for (const locId of locationIds) {
         totalLocations++;
         const controller = controllerByLocation.get(locId);
-        const side = typeof controller === "number" ? sideByCountryMap[controller] : undefined;
-        if (side === "Attacker") attackerLocations++;
-        else if (side === "Defender") defenderLocations++;
+        const owner = ownerByLocation.get(locId);
+        const controllerSide = typeof controller === "number" ? sideByCountryMap[controller] : undefined;
+        const ownerSide = typeof owner === "number" ? sideByCountryMap[owner] : undefined;
+        if (controllerSide === "Attacker" && ownerSide === "Defender") attackerLocations++;
+        else if (controllerSide === "Defender" && ownerSide === "Attacker") defenderLocations++;
         else otherLocations++;
       }
       war.occupation = { attackerLocations, defenderLocations, otherLocations, totalLocations };
@@ -1426,6 +1473,7 @@
       playerSessions: [],
       locations: [],
       dependencies: [],
+      warReparations: [],
       locationAssets: [],
       buildings: [],
       cultures: [],
@@ -1498,9 +1546,15 @@
         scanner.skipWs();
         if (scanner.text[scanner.pos] === "{") {
           scanner.pos++;
-          parseDiplomacyManagerSection(scanner, (dep) => {
-            result.dependencies.push(dep);
-          });
+          parseDiplomacyManagerSection(
+            scanner,
+            (dep) => {
+              result.dependencies.push(dep);
+            },
+            (rep) => {
+              result.warReparations.push(rep);
+            }
+          );
         } else {
           scanner.skipValue();
         }
@@ -1702,6 +1756,7 @@
     extractCountryFields,
     extractLocationFields,
     extractDependencyFields,
+    extractWarReparationsFields,
     extractEstateAssetFields,
     extractBuildingFields,
     extractNamedDefinitionFields,
