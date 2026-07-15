@@ -157,12 +157,16 @@
     });
   });
 
-  // Manual exclude list for players who've left the campaign for good. The
-  // save has no "still connected" flag (it's a snapshot of game state, not
-  // a live session roster) - a departed player still shows as the country's
-  // last controller same as anyone else, so there's no reliable way to
-  // auto-detect "gone and not coming back" from the save data alone. This
-  // is a deliberate manual override instead of a guess.
+  // Manual exclude list for players who've left the campaign for good. A
+  // single save has no "still connected" flag (it's a snapshot of game
+  // state, not a live session roster) - a departed player still shows as
+  // the country's last controller same as anyone else, so there's no
+  // reliable way to auto-detect "gone and not coming back" from a lone save
+  // alone. This list is the manual override for that case (or just "I know
+  // better, hide this one"), persisted so it survives reloading the same
+  // save. See getAllExcludedPlayers() below for the automatic companion,
+  // which DOES have a reliable signal once the desktop tracker's campaign
+  // ledger is linked (multiple snapshots over time, not just one).
   const EXCLUDED_PLAYERS_KEY = "eu5-analyzer-excluded-players";
   function getExcludedPlayers() {
     try {
@@ -173,6 +177,32 @@
   }
   function setExcludedPlayers(set) {
     localStorage.setItem(EXCLUDED_PLAYERS_KEY, JSON.stringify([...set]));
+  }
+
+  // Union of the manual hide list above with whoever the desktop tracker's
+  // campaign ledger shows as departed as of its latest snapshot (see
+  // LlamaScore.computeDepartedPlayers) - the automatic half of "hide a
+  // player" the user asked for, alongside the manual Hide button. Only
+  // available once a campaign ledger is linked (llamaSnapshotsLedger is
+  // null otherwise, e.g. no recorder data for this save); falls back to
+  // just the manual list in that case, same as before this existed. This is
+  // the read path used everywhere a player should actually disappear from
+  // view (Players table, Trends, the Map) - getExcludedPlayers() itself
+  // stays the raw manual set, since the Hide/Show buttons read AND WRITE it
+  // directly and shouldn't accidentally persist an auto-detected name into
+  // permanent manual storage.
+  function getAllExcludedPlayers() {
+    const excluded = getExcludedPlayers();
+    if (llamaSnapshotsLedger && llamaSnapshotsLedger.length && typeof LlamaScore !== "undefined" && LlamaScore.computeDepartedPlayers) {
+      try {
+        const campaignKey = pickLatestCampaignKey(llamaSnapshotsLedger) || "campaign";
+        const { snapshots } = filterLedgerToCampaign(llamaSnapshotsLedger, llamaEventsLedger, campaignKey);
+        for (const name of LlamaScore.computeDepartedPlayers(snapshots)) excluded.add(name);
+      } catch (err) {
+        // Ledger data mid-write or otherwise malformed - fall back to just the manual list.
+      }
+    }
+    return excluded;
   }
 
   fileInput.addEventListener("change", () => {
@@ -412,7 +442,7 @@
   }
 
   function visiblePlayers(result) {
-    const excluded = getExcludedPlayers();
+    const excluded = getAllExcludedPlayers();
     return result.players.filter((p) => !excluded.has(p.name) && p.country);
   }
 
@@ -1090,12 +1120,10 @@
     }
   }
 
-  // The panel is hidden by default and only shown automatically once real
-  // ledger data is actually on screen (auto-linked, manually connected, or
-  // manually file-picked) - a save with no matching recorder output showing
-  // an empty/near-empty panel every time was more clutter than signal. The
-  // checkbox is the escape hatch for "I know there's nothing auto-linked,
-  // show me the manual tools/per-save fallback anyway."
+  // The checkbox defaults to ON (per user request) - the tab is visible up
+  // front rather than waiting for auto-linked ledger data to appear before
+  // showing itself. Explicitly unchecking it is remembered (see the "0"
+  // fallback below), same as an explicit check always was.
   function updateLlamaPanelVisibility() {
     const shouldShow = llamaAutoLinked || llamaShowToggleEl.checked;
     const wasHidden = llamaTabBtn.hidden;
@@ -1130,7 +1158,7 @@
     updateLlamaPanelVisibility();
     if (!llamaTabBtn.hidden) renderLlamaScore();
   });
-  llamaShowToggleEl.checked = localStorage.getItem(LLAMA_SHOW_TOGGLE_KEY) === "1";
+  llamaShowToggleEl.checked = localStorage.getItem(LLAMA_SHOW_TOGGLE_KEY) !== "0";
 
   // A compacted (older, no-longer-actively-recorded) campaign's ledger is
   // gzip-compressed on disk (see llama-log-machine.js's
@@ -1237,6 +1265,15 @@
         if (!best || best.lastModified <= (ledgerConnection.lastModified || 0)) return;
         await loadCampaignLedger(ledgerConnection.dataDirHandle, best);
         renderLlamaScore();
+        // New snapshot data just landed - if it now shows a player departed
+        // (see getAllExcludedPlayers), the Players table/Trends/Map should
+        // reflect that live, without the user needing to reload the save or
+        // click anything.
+        if (latestResult) {
+          drawPlayerTable(latestResult);
+          renderTrends(latestResult);
+          refreshMapForExclusions();
+        }
       } catch (err) {
         // Transient read errors (e.g. the recorder mid-write) shouldn't kill polling.
       }
@@ -1275,6 +1312,14 @@
     updateLlamaPanelVisibility();
     renderLlamaScore();
     startLedgerPolling();
+    // Ledger data (and any departed players it reveals) is now available -
+    // reflect it on the Players table/Trends/Map immediately rather than
+    // waiting for the next poll or a manual Hide click.
+    if (latestResult) {
+      drawPlayerTable(latestResult);
+      renderTrends(latestResult);
+      refreshMapForExclusions();
+    }
   }
 
   // Runs after every save load (see onParsed) - finds and loads THIS save's
@@ -1327,6 +1372,14 @@
     updateLlamaPanelVisibility();
     renderLlamaScore();
     startLedgerPolling();
+    // Same as connectToDataDir above - a departed player revealed by this
+    // ledger data should disappear from the Players table/Trends/Map right
+    // away, not just once something else happens to redraw them.
+    if (latestResult) {
+      drawPlayerTable(latestResult);
+      renderTrends(latestResult);
+      refreshMapForExclusions();
+    }
   }
 
   async function tryAutoReconnect() {
@@ -1456,11 +1509,27 @@
     draw();
   }
 
+  // Hiding a player (the Players table's Hide button, or "Show" to clear the
+  // whole list) needs to be reflected on the Map tab too - a departed
+  // player's realm border/label/"Players" grouping should disappear from
+  // the map exactly like it disappears from the Players table, not just
+  // stop scoring. Always invalidates the cached render (mapRenderedForResult
+  // = false) so the *next* Map tab visit rebuilds with the fresh excluded
+  // set via activateTab()'s own existing guard, even if the user isn't on
+  // the Map tab right now; if they already are, re-render immediately
+  // instead of waiting for a tab switch that isn't coming. A fresh
+  // createMapView() always resets pan/zoom - an accepted tradeoff for a
+  // deliberate, infrequent action.
+  function refreshMapForExclusions() {
+    mapRenderedForResult = false;
+    if (tabPanels.map && !tabPanels.map.hidden && latestResult) renderMap(latestResult);
+  }
+
   function renderMap(result) {
     if (typeof MapView === "undefined") return;
     mapRenderedForResult = true;
     mapContainerEl.innerHTML = '<div class="map-loading">Loading map...</div>';
-    MapView.createMapView(mapContainerEl, result).catch((err) => {
+    MapView.createMapView(mapContainerEl, result, getAllExcludedPlayers()).catch((err) => {
       mapContainerEl.innerHTML =
         '<div class="map-loading">Map unavailable: ' +
         escapeHtml(err.message) +
@@ -2004,6 +2073,7 @@
         drawPlayerTable(result);
         renderTrends(result);
         if (currentLlamaDraw) currentLlamaDraw();
+        refreshMapForExclusions();
       });
     }
 
@@ -2029,6 +2099,7 @@
             // Llama Score tab, not just disappear from this table - see
             // computeLlamaScores'/computeFromLedger's excludedPlayers param.
             if (currentLlamaDraw) currentLlamaDraw();
+            refreshMapForExclusions();
           });
         });
       },

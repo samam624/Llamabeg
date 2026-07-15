@@ -113,23 +113,47 @@
   // convention index.html's <script src>/<link> tags already use.
   const MAP_DATA_VERSION = "v1.0.0";
 
-  async function loadLocationIdGrid() {
-    const img = await loadImage(`map_data/location_ids.png?v=${MAP_DATA_VERSION}`);
-    const canvas = document.createElement("canvas");
-    canvas.width = MAP_W;
-    canvas.height = MAP_H;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const data = ctx.getImageData(0, 0, MAP_W, MAP_H).data;
-    // One id per pixel, computed once and reused for every mapmode repaint.
-    const ids = new Uint32Array(MAP_W * MAP_H);
-    for (let p = 0, i = 0; p < ids.length; p++, i += 4) {
-      ids[p] = data[i] | (data[i + 1] << 8);
+  // location_ids.png/locations.json are the same static, save-independent
+  // asset every time (they don't depend on `result` at all) - decoding them
+  // is expensive (idGrid alone is a 128M-entry Uint32Array, built via a
+  // 16384x8192 getImageData() call, i.e. ~1GB of transient allocations for
+  // the source image data + the array). createMapView() used to re-pay that
+  // cost on every single save load/Map-tab visit, so the more saves you'd
+  // loaded in one session the more of that garbage was sitting in the heap
+  // awaiting GC - which is what was making pan/zoom drop frames over time.
+  // Memoize both behind module-level promises so they're built once per page
+  // load and reused for every save after that.
+  let idGridPromise = null;
+  function loadLocationIdGrid() {
+    if (!idGridPromise) {
+      idGridPromise = (async () => {
+        const img = await loadImage(`map_data/location_ids.png?v=${MAP_DATA_VERSION}`);
+        const canvas = document.createElement("canvas");
+        canvas.width = MAP_W;
+        canvas.height = MAP_H;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, MAP_W, MAP_H).data;
+        // One id per pixel, computed once and reused for every mapmode repaint.
+        const ids = new Uint32Array(MAP_W * MAP_H);
+        for (let p = 0, i = 0; p < ids.length; p++, i += 4) {
+          ids[p] = data[i] | (data[i + 1] << 8);
+        }
+        // `image` is kept alongside `ids` (not just discarded once decoded) so
+        // the WebGL renderer can upload the same RG-encoded id map as a GPU
+        // texture directly - it doesn't need the JS-side Uint32Array at all,
+        // that's still only for hit-testing (clicks/hover/labels).
+        return { ids, image: img };
+      })().catch((err) => {
+        idGridPromise = null; // let a transient load failure be retried on the next save
+        throw err;
+      });
     }
-    return ids;
+    return idGridPromise;
   }
 
-  async function loadLocationNames() {
+  let locationNamesPromise = null;
+  function loadLocationNames() {
     // Was `{ cache: "no-store" }` (no versioning at all) - changed to the
     // same query-string convention as MAP_DATA_VERSION above once this file
     // became a real shipped/immutable-cached production asset (previously
@@ -138,8 +162,15 @@
     // stale cached copy will silently reproduce "fixed" bugs with zero
     // indication why - confirmed this happened once already under the old
     // no-cache-busting-at-all setup (see git history).
-    const res = await fetch(`map_data/locations.json?v=${MAP_DATA_VERSION}`);
-    return res.json();
+    if (!locationNamesPromise) {
+      locationNamesPromise = fetch(`map_data/locations.json?v=${MAP_DATA_VERSION}`)
+        .then((res) => res.json())
+        .catch((err) => {
+          locationNamesPromise = null;
+          throw err;
+        });
+    }
+    return locationNamesPromise;
   }
 
   // Deterministic but visually spread-out color for an arbitrary integer id
@@ -183,13 +214,32 @@
     return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * amount));
   }
 
+  // A "hidden" player (the Players table's Hide button, or - per user
+  // request - an automatic future hook from the desktop tracker detecting
+  // someone left the campaign) should disappear from the map too: no player-
+  // realm border/label, no "Players" mapmode grouping, no player name shown
+  // in a country's tooltip/detail panel - not just fade from the Players
+  // table. Every one of those map.js call sites reads a country's raw
+  // `players` name array directly, so this one filter is the single place
+  // that hides a name from all of them, given the same excludedPlayers Set
+  // app.js already keeps in localStorage for the table. A country that
+  // still has at least one OTHER, non-hidden player keeps reading as a
+  // normal player country - only wholly-hidden countries drop out.
+  function visiblePlayers(players, excludedPlayers) {
+    if (!players || !players.length || !excludedPlayers || !excludedPlayers.size) return players || [];
+    return players.filter((name) => !excludedPlayers.has(name));
+  }
+
   // Trade goods need lots of distinct categorical hues, but the raw hashed
   // colors are too saturated for the rest of the Llamabeg map treatment.
   // Keep the hue identity, then pull it toward warm muted land and darken it
-  // slightly so the mode reads as data-rich instead of neon.
+  // slightly so the mode reads as data-rich instead of neon. The final
+  // darken step was originally -0.16, but that ended up reading too dark/
+  // muddy once the neon problem was fixed - eased back up to -0.06 per
+  // user feedback (still darkened from the raw hash color, just not as much).
   function tradeGoodDisplayColor(rawMaterial) {
     const rgb = colorForString(rawMaterial);
-    return shadeColor(mixColor(rgb, NO_DATA_COLOR, 0.34), -0.16);
+    return shadeColor(mixColor(rgb, NO_DATA_COLOR, 0.34), -0.06);
   }
 
   // Shifts a color toward white (amount > 0) or black (amount < 0), used to
@@ -209,29 +259,51 @@
   }
 
   // Numeric mapmodes (development, population, control, prosperity) all
-  // share ONE heat palette now - pdx.tools-style dark brown (low/bad) to
-  // tan (mid) to vivid green (high/good), replacing the old two near-
-  // identical black/red/green/blue "rainbow" variants per user request
-  // ("reads a little better"). The floor color is deliberately NOT literal
-  // black: a genuine 0% value used to render as [8,10,12]/[42,18,18],
-  // visually indistinguishable from unclaimed land, water, or the page's
-  // own dark background - all already near-black in this UI. This floor
-  // (a warm dark brown, distinct in hue from NO_DATA_COLOR/WATER_COLOR/
-  // NON_PLAYER_MUTED below) reads as "genuinely 0%, still real data"
-  // instead of "nothing rendered here."
+  // share ONE heat palette: a single smooth gradient (dark brown -> near-
+  // black -> yellow -> green -> bright cyan-blue), but with its control
+  // points spaced UNEVENLY across percentile-rank space to match a specific
+  // requested distribution - the bottom 30% of locations sit in the brown/
+  // black range, the next 25% (30-55th percentile) transition through
+  // yellow, the next 40% (55-95th) through green, and only the top 5%
+  // reach blue. A hard-edged CLASSED version (flat color bands, no blend)
+  // was tried first per an earlier request - confirmed on a real save it
+  // made the percentile cutoffs unambiguous, but per user follow-up it's
+  // smoothly blended between those same anchor points now instead: two
+  // locations near the same percentile still read as distinct shades again
+  // (the classed version made a 60th and 90th percentile location render
+  // identically), while the top 5% still visibly pops to blue since that
+  // control point is only a narrow 5%-wide span away from green.
+  // HEAT_STOPS is a list of {t, color} breakpoints (t in percentile-rank
+  // space, 0-1, NOT evenly spaced) - heatColor() linearly interpolates
+  // between consecutive entries. The floor is a dark chocolate-brown, not
+  // literal black: literal black ((28,21,14)-ish) is nearly identical to
+  // this page's own --bg and to NON_PLAYER_MUTED, so a genuine 0% location
+  // would be indistinguishable from "nothing rendered here."
+  // Re-tuned per a reference screenshot the user matched against: brown/
+  // black compressed into the bottom ~25%, green stretched wide (~45% of
+  // the range), and blue pulled back to only the top 1% (a true "this is
+  // an elite handful of locations" flag) - the ~14 points of range that
+  // freed up when blue shrank from ~15% down to 1% went to yellow (now
+  // ~29%, up from ~15%), not green, per user request. Brown and green's
+  // spans are otherwise unchanged from the previous tuning.
   const HEAT_STOPS = [
-    [40, 28, 18],
-    [130, 94, 46],
-    [78, 200, 94],
+    { t: 0.0, color: [60, 38, 20] }, // near-black floor
+    { t: 0.25, color: [115, 72, 34] }, // bottom 25%: brown
+    { t: 0.54, color: [225, 195, 60] }, // next 29%: yellow
+    { t: 0.99, color: [120, 200, 90] }, // next 45%: green
+    { t: 1.0, color: [90, 225, 235] }, // top 1%: bright cyan-blue
   ];
   function heatColor(t) {
     t = Math.max(0, Math.min(1, t));
-    const scaled = t * (HEAT_STOPS.length - 1);
-    const idx = Math.min(HEAT_STOPS.length - 2, Math.floor(scaled));
-    const u = scaled - idx;
-    const a = HEAT_STOPS[idx];
-    const b = HEAT_STOPS[idx + 1];
-    return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * u));
+    for (let i = 0; i < HEAT_STOPS.length - 1; i++) {
+      const a = HEAT_STOPS[i];
+      const b = HEAT_STOPS[i + 1];
+      if (t < a.t || t > b.t) continue;
+      const span = b.t - a.t;
+      const u = span > 0 ? (t - a.t) / span : 0;
+      return [0, 1, 2].map((i) => Math.round(a.color[i] + (b.color[i] - a.color[i]) * u));
+    }
+    return HEAT_STOPS[HEAT_STOPS.length - 1].color;
   }
 
   const NO_DATA_COLOR = [107, 96, 74]; // unclaimed/no-data land - distinct from water so it still reads as land
@@ -268,9 +340,16 @@
     // range for the actual spread of values that exist, so real
     // differences between locations are visible rather than compressed.
     const HEAT_SCALE_FIELDS = ["development", "population", "tax", "control", "prosperity"];
+    // development/population/tax get colored by PERCENTILE RANK among this
+    // scope's locations, not by where the value sits between min and max
+    // (even in log space) - see the note above filteredHeatColor for why:
+    // real save data stays right-skewed even after a log transform, so a
+    // continuous scale still crowds most locations toward one end. Needs a
+    // sorted list of every real value in scope to look up a rank from.
+    const PERCENTILE_FIELDS = new Set(["development", "population", "tax"]);
     function computeMetricScales(countryNumber) {
       const scales = {};
-      for (const field of HEAT_SCALE_FIELDS) scales[field] = { min: Infinity, max: -Infinity };
+      for (const field of HEAT_SCALE_FIELDS) scales[field] = { min: Infinity, max: -Infinity, sorted: PERCENTILE_FIELDS.has(field) ? [] : null };
       let tradeGoodMax = 1;
       for (const l of result.locations || []) {
         if (countryNumber && l.owner !== countryNumber) continue;
@@ -280,6 +359,7 @@
           const scale = scales[field];
           if (v < scale.min) scale.min = v;
           if (v > scale.max) scale.max = v;
+          if (scale.sorted) scale.sorted.push(v);
         }
         if (mapState.focusTradeGood && l.rawMaterial === mapState.focusTradeGood && typeof l.maxRawMaterialWorkers === "number" && l.maxRawMaterialWorkers > tradeGoodMax) {
           tradeGoodMax = l.maxRawMaterialWorkers;
@@ -287,15 +367,39 @@
       }
       for (const field of HEAT_SCALE_FIELDS) {
         const scale = scales[field];
+        if (scale.sorted) scale.sorted.sort((a, b) => a - b);
         // No real data at all (e.g. a country with zero locations focused),
         // or every value identical (min===max, would divide by zero) - fall
         // back to a plain 0-1 scale rather than producing NaN colors.
         if (!Number.isFinite(scale.min) || !Number.isFinite(scale.max) || scale.max <= scale.min) {
-          scales[field] = { min: 0, max: Number.isFinite(scale.max) ? Math.max(scale.max, 1) : 1 };
+          scales[field] = { min: 0, max: Number.isFinite(scale.max) ? Math.max(scale.max, 1) : 1, sorted: scale.sorted };
         }
       }
       scales.tradeGood = tradeGoodMax;
       return scales;
+    }
+
+    // Rank of `value` within `sorted` (ascending), as a 0-1 fraction - the
+    // fraction of same-scope locations at or below this one. Unlike any
+    // value-based scale (linear or log), this is invariant to how skewed the
+    // underlying distribution is: it only cares about order, so the colors
+    // always spread evenly across the full gradient no matter how lopsided
+    // real population/tax/development numbers get.
+    function percentileRank(sorted, value) {
+      if (!sorted || sorted.length <= 1) return 0.5;
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sorted[mid] < value) lo = mid + 1;
+        else hi = mid;
+      }
+      // Average the rank of value's first and last occurrence so a run of
+      // ties (common with e.g. tax=0) all land on the same, central color
+      // instead of spreading across whatever range they happen to occupy.
+      let hiIdx = lo;
+      while (hiIdx < sorted.length && sorted[hiIdx] === value) hiIdx++;
+      return (lo + hiIdx - 1) / 2 / (sorted.length - 1);
     }
 
     mapState.metricScales = computeMetricScales(mapState.focusCountry);
@@ -371,11 +475,25 @@
       return typeof loc.owner === "number" ? 0 : undefined;
     }
 
+    // Development/population/tax are all heavily right-skewed (a handful of
+    // capitals/cities dwarf ordinary locations) - skewed enough that even a
+    // log scale still crowds most locations toward one end instead of
+    // spreading them across the gradient (confirmed against a PDX Tools
+    // screenshot of the same save/region: our log-scaled version still read
+    // mostly orange/brown where theirs was a real green-to-brown spread).
+    // PERCENTILE_FIELDS (see computeMetricScales) get colored by rank instead
+    // - see percentileRank(). Control/prosperity are roughly-bounded
+    // percentages (prosperity can even go negative), not skewed the same
+    // way, so they stay a plain linear min->max scale. Legends still show
+    // real units either way (scale.min/max are never transformed).
     function filteredHeatColor(loc, field) {
       const value = ownedNumericOrZero(loc, field);
       if (typeof value !== "number") return NO_DATA_COLOR;
       if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
       const scale = (mapState.metricScales && mapState.metricScales[field]) || { min: 0, max: 1 };
+      if (PERCENTILE_FIELDS.has(field)) {
+        return heatColor(percentileRank(scale.sorted, value));
+      }
       return heatColor((value - scale.min) / (scale.max - scale.min));
     }
 
@@ -429,7 +547,7 @@
     // grey floor faster as access drops - only genuinely high-access
     // locations show real color, everything else reads as clearly muted
     // instead of a wishy-washy 50/50 blend in the middle of the range.
-    const MARKET_ACCESS_LOW_COLOR = HEAT_STOPS[0];
+    const MARKET_ACCESS_LOW_COLOR = HEAT_STOPS[0].color;
     const MARKET_ACCESS_DARKEN_POWER = 2.4;
     // Neutral stand-in hue for the legend bar, which has to illustrate the
     // dark -> color SHAPE generically since the real color varies per
@@ -454,7 +572,7 @@
 
     function isPlayerCountry(countryNumber) {
       const country = countryByNumber.get(countryNumber);
-      return !!(country && country.players && country.players.length > 0);
+      return !!(country && visiblePlayers(country.players, mapState.excludedPlayers).length > 0);
     }
 
     function modePlayerRealmRoot(countryNumber) {
@@ -533,7 +651,7 @@
           const root = modePlayerRealmRoot(loc.owner);
           const rootCountry = root && countryByNumber.get(root);
           if (!rootCountry) return `${country.tag} (AI)`;
-          return loc.owner === root ? `${country.tag} - ${rootCountry.players.map(titleCaseName).join(", ")}` : `${country.tag} (${rootCountry.tag} Subject)`;
+          return loc.owner === root ? `${country.tag} - ${visiblePlayers(rootCountry.players, mapState.excludedPlayers).map(titleCaseName).join(", ")}` : `${country.tag} (${rootCountry.tag} Subject)`;
         },
         legend: () =>
           categoricalLegend(
@@ -541,7 +659,7 @@
             (owner) => countryColor(owner),
             (owner) => {
               const c = countryByNumber.get(owner);
-              return `${c.tag} - ${c.players.map(titleCaseName).join(", ")}`;
+              return `${c.tag} - ${visiblePlayers(c.players, mapState.excludedPlayers).map(titleCaseName).join(", ")}`;
             },
             20
           ),
@@ -790,6 +908,415 @@
     return enclosed;
   }
 
+  // ===== WebGL renderer =====
+  // renderViewport() below does real work: fill color, box-average
+  // downsampling once zoomed out, border/coastline detection, selection
+  // highlight - all recomputed from scratch, in JS, for every destination
+  // pixel, on every single animation frame while panning/zooming. That's a
+  // few million pixel-ops, several passes deep, on ONE thread, every ~16ms -
+  // measured as a genuine, sustained CPU load (confirmed via profiling: this
+  // is what was showing up as ~30% CPU + fan spin-up on pan/zoom, worse the
+  // further zoomed out since the box-average pass samples a 3x3
+  // neighborhood per pixel). A GPU is built for exactly this shape of
+  // workload - the same handful of operations applied independently to
+  // millions of pixels in parallel - which is presumably how PDX Tools stays
+  // smooth at any zoom level. This renderer ports the same per-pixel logic
+  // into a WebGL2 fragment shader; createMapView() falls back to the CPU
+  // renderViewport() below if WebGL2 isn't available at all.
+  const LUT_TEX_W = 256;
+
+  function compileShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const info = gl.getShaderInfoLog(shader);
+      gl.deleteShader(shader);
+      throw new Error("Map shader compile error: " + info);
+    }
+    return shader;
+  }
+
+  function createGLProgram(gl, vsSource, fsSource) {
+    const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const info = gl.getProgramInfoLog(program);
+      gl.deleteProgram(program);
+      throw new Error("Map shader link error: " + info);
+    }
+    return program;
+  }
+
+  const MAP_VERTEX_SHADER_SRC = `#version 300 es
+    in vec2 a_pos;
+    out vec2 v_destPixel;
+    uniform vec2 u_destSize;
+    void main() {
+      // a_pos is a fullscreen quad in clip space. Flip Y here so v_destPixel
+      // matches the rest of this file's (0,0)-top-left, y-increases-downward
+      // convention (WebGL clip space has y increasing upward) instead of
+      // needing every downstream calculation to remember the flip.
+      v_destPixel = vec2((a_pos.x * 0.5 + 0.5) * u_destSize.x, (1.0 - (a_pos.y * 0.5 + 0.5)) * u_destSize.y);
+      gl_Position = vec4(a_pos, 0.0, 1.0);
+    }
+  `;
+
+  // Mirrors renderViewport()'s per-pixel logic: point-sample (or, once
+  // zoomed out past ~1.5 source px per dest px, 3x3-box-average) the id
+  // texture per destination pixel, look up that id's fill/border color in
+  // small LUT textures, and darken/blacken pixels that sit on a location,
+  // realm, or coastline edge - all evaluated independently per fragment, in
+  // parallel, instead of a sequential JS loop.
+  const MAP_FRAGMENT_SHADER_SRC = `#version 300 es
+    precision highp float;
+    precision highp int;
+
+    in vec2 v_destPixel;
+    out vec4 outColor;
+
+    uniform sampler2D u_idTex;
+    uniform sampler2D u_fillTex;    // rgb = fill color, a = isWater
+    uniform sampler2D u_borderTex;  // rgb = political-darkened border color, a = isSea
+    uniform sampler2D u_ownerTex;   // rg = ownerLUT (16-bit), ba = playerRealmLUT (16-bit)
+    uniform sampler2D u_neutralTex; // rg = neutralEnclosedRealmLUT (16-bit), b = isLake
+
+    uniform vec2 u_mapSize;
+    uniform vec2 u_lutSize;
+    uniform float u_scale;   // view.scale * dpr
+    uniform vec2 u_offset;   // view.offX/offY * dpr
+    uniform float u_box;     // 1.0 or 3.0
+    uniform bool u_drawLocationBorders; // thin per-location outline - only past a min zoom, or it's just noise once zoomed out far enough that many locations share a screen pixel
+    uniform bool u_drawRealmBorders;    // player-realm border + coastline shading - always true now (see createMapView's render()); parameterized only so the shader keeps working if a caller ever needs to disable it
+    uniform float u_dilateRadius; // thickens the realm border to a visible line - a raw 1px edge is indistinguishable from the ordinary location-boundary line next to it
+    uniform float u_selectedId;   // -1 if nothing selected
+    uniform vec3 u_outsideColor;
+    uniform vec3 u_selectFill;
+    uniform vec3 u_selectEdge;
+
+    vec2 lutUV(float id) {
+      float x = mod(id, u_lutSize.x);
+      float y = floor(id / u_lutSize.x);
+      return (vec2(x, y) + 0.5) / u_lutSize;
+    }
+
+    bool inMap(vec2 srcPixel) {
+      return srcPixel.x >= 0.0 && srcPixel.y >= 0.0 && srcPixel.x < u_mapSize.x && srcPixel.y < u_mapSize.y;
+    }
+
+    float idAt(vec2 srcPixel) {
+      vec2 uv = (srcPixel + 0.5) / u_mapSize;
+      vec4 texel = texture(u_idTex, uv);
+      return floor(texel.r * 255.0 + 0.5) + floor(texel.g * 255.0 + 0.5) * 256.0;
+    }
+
+    vec2 srcPixelFor(vec2 destPixel) {
+      return floor((destPixel - u_offset) / u_scale);
+    }
+
+    // -1.0 means "off the edge of the map" (never counts as a border side);
+    // 0.0 means "not a player realm" (still a real value - a border between
+    // 0 and a nonzero realm is exactly a player/AI border).
+    float realmAt(vec2 destPixel) {
+      vec2 sp = srcPixelFor(destPixel);
+      if (!inMap(sp)) return -1.0;
+      vec4 ownerTexel = texture(u_ownerTex, lutUV(idAt(sp)));
+      return floor(ownerTexel.b * 255.0 + 0.5) + floor(ownerTexel.a * 255.0 + 0.5) * 256.0;
+    }
+
+    void main() {
+      vec2 srcPixel = srcPixelFor(v_destPixel);
+      if (!inMap(srcPixel)) {
+        outColor = vec4(u_outsideColor / 255.0, 1.0);
+        return;
+      }
+
+      float id = idAt(srcPixel);
+      vec4 fillHere = texture(u_fillTex, lutUV(id));
+      float isWaterHere = fillHere.a > 0.5 ? 1.0 : 0.0;
+      vec3 color = fillHere.rgb * 255.0;
+
+      if (u_box > 1.5) {
+        vec3 sum = vec3(0.0);
+        float n = 0.0;
+        for (float by = -1.0; by <= 1.0; by += 1.0) {
+          for (float bx = -1.0; bx <= 1.0; bx += 1.0) {
+            vec2 sp = srcPixel + vec2(bx, by);
+            if (!inMap(sp)) continue;
+            sum += texture(u_fillTex, lutUV(idAt(sp))).rgb * 255.0;
+            n += 1.0;
+          }
+        }
+        if (n > 0.0) color = sum / n;
+      }
+
+      vec2 rightSrc = srcPixelFor(v_destPixel + vec2(1.0, 0.0));
+      vec2 downSrc = srcPixelFor(v_destPixel + vec2(0.0, 1.0));
+      bool hasRight = inMap(rightSrc);
+      bool hasDown = inMap(downSrc);
+      float idRight = hasRight ? idAt(rightSrc) : id;
+      float idDown = hasDown ? idAt(downSrc) : id;
+
+      if (u_drawLocationBorders || u_drawRealmBorders) {
+        vec4 fillRight = texture(u_fillTex, lutUV(idRight));
+        vec4 fillDown = texture(u_fillTex, lutUV(idDown));
+
+        if (u_drawLocationBorders) {
+          bool rightLocBorder = hasRight && idRight != id && (isWaterHere < 0.5 || fillRight.a <= 0.5);
+          bool downLocBorder = hasDown && idDown != id && (isWaterHere < 0.5 || fillDown.a <= 0.5);
+          if (rightLocBorder || downLocBorder) color = vec3(0.0);
+        }
+
+      if (u_drawRealmBorders) {
+        vec4 ownerHereTexel = texture(u_ownerTex, lutUV(id));
+        vec4 ownerRightTexel = texture(u_ownerTex, lutUV(idRight));
+        vec4 ownerDownTexel = texture(u_ownerTex, lutUV(idDown));
+        float realmHere = floor(ownerHereTexel.b * 255.0 + 0.5) + floor(ownerHereTexel.a * 255.0 + 0.5) * 256.0;
+        float realmRight = floor(ownerRightTexel.b * 255.0 + 0.5) + floor(ownerRightTexel.a * 255.0 + 0.5) * 256.0;
+        float realmDown = floor(ownerDownTexel.b * 255.0 + 0.5) + floor(ownerDownTexel.a * 255.0 + 0.5) * 256.0;
+
+        vec4 borderRightTexel = texture(u_borderTex, lutUV(idRight));
+        vec4 borderDownTexel = texture(u_borderTex, lutUV(idDown));
+        float seaHere = texture(u_borderTex, lutUV(id)).a > 0.5 ? 1.0 : 0.0;
+        float rightWater = hasRight ? (fillRight.a > 0.5 ? 1.0 : 0.0) : isWaterHere;
+        float downWater = hasDown ? (fillDown.a > 0.5 ? 1.0 : 0.0) : isWaterHere;
+        float rightSea = hasRight ? (borderRightTexel.a > 0.5 ? 1.0 : 0.0) : 0.0;
+        float downSea = hasDown ? (borderDownTexel.a > 0.5 ? 1.0 : 0.0) : 0.0;
+
+        vec4 neutralHereTexel = texture(u_neutralTex, lutUV(id));
+        vec4 neutralRightTexel = texture(u_neutralTex, lutUV(idRight));
+        vec4 neutralDownTexel = texture(u_neutralTex, lutUV(idDown));
+        float neutralHere = floor(neutralHereTexel.r * 255.0 + 0.5) + floor(neutralHereTexel.g * 255.0 + 0.5) * 256.0;
+        float neutralRight = floor(neutralRightTexel.r * 255.0 + 0.5) + floor(neutralRightTexel.g * 255.0 + 0.5) * 256.0;
+        float neutralDown = floor(neutralDownTexel.r * 255.0 + 0.5) + floor(neutralDownTexel.g * 255.0 + 0.5) * 256.0;
+        float lakeRight = hasRight ? (neutralRightTexel.b > 0.5 ? 1.0 : 0.0) : 0.0;
+        float lakeDown = hasDown ? (neutralDownTexel.b > 0.5 ? 1.0 : 0.0) : 0.0;
+
+        bool rightSuppressed = hasRight && ((neutralRight != 0.0 && neutralRight == realmHere) || (neutralHere != 0.0 && neutralHere == realmRight));
+        bool downSuppressed = hasDown && ((neutralDown != 0.0 && neutralDown == realmHere) || (neutralHere != 0.0 && neutralHere == realmDown));
+
+        bool rightRealmBorder = hasRight && lakeRight < 0.5 && isWaterHere < 0.5 && rightWater < 0.5 && realmHere != realmRight && !rightSuppressed;
+        bool downRealmBorder = hasDown && lakeDown < 0.5 && isWaterHere < 0.5 && downWater < 0.5 && realmHere != realmDown && !downSuppressed;
+
+        bool rightCoastHere = hasRight && rightSea > 0.5 && realmHere != 0.0 && isWaterHere < 0.5;
+        bool rightCoastNeighbor = hasRight && seaHere > 0.5 && realmRight != 0.0 && rightWater < 0.5;
+        bool downCoastHere = hasDown && downSea > 0.5 && realmHere != 0.0 && isWaterHere < 0.5;
+        bool downCoastNeighbor = hasDown && seaHere > 0.5 && realmDown != 0.0 && downWater < 0.5;
+        bool rightCoastOutline = rightCoastHere || rightCoastNeighbor;
+        bool downCoastOutline = downCoastHere || downCoastNeighbor;
+
+        bool nearRealmBorder = rightRealmBorder || rightCoastOutline || downRealmBorder || downCoastOutline;
+        // A raw 1px-wide edge is indistinguishable from the ordinary black
+        // location-boundary line that's already drawn everywhere - CPU dilates
+        // this same edge into a several-px-thick line so player/AI realm
+        // borders actually read as a distinct feature. Cheap here since it
+        // only runs on the (much smaller) viewport, not the full 134M-pixel
+        // source, and only when settled (u_drawRealmBorders is false while
+        // dragging).
+        if (!nearRealmBorder && u_dilateRadius > 1.5) {
+          float r = min(u_dilateRadius, 6.0);
+          for (float dy = -6.0; dy <= 6.0 && !nearRealmBorder; dy += 1.0) {
+            if (abs(dy) > r) continue;
+            for (float dx = -6.0; dx <= 6.0 && !nearRealmBorder; dx += 1.0) {
+              if (abs(dx) > r || (dx == 0.0 && dy == 0.0)) continue;
+              float otherRealm = realmAt(v_destPixel + vec2(dx, dy));
+              if (otherRealm >= 0.0 && otherRealm != realmHere && (otherRealm > 0.0 || realmHere > 0.0)) {
+                nearRealmBorder = true;
+              }
+            }
+          }
+        }
+
+        if (nearRealmBorder) {
+          color = texture(u_borderTex, lutUV(id)).rgb * 255.0;
+        } else if ((hasRight && isWaterHere != rightWater) || (hasDown && isWaterHere != downWater)) {
+          color *= 0.6;
+        }
+      }
+      }
+
+      if (u_selectedId >= 0.0 && id == u_selectedId) {
+        color = color * 0.45 + u_selectFill * 0.55;
+        bool edge = !hasRight || idRight != id || !hasDown || idDown != id ||
+          !inMap(srcPixelFor(v_destPixel + vec2(-1.0, 0.0))) || idAt(srcPixelFor(v_destPixel + vec2(-1.0, 0.0))) != id ||
+          !inMap(srcPixelFor(v_destPixel + vec2(0.0, -1.0))) || idAt(srcPixelFor(v_destPixel + vec2(0.0, -1.0))) != id;
+        if (edge) color = u_selectEdge;
+      }
+
+      outColor = vec4(color / 255.0, 1.0);
+    }
+  `;
+
+  // Builds the small per-id lookup textures the fragment shader above reads:
+  // one row of RGBA8 texels per id, wide enough (LUT_TEX_W) that even a
+  // large id set stays a modest few-hundred-KB texture. Static fields
+  // (owner/realm/water/sea/lake) are packed once per session; fill/border
+  // colors get repacked whenever buildLUTs() reruns (mode switch, vassal
+  // toggle, trade-good focus).
+  function packStaticLutTextures(maxId, staticLuts) {
+    const w = LUT_TEX_W;
+    const h = Math.max(1, Math.ceil((maxId + 1) / w));
+    const owner = new Uint8Array(w * h * 4);
+    const neutral = new Uint8Array(w * h * 4);
+    for (let id = 0; id <= maxId; id++) {
+      const o = id * 4;
+      const ownerId = staticLuts.ownerLUT[id] || 0;
+      const realmId = staticLuts.playerRealmLUT[id] || 0;
+      owner[o] = ownerId & 0xff;
+      owner[o + 1] = (ownerId >> 8) & 0xff;
+      owner[o + 2] = realmId & 0xff;
+      owner[o + 3] = (realmId >> 8) & 0xff;
+      const neutralId = staticLuts.neutralEnclosedRealmLUT[id] || 0;
+      neutral[o] = neutralId & 0xff;
+      neutral[o + 1] = (neutralId >> 8) & 0xff;
+      neutral[o + 2] = staticLuts.isLake[id] ? 255 : 0;
+    }
+    return { w, h, owner, neutral };
+  }
+
+  function packModeLutTextures(maxId, w, h, luts, isWater, isSea) {
+    const fill = new Uint8Array(w * h * 4);
+    const border = new Uint8Array(w * h * 4);
+    for (let id = 0; id <= maxId; id++) {
+      const o = id * 4;
+      fill[o] = luts.lutR[id];
+      fill[o + 1] = luts.lutG[id];
+      fill[o + 2] = luts.lutB[id];
+      fill[o + 3] = isWater[id] ? 255 : 0;
+      border[o] = luts.borderR[id];
+      border[o + 1] = luts.borderG[id];
+      border[o + 2] = luts.borderB[id];
+      border[o + 3] = isSea[id] ? 255 : 0;
+    }
+    return { fill, border };
+  }
+
+  // Tries to stand up a WebGL2 renderer for the given canvas; returns null
+  // (caller falls back to the CPU renderViewport()) if WebGL2 isn't
+  // available at all, which should only happen on very old hardware/drivers.
+  function createGLMapRenderer(canvas, idImage, maxId, initialLuts) {
+    const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+    if (!gl) return null;
+
+    let program;
+    try {
+      program = createGLProgram(gl, MAP_VERTEX_SHADER_SRC, MAP_FRAGMENT_SHADER_SRC);
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+    gl.useProgram(program);
+
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const posLoc = gl.getAttribLocation(program, "a_pos");
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    const u = {};
+    for (const name of [
+      "u_destSize",
+      "u_mapSize",
+      "u_lutSize",
+      "u_scale",
+      "u_offset",
+      "u_box",
+      "u_drawLocationBorders",
+      "u_drawRealmBorders",
+      "u_dilateRadius",
+      "u_selectedId",
+      "u_outsideColor",
+      "u_selectFill",
+      "u_selectEdge",
+      "u_idTex",
+      "u_fillTex",
+      "u_borderTex",
+      "u_ownerTex",
+      "u_neutralTex",
+    ]) {
+      u[name] = gl.getUniformLocation(program, name);
+    }
+
+    function makeTexture(unit) {
+      const tex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+
+    const idTex = makeTexture(0);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, idImage);
+
+    const fillTex = makeTexture(1);
+    const borderTex = makeTexture(2);
+    const ownerTex = makeTexture(3);
+    const neutralTex = makeTexture(4);
+
+    const staticLuts = packStaticLutTextures(maxId, initialLuts);
+    const lutW = staticLuts.w;
+    const lutH = staticLuts.h;
+    gl.activeTexture(gl.TEXTURE0 + 3);
+    gl.bindTexture(gl.TEXTURE_2D, ownerTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, staticLuts.owner);
+    gl.activeTexture(gl.TEXTURE0 + 4);
+    gl.bindTexture(gl.TEXTURE_2D, neutralTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, staticLuts.neutral);
+
+    function setModeLuts(luts) {
+      const { fill, border } = packModeLutTextures(maxId, lutW, lutH, luts, initialLuts.isWater, initialLuts.isSea);
+      gl.activeTexture(gl.TEXTURE0 + 1);
+      gl.bindTexture(gl.TEXTURE_2D, fillTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, fill);
+      gl.activeTexture(gl.TEXTURE0 + 2);
+      gl.bindTexture(gl.TEXTURE_2D, borderTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, border);
+    }
+
+    function render(destW, destH, view, dpr, box, drawLocationBorders, drawRealmBorders, selectedId) {
+      if (canvas.width !== destW) canvas.width = destW;
+      if (canvas.height !== destH) canvas.height = destH;
+      gl.viewport(0, 0, destW, destH);
+      gl.useProgram(program);
+
+      gl.uniform2f(u.u_destSize, destW, destH);
+      gl.uniform2f(u.u_mapSize, MAP_W, MAP_H);
+      gl.uniform2f(u.u_lutSize, lutW, lutH);
+      gl.uniform1f(u.u_scale, view.scale * dpr);
+      gl.uniform2f(u.u_offset, view.offX * dpr, view.offY * dpr);
+      gl.uniform1f(u.u_box, box);
+      gl.uniform1i(u.u_drawLocationBorders, drawLocationBorders ? 1 : 0);
+      gl.uniform1i(u.u_drawRealmBorders, drawRealmBorders ? 1 : 0);
+      // Mirrors renderViewport()'s CPU dilation radius formula exactly, so
+      // the border reads the same thickness either way.
+      gl.uniform1f(u.u_dilateRadius, Math.max(1, Math.round((1.5 + (box > 1 ? box - 1 : 0)) * dpr)));
+      gl.uniform1f(u.u_selectedId, typeof selectedId === "number" && selectedId > 0 ? selectedId : -1);
+      gl.uniform3f(u.u_outsideColor, OUTSIDE_MAP_COLOR[0], OUTSIDE_MAP_COLOR[1], OUTSIDE_MAP_COLOR[2]);
+      gl.uniform3f(u.u_selectFill, 255, 245, 135);
+      gl.uniform3f(u.u_selectEdge, 255, 255, 255);
+
+      gl.uniform1i(u.u_idTex, 0);
+      gl.uniform1i(u.u_fillTex, 1);
+      gl.uniform1i(u.u_borderTex, 2);
+      gl.uniform1i(u.u_ownerTex, 3);
+      gl.uniform1i(u.u_neutralTex, 4);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    return { render, setModeLuts };
+  }
+
   // Renders only the currently-visible source rectangle (per `view` and the
   // wrap's current CSS box) into a canvas sized to the viewport itself
   // (times devicePixelRatio) - not the old approach of always materializing
@@ -801,6 +1328,9 @@
   // what made the old border look "patchy". Comparing at output resolution
   // keeps the line a consistent ~2-3 screen px wide at any zoom level, and
   // it's cheap because destW*destH is a few million pixels, not 134M.
+  //
+  // This is now the WebGL renderer's fallback path (see createGLMapRenderer
+  // above) - only used when WebGL2 isn't available at all.
   function renderViewport(ctx, canvas, wrapCssW, wrapCssH, dpr, view, idGrid, luts, selectedId) {
     const destW = Math.max(1, Math.round(wrapCssW * dpr));
     const destH = Math.max(1, Math.round(wrapCssH * dpr));
@@ -811,7 +1341,6 @@
     const s = view.scale * dpr;
     const ox = view.offX * dpr;
     const oy = view.offY * dpr;
-    const fast = !!view.fast;
 
     let cache = canvas._mapRenderCache;
     const cellCount = destW * destH;
@@ -902,7 +1431,7 @@
     }
 
     const COAST_SHADE = 0.6;
-    const drawDetailedBorders = !fast && s >= LOCATION_BOUNDARY_MIN_SCALE;
+    const drawDetailedBorders = s >= LOCATION_BOUNDARY_MIN_SCALE;
     if (drawDetailedBorders) {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
@@ -960,7 +1489,7 @@
     // and no border was drawn between them - the bug behind "border between
     // players still not working".
     let hasPlayerBoundary = false;
-    if (!fast) {
+    {
       for (let dy = 0; dy < destH; dy++) {
         const destRow = dy * destW;
         const hasDown = dy + 1 < destH;
@@ -1133,42 +1662,52 @@
     }
 
     ctx.putImageData(imgData, 0, 0);
+    drawLabelOverlay(ctx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, view.scale);
+  }
 
-    if (!fast && playerLabels && playerLabels.length) {
-      ctx.save();
-      ctx.font = `600 ${Math.round(16 * dpr)}px ${PLAYER_LABEL_FONT}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.lineWidth = Math.max(4, 4 * dpr);
-      ctx.strokeStyle = "rgba(8, 8, 8, 0.94)";
-      ctx.fillStyle = "rgba(244, 232, 188, 0.98)";
+  // Shared between the CPU renderViewport() above (drawing straight onto
+  // its own already-painted 2D canvas) and the WebGL renderer below (drawing
+  // onto a separate transparent overlay canvas stacked on top of the GPU-
+  // rendered one, since a canvas can only ever have one kind of rendering
+  // context) - same label positions/styling either way. Callers are
+  // responsible for clearing `targetCtx` first if it needs clearing (the
+  // CPU path doesn't - putImageData just overwrote it).
+  function drawLabelOverlay(targetCtx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, viewScale) {
+    if (playerLabels && playerLabels.length) {
+      targetCtx.save();
+      targetCtx.font = `600 ${Math.round(16 * dpr)}px ${PLAYER_LABEL_FONT}`;
+      targetCtx.textAlign = "center";
+      targetCtx.textBaseline = "middle";
+      targetCtx.lineWidth = Math.max(4, 4 * dpr);
+      targetCtx.strokeStyle = "rgba(8, 8, 8, 0.94)";
+      targetCtx.fillStyle = "rgba(244, 232, 188, 0.98)";
       for (const label of playerLabels) {
         const x = label.x * s + ox;
         const y = label.y * s + oy;
         if (x < -80 || y < -20 || x > destW + 80 || y > destH + 20) continue;
         const text = label.text.toUpperCase();
-        ctx.strokeText(text, x, y);
-        ctx.fillText(text, x, y);
+        targetCtx.strokeText(text, x, y);
+        targetCtx.fillText(text, x, y);
       }
-      ctx.restore();
+      targetCtx.restore();
     }
 
-    if (!fast && tradeGoodLabels && tradeGoodLabels.length && view.scale > 0.28) {
-      ctx.save();
-      ctx.font = `700 ${Math.round(11 * dpr)}px ${PLAYER_LABEL_FONT}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.lineWidth = Math.max(3, 3 * dpr);
-      ctx.strokeStyle = "rgba(5, 7, 10, 0.88)";
-      ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    if (tradeGoodLabels && tradeGoodLabels.length && viewScale > 0.28) {
+      targetCtx.save();
+      targetCtx.font = `700 ${Math.round(11 * dpr)}px ${PLAYER_LABEL_FONT}`;
+      targetCtx.textAlign = "center";
+      targetCtx.textBaseline = "middle";
+      targetCtx.lineWidth = Math.max(3, 3 * dpr);
+      targetCtx.strokeStyle = "rgba(5, 7, 10, 0.88)";
+      targetCtx.fillStyle = "rgba(255, 255, 255, 0.92)";
       for (const label of tradeGoodLabels) {
         const x = label.x * s + ox;
         const y = label.y * s + oy;
         if (x < -40 || y < -20 || x > destW + 40 || y > destH + 20) continue;
-        ctx.strokeText(label.text, x, y);
-        ctx.fillText(label.text, x, y);
+        targetCtx.strokeText(label.text, x, y);
+        targetCtx.fillText(label.text, x, y);
       }
-      ctx.restore();
+      targetCtx.restore();
     }
   }
 
@@ -1203,14 +1742,15 @@
     }
   }
 
-  function computePlayerLabels(idGrid, countryByNumber) {
+  function computePlayerLabels(idGrid, countryByNumber, excludedPlayers) {
     // Straightforward: find each player country's capital location on the
     // map and put the label directly on it. Scans the full grid once (a
     // plain Map lookup per pixel) rather than sampling on a stride, so even
     // a tiny capital province is guaranteed to be found.
     const capitalIdToCountry = new Map();
     for (const country of countryByNumber.values()) {
-      if (country.players && country.players.length && country.capital) {
+      const players = visiblePlayers(country.players, excludedPlayers);
+      if (players.length && country.capital) {
         capitalIdToCountry.set(country.capital, country.number);
       }
     }
@@ -1228,7 +1768,7 @@
     const labels = [];
     for (const [countryNumber, { x, y }] of points.entries()) {
       const country = countryByNumber.get(countryNumber);
-      labels.push({ x, y, text: country.players.map(titleCaseName).join(", ") });
+      labels.push({ x, y, text: visiblePlayers(country.players, excludedPlayers).map(titleCaseName).join(", ") });
     }
     return labels;
   }
@@ -1284,14 +1824,15 @@
   // prior session before building the next one.
   let activeSession = null;
 
-  async function createMapView(container, result) {
+  async function createMapView(container, result, excludedPlayers) {
     if (activeSession) {
       activeSession.abortController.abort();
       activeSession.resizeObserver.disconnect();
       activeSession = null;
     }
 
-    const [idGrid, locationsMeta] = await Promise.all([loadLocationIdGrid(), loadLocationNames()]);
+    const { ids: idGrid, image: idImage } = await loadLocationIdGrid();
+    const locationsMeta = await loadLocationNames();
     applyProvinceOwnerFallback(result, locationsMeta);
 
     container.innerHTML = "";
@@ -1302,6 +1843,15 @@
     const canvasWrap = document.createElement("div");
     canvasWrap.className = "map-canvas-wrap";
     const canvas = document.createElement("canvas");
+    // Text labels (player/trade-good names) are drawn on a separate 2D
+    // canvas stacked on top of `canvas` via CSS, rather than onto `canvas`
+    // itself - the WebGL renderer below owns `canvas` (a canvas element can
+    // only ever have one kind of rendering context), so text still needs an
+    // ordinary 2D context to land on. Transparent background + pointer-
+    // events:none so it's purely a visual overlay; all mouse handling stays
+    // on `canvas`/`canvasWrap` exactly as before.
+    const labelCanvas = document.createElement("canvas");
+    labelCanvas.className = "map-label-overlay";
     const tooltip = document.createElement("div");
     tooltip.className = "map-tooltip";
     tooltip.hidden = true;
@@ -1315,6 +1865,7 @@
     const legendEl = document.createElement("div");
     legendEl.className = "map-legend";
     canvasWrap.appendChild(canvas);
+    canvasWrap.appendChild(labelCanvas);
     canvasWrap.appendChild(tooltip);
     mapBody.appendChild(canvasWrap);
     mapBody.appendChild(toolbar);
@@ -1323,8 +1874,16 @@
     mapBody.appendChild(details);
     container.appendChild(mapBody);
 
-    const ctx = canvas.getContext("2d");
-    const mapState = { vassalShading: true, focusCountry: 0, focusTradeGood: null };
+    // Try WebGL2 first - it must be the *first* getContext() call on this
+    // canvas, since a canvas element commits to one context type for life.
+    // `glRenderer` stays undefined until the first buildLUTs() result is
+    // available (render() below falls back to the CPU path until then);
+    // null means WebGL2 genuinely isn't available on this machine and the
+    // CPU renderViewport() path (using `ctx`) is used for the whole session.
+    let glRenderer;
+    let ctx = null;
+    const labelCtx = labelCanvas.getContext("2d");
+    const mapState = { vassalShading: true, focusCountry: 0, focusTradeGood: null, excludedPlayers: excludedPlayers || new Set() };
     const { modes, politicalColor, marketName, updateMetricScale } = buildMapModes(result, locationsMeta, mapState);
     let currentMode = modes.political;
     let selectedLocationId = 0;
@@ -1339,13 +1898,14 @@
     const subjectToOverlord = new Map((result.dependencies || []).map((d) => [d.subject, d.overlord]));
     const cultureByNumber = new Map((result.cultures || []).map((c) => [c.number, c]));
     const religionByNumber = new Map((result.religions || []).map((r) => [r.number, r]));
-    const playerLabels = computePlayerLabels(idGrid, countryByNumber);
+    const playerLabels = computePlayerLabels(idGrid, countryByNumber, mapState.excludedPlayers);
     const tradeGoodLabels = computeTradeGoodLabels(idGrid, locByNumber, locationsMeta);
 
     function countryLabel(countryNumber) {
       const country = countryByNumber.get(countryNumber);
       if (!country) return countryNumber ? `#${countryNumber}` : null;
-      const playerText = country.players && country.players.length ? ` - ${country.players.map(titleCaseName).join(", ")}` : "";
+      const players = visiblePlayers(country.players, mapState.excludedPlayers);
+      const playerText = players.length ? ` - ${players.map(titleCaseName).join(", ")}` : "";
       return `${country.tag || "?"} (#${country.number})${playerText}`;
     }
 
@@ -1788,8 +2348,8 @@
               <div class="demographic-pie-tax" style="background:conic-gradient(${taxSegments.join(", ")})"></div>
             </div>
             <div class="demographic-summary">
-              ${detailStat("Weighted Tax / 1k People", fmtNum(summary.overallEfficiency, 4))}
-              ${detailStat("Total Group Tax", fmtNum(summary.totalTax, 3))}
+              ${detailStat("Weighted Tax / 1k People", fmtNum(summary.overallEfficiency, 4) + " tax")}
+              ${detailStat("Total Group Tax", fmtNum(summary.totalTax, 3) + " tax")}
             </div>
           </div>
           <table class="demographic-tax-table">
@@ -1821,7 +2381,8 @@
       if (!country) return "";
       const rows = countryOwnedLocations(countryNumber);
       const capitalMeta = country.capital && locationsMeta[country.capital];
-      const playerText = country.players && country.players.length ? country.players.map(titleCaseName).join(", ") : "AI";
+      const visibleCountryPlayers = visiblePlayers(country.players, mapState.excludedPlayers);
+      const playerText = visibleCountryPlayers.length ? visibleCountryPlayers.map(titleCaseName).join(", ") : "AI";
       const totalPop = sumField(rows, "population");
       const totalDev = sumField(rows, "development");
       const totalTax = sumField(rows, "tax");
@@ -1854,6 +2415,7 @@
           </div>
           <button type="button" class="location-detail-close country-detail-close" title="Clear country focus">x</button>
         </div>
+        <h4 class="location-detail-stats-label">National Stats</h4>
         <div class="location-detail-stats">${stats}</div>
         ${demographicTaxChartHtml(rows)}
         <section class="location-detail-section">
@@ -1901,7 +2463,7 @@
         detailStat("Market Access", fmtPercent(loc.marketAccess, 1)),
         detailStat("Market Attraction", fmtPercent(loc.marketAttraction, 1)),
         !isWater && detailStat("Raw Material", humanize(loc.rawMaterial)),
-        !isWater && detailStat("Raw Material Capacity", fmtNum(loc.maxRawMaterialWorkers, 0)),
+        !isWater && detailStat("Raw Material Capacity", typeof loc.maxRawMaterialWorkers === "number" ? fmtNum(loc.maxRawMaterialWorkers, 0) + " RGO capacity" : "&mdash;"),
         !isWater && detailStat("Culture", definitionNameFor(cultureByNumber, loc.culture, "Culture")),
         !isWater && detailStat("Religion", definitionNameFor(religionByNumber, loc.religion, "Religion")),
         !isWater && detailStat("Language", humanize(loc.language)),
@@ -1914,8 +2476,12 @@
             `<tr class="demographic-row" style="--demographic-color:${popClassColor(name)}"><td>${popClassLabelHtml(name, name)}</td><td class="num">${fmtNum(value, 4)}</td></tr>`
         )
         .join("");
+      // Institutions store either a 0-100 embrace/progress number, or the
+      // literal string "yes" once fully established (no numeric field at
+      // that point) - normalize "yes" to 100 so it renders as a percentage
+      // instead of falling through fmtNum() as "NaN".
       const institutionRows = sortedEntries(loc.institutions)
-        .map(([name, value]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(value, 1)}</td></tr>`)
+        .map(([name, value]) => `<tr><td>${humanize(name)}</td><td class="num">${fmtNum(value === "yes" ? 100 : value, 1)}%</td></tr>`)
         .join("");
       const popRows = (loc.populationClasses || [])
         .map(
@@ -1941,14 +2507,15 @@
             .map((item) => `<div class="location-context-pill"><span>${escapeHtml(item.label)}</span><strong>${item.value}</strong></div>`)
             .join("")}
         </div>
+        <h4 class="location-detail-stats-label">Location Stats</h4>
         <div class="location-detail-stats">${stats}</div>
         ${
           isWater
             ? ""
             : `
         ${section("Demography", popRows ? `<table class="location-demography-table"><thead><tr><th>Class</th><th>Total</th><th>Unemp.</th></tr></thead><tbody>${popRows}</tbody></table>` : "", "No population data")}
-        ${section("Estate Tax", estateTaxRows ? `<table class="location-two-col-table"><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
-        ${section("Institutions", institutionRows ? `<table class="location-two-col-table"><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
+        ${section("Estate Tax", estateTaxRows ? `<table class="location-two-col-table"><thead><tr><th>Estate</th><th>Tax Base</th></tr></thead><tbody>${estateTaxRows}</tbody></table>` : "", "No estate tax data")}
+        ${section("Institutions", institutionRows ? `<table class="location-two-col-table"><thead><tr><th>Institution</th><th>Progress</th></tr></thead><tbody>${institutionRows}</tbody></table>` : "", "No institution data")}
         <section class="location-detail-section building-detail-section">
           <h4>Buildings</h4>
           ${buildingTabsHtml(loc)}
@@ -2091,7 +2658,7 @@
         }
         chain.push(current);
         const country = countryByNumber.get(current);
-        if (country && country.players && country.players.length > 0) {
+        if (country && visiblePlayers(country.players, mapState.excludedPlayers).length > 0) {
           root = current;
           break;
         }
@@ -2188,10 +2755,11 @@
 
     function firstPlayerCountry() {
       for (const player of result.players || []) {
+        if (mapState.excludedPlayers.has(player.name)) continue;
         const country = countryByNumber.get(player.countryNumber);
         if (country) return country;
       }
-      return (result.countries || []).find((country) => country.players && country.players.length) || null;
+      return (result.countries || []).find((country) => visiblePlayers(country.players, mapState.excludedPlayers).length) || null;
     }
 
     function estimateFootprints(targetIds, step) {
@@ -2284,6 +2852,21 @@
     function render() {
       const rect = canvasWrap.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
+      if (glRenderer) {
+        const destW = Math.max(1, Math.round(rect.width * DPR));
+        const destH = Math.max(1, Math.round(rect.height * DPR));
+        const s = view.scale * DPR;
+        const step = 1 / s;
+        const box = step > 1.5 ? 3 : 1;
+        const drawLocationBorders = s >= LOCATION_BOUNDARY_MIN_SCALE;
+        glRenderer.render(destW, destH, view, DPR, box, drawLocationBorders, true, selectedLocationId);
+        if (labelCanvas.width !== destW) labelCanvas.width = destW;
+        if (labelCanvas.height !== destH) labelCanvas.height = destH;
+        labelCtx.clearRect(0, 0, destW, destH);
+        drawLabelOverlay(labelCtx, destW, destH, DPR, s, view.offX * DPR, view.offY * DPR, luts.playerLabels, luts.tradeGoodLabels, view.scale);
+        return;
+      }
+      if (!ctx) ctx = canvas.getContext("2d");
       renderViewport(ctx, canvas, rect.width, rect.height, DPR, view, idGrid, luts, selectedLocationId);
     }
 
@@ -2296,11 +2879,13 @@
       legendEl.hidden = false;
       const legend = currentMode.legend();
       if (legend.type === "gradient") {
-        // Sampled at 9 points (not the old fixed 4) so a non-linear curve -
-        // e.g. Markets' access gradient, which peaks at 75% instead of
-        // rising monotonically to 100% - actually shows its real shape
-        // instead of getting smoothed away between two far-apart stops.
-        const STEPS = 8;
+        // Sampled at many points (not just a handful of fixed stops) so any
+        // non-linear/non-smooth curve - Markets' access gradient (peaks at
+        // 75% instead of rising monotonically), or the heat palette's flat
+        // classed bands with hard edges at specific percentiles - actually
+        // shows its real shape instead of getting smoothed away between two
+        // far-apart stops.
+        const STEPS = 60;
         const stops = [];
         for (let i = 0; i <= STEPS; i++) {
           const t = i / STEPS;
@@ -2330,11 +2915,25 @@
 
     const redraw = () => {
       luts = buildLUTs();
+      if (glRenderer === undefined) {
+        // First redraw() of the session - now that a real `luts` exists,
+        // attempt to stand up the WebGL2 renderer. `null` means WebGL2 isn't
+        // available at all; render()/showLocationDetails() etc. fall back to
+        // the CPU renderViewport() for the rest of this session either way.
+        glRenderer = createGLMapRenderer(canvas, idImage, maxId, luts) || null;
+      }
+      if (glRenderer) glRenderer.setModeLuts(luts);
       render();
       renderLegend();
       updateTradeFocusControl();
     };
 
+    // Declared here (rather than down by setupPanZoom, where it's also used)
+    // so it's also in scope for the mode-icon <img> listener below - scoping
+    // that listener to the same session-teardown signal, rather than leaving
+    // it permanently attached, matches the pattern already used for every
+    // other listener in this function.
+    const abortController = new AbortController();
     Object.keys(modes).forEach((key) => {
       const btn = document.createElement("button");
       btn.className = "map-mode-btn";
@@ -2342,7 +2941,7 @@
       if (MAP_MODE_ICONS[key]) {
         btn.innerHTML = `<img class="map-mode-icon" src="${MAP_MODE_ICONS[key]}" alt="" loading="lazy"><span>${escapeHtml(modes[key].label)}</span>`;
         const img = btn.querySelector("img");
-        img.addEventListener("error", () => img.remove());
+        img.addEventListener("error", () => img.remove(), { signal: abortController.signal });
       } else {
         btn.textContent = modes[key].label;
       }
@@ -2397,7 +2996,6 @@
 
     zoomToInitialPlayerCountry();
     redraw();
-    const abortController = new AbortController();
     setupPanZoom(canvasWrap, canvas, tooltip, idGrid, locationsMeta, () => currentMode, view, fit, scheduleRender, showLocationDetails, abortController.signal);
     window.addEventListener(
       "keydown",
@@ -2439,15 +3037,6 @@
       view.offY = clampAxis(view.offY, view.scale, MAP_H, rect.height);
     }
 
-    let settleTimer = null;
-    function scheduleSettledRender() {
-      if (settleTimer) clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => {
-        view.fast = false;
-        scheduleRender();
-      }, 90);
-    }
-
     wrap.addEventListener(
       "wheel",
       (e) => {
@@ -2466,9 +3055,7 @@
         view.offY = cy - srcY * newScale;
         view.scale = newScale;
         clamp();
-        view.fast = true;
         scheduleRender();
-        scheduleSettledRender();
       },
       { passive: false }
     );
@@ -2507,7 +3094,6 @@
         view.offX = startOffX + dx;
         view.offY = startOffY + dy;
         clamp();
-        view.fast = true;
         tooltip.hidden = true;
         scheduleRender();
       },
@@ -2520,7 +3106,6 @@
         dragging = false;
         canvas.style.cursor = "grab";
         if (moved) {
-          view.fast = false;
           scheduleRender();
           setTimeout(() => (dragMoved = false), 0);
         }

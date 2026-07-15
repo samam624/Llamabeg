@@ -1475,9 +1475,36 @@
     return { wars, playerWhitePeaceCount, aiWhitePeaceCount };
   }
 
+  // "Which player names has the desktop tracker actually seen leave, as of
+  // the latest snapshot" - for auto-hiding a departed player from the map/
+  // Players table without the user needing to click Hide themselves (that
+  // button remains the MANUAL override; this is the automatic companion,
+  // per user request). Reuses the same control timeline computeFromLedger
+  // already builds for war-scoring's "player-departed" categorization
+  // (buildControlTimeline above) - a name counts as departed if it appears
+  // in ANY country's control timeline (it was really played by someone,
+  // not a parser artifact) but is absent from every country's LATEST known
+  // roster (nobody currently in control anywhere is that name). A player
+  // who switched countries mid-campaign still shows up in their new
+  // country's latest roster, so they're correctly NOT flagged departed.
+  function computeDepartedPlayers(snapshots) {
+    const timeline = buildControlTimeline(snapshots);
+    const everSeen = new Set();
+    const activeAtEnd = new Set();
+    for (const segments of timeline.values()) {
+      if (!segments.length) continue;
+      for (const seg of segments) for (const name of seg.players) everSeen.add(name);
+      for (const name of segments[segments.length - 1].players) activeAtEnd.add(name);
+    }
+    const departed = new Set();
+    for (const name of everSeen) if (!activeAtEnd.has(name)) departed.add(name);
+    return departed;
+  }
+
   return {
     computeLlamaScores,
     computeFromLedger,
+    computeDepartedPlayers,
     summarizeWars,
     overrideKey,
     warScoreFor,
