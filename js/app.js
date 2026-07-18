@@ -1440,6 +1440,41 @@
     }
   }
 
+  // Fallback for whenever the local recorder folder isn't available in THIS
+  // browser (a ?save= link opened by someone who never ran the Dashboard,
+  // or this browser just hasn't connected one) - fetches a static snapshot
+  // of the same campaign's ledger from Supabase instead, keyed by the
+  // save's own playthrough_id (from parsed metadata, not the filename - a
+  // shared/renamed file still carries its real playthrough_id internally).
+  // Only ever consulted AFTER every local lookup path has already failed
+  // (see call sites below), so a live local folder always wins when one is
+  // connected. Returns true if it found and loaded something.
+  async function tryRemoteCampaignLedger() {
+    if (typeof ShareStore === "undefined" || !ShareStore.fetchCampaignLedger) return false;
+    const playthroughId = latestResult && latestResult.metadata && latestResult.metadata.playthrough_id;
+    if (!playthroughId) return false;
+    const ledger = await ShareStore.fetchCampaignLedger(String(playthroughId)).catch(() => null);
+    if (!ledger || !ledger.snapshots.length) return false;
+    llamaSnapshotsLedger = ledger.snapshots;
+    llamaEventsLedger = ledger.events;
+    stopLedgerPolling(); // static snapshot, not a live local folder - nothing to poll
+    llamaConnectBtn.hidden = false; // still offer connecting a local folder for live updates
+    llamaConnectBtn.textContent = "Connect campaign folder…";
+    llamaConnectBtn.dataset.pending = "";
+    llamaDisconnectBtn.hidden = true;
+    llamaManualLoaderEl.hidden = true;
+    llamaAutoLinked = true;
+    setLlamaLinkStatus(`Loaded shared campaign ledger from the cloud (${ledger.snapshots.length} snapshot(s)) - connect a local recorder folder for live updates.`);
+    updateLlamaPanelVisibility();
+    renderLlamaScore();
+    if (latestResult) {
+      drawPlayerTable(latestResult);
+      renderTrends(latestResult);
+      refreshMapForExclusions();
+    }
+    return true;
+  }
+
   // Runs after every save load (see onParsed) - finds and loads THIS save's
   // own campaign specifically (not just whichever is newest), with no
   // manual "Choose File" round trip once a data folder has been connected
@@ -1450,24 +1485,28 @@
     llamaAutoLinked = false;
     llamaLinkStatusEl.hidden = true; // "Checking..." (set by the caller) stays in llamaAutoStatusEl until a real outcome replaces it below
     if (typeof LedgerConnect === "undefined" || !LedgerConnect.supported) {
+      if (await tryRemoteCampaignLedger()) return;
       llamaAutoStatusEl.textContent = "Auto-linking needs a Chromium-based browser (Chrome/Edge) - use Manual setup below instead.";
       updateLlamaPanelVisibility();
       return;
     }
     const key = campaignKeyFromFilename(currentSaveDisplayName);
     if (!key) {
+      if (await tryRemoteCampaignLedger()) return;
       llamaAutoStatusEl.textContent = "This save's filename doesn't look like a recorder-watched autosave - use Manual setup below to load its data.";
       updateLlamaPanelVisibility();
       return;
     }
     const handle = (ledgerConnection && ledgerConnection.dataDirHandle) || (await LedgerConnect.loadHandle());
     if (!handle) {
+      if (await tryRemoteCampaignLedger()) return;
       llamaAutoStatusEl.textContent = "No recorder folder connected yet - see the Llama Score User Manual below.";
       updateLlamaPanelVisibility();
       return;
     }
     const granted = await LedgerConnect.verifyPermission(handle, false);
     if (!granted) {
+      if (await tryRemoteCampaignLedger()) return;
       llamaAutoStatusEl.textContent = "Recorder folder was connected previously but needs re-granting - see Manual setup below.";
       llamaConnectBtn.hidden = false;
       llamaConnectBtn.textContent = "Reconnect campaign folder…";
@@ -1477,6 +1516,7 @@
     }
     const best = await LedgerConnect.findCampaignByKey(handle, key);
     if (!best) {
+      if (await tryRemoteCampaignLedger()) return;
       llamaAutoStatusEl.textContent = `No recorder data found yet for this save's campaign (${key}).`;
       updateLlamaPanelVisibility();
       return;

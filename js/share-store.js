@@ -95,5 +95,39 @@
     return JSON.parse(json);
   }
 
-  root.ShareStore = { isConfigured, upload, fetch: fetchShared, BUCKET };
+  // Fetch a campaign's full recorder ledger (snapshots + war-events) via the
+  // eu5_get_campaign_ledger() RPC (see supabase/migrations/20260711020000_
+  // eu5_llama_ledgers.sql) - the server-side twin of js/ledger-connect.js's
+  // readCampaignLedger, for whenever a browser has no local recorder folder
+  // connected (e.g. someone opening a ?save= link who was never running the
+  // Dashboard themselves). Rows only exist here once the campaign's owner
+  // has run `npm run data:import` - a manual, service-role-keyed step
+  // deliberately kept out of the browser (the anon key used here only ever
+  // gets read/SELECT access, per that migration's RLS policies).
+  // Returns null if unconfigured, the campaign isn't imported, or the
+  // request fails - callers treat null as "no shared ledger, fall back."
+  async function fetchCampaignLedger(campaignKey) {
+    const c = config();
+    if (!c || !c.supabaseUrl || !c.supabaseAnonKey || !campaignKey) return null;
+    const url = `${c.supabaseUrl}/rest/v1/rpc/eu5_get_campaign_ledger`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        apikey: c.supabaseAnonKey,
+        Authorization: `Bearer ${c.supabaseAnonKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ p_campaign_key: campaignKey }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || !data.campaign) return null; // no campaign row for this key
+    return {
+      campaign: data.campaign,
+      snapshots: Array.isArray(data.snapshots) ? data.snapshots : [],
+      events: Array.isArray(data.events) ? data.events : [],
+    };
+  }
+
+  root.ShareStore = { isConfigured, upload, fetch: fetchShared, fetchCampaignLedger, BUCKET };
 })(typeof self !== "undefined" ? self : this);
