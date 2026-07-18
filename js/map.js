@@ -177,6 +177,22 @@
     return idGridPromise;
   }
 
+  // Mode-toolbar icons come from the remote wiki host, and most of them
+  // start out inside a `hidden` dropdown group panel (Economy/Trade/
+  // Religion-Culture) with `loading="lazy"` - browsers don't fetch a lazy
+  // image at all while its ancestor is hidden, so the first time a user
+  // opened one of those dropdowns every icon in it visibly popped in one at
+  // a time. Firing all the requests off here (in parallel with the much
+  // slower idGrid decode below) means they're already sitting in the HTTP
+  // cache by the time any dropdown panel is ever opened.
+  let iconsPreloadPromise = null;
+  function preloadMapModeIcons() {
+    if (!iconsPreloadPromise) {
+      iconsPreloadPromise = Promise.all(Object.values(MAP_MODE_ICONS).map((src) => loadImage(src).catch(() => null)));
+    }
+    return iconsPreloadPromise;
+  }
+
   let locationNamesPromise = null;
   function loadLocationNames() {
     // Was `{ cache: "no-store" }` (no versioning at all) - changed to the
@@ -2279,6 +2295,7 @@
       activeSession = null;
     }
 
+    preloadMapModeIcons(); // fire-and-forget - warms the icon cache while the (slower) idGrid decode below runs
     const { ids: idGrid, image: idImage } = await loadLocationIdGrid();
     const locationsMeta = await loadLocationNames();
     applyProvinceOwnerFallback(result, locationsMeta);
@@ -3607,7 +3624,7 @@
       btn.title = modes[key].label;
       btn.dataset.modeKey = key;
       if (MAP_MODE_ICONS[key]) {
-        btn.innerHTML = `<img class="map-mode-icon" src="${MAP_MODE_ICONS[key]}" alt="" loading="lazy"><span>${escapeHtml(modes[key].label)}</span>`;
+        btn.innerHTML = `<img class="map-mode-icon" src="${MAP_MODE_ICONS[key]}" alt=""><span>${escapeHtml(modes[key].label)}</span>`;
         const img = btn.querySelector("img");
         img.addEventListener("error", () => img.remove(), { signal: abortController.signal });
       } else {
@@ -3649,7 +3666,7 @@
       groupBtn.dataset.groupKeys = keys.join(",");
       const repIcon = MAP_MODE_ICONS[keys[0]];
       groupBtn.innerHTML =
-        (repIcon ? `<img class="map-mode-icon" src="${repIcon}" alt="" loading="lazy">` : "") +
+        (repIcon ? `<img class="map-mode-icon" src="${repIcon}" alt="">` : "") +
         `<span>${escapeHtml(group.label)}</span><span class="map-mode-group-caret" aria-hidden="true">&#9662;</span>`;
       const repImg = groupBtn.querySelector("img");
       if (repImg) repImg.addEventListener("error", () => repImg.remove(), { signal: abortController.signal });

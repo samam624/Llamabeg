@@ -1830,6 +1830,13 @@
     { key: "navyShips", label: "Navy Size", numeric: true, render: (c) => fmtNum(c.navyShips, 0) },
   ];
 
+  // EU5 has no `slaves_estate` - `slaves` is only a pop TYPE (see
+  // pop_types/00_default.txt), and its pops fall under dhimmi_estate or
+  // peasants_estate depending on the country, never a distinct estate of
+  // their own. A "Slaves" entry here previously always rendered as an
+  // all-zero tab (no save data ever carries an estate_tax/taxRates key
+  // named "slaves") - that population's tax is already counted correctly
+  // under Commoners/Dhimmi above.
   const BASE_ESTATE_TAX_GROUPS = [
     { key: "commoners", label: "Commoners" },
     { key: "burghers", label: "Burghers" },
@@ -1838,7 +1845,6 @@
     { key: "tribesmen", label: "Tribesmen" },
     { key: "dhimmi", label: "Dhimmi" },
     { key: "cossacks", label: "Cossacks" },
-    { key: "slaves", label: "Slaves" },
   ];
   let activeEstateTaxGroups = BASE_ESTATE_TAX_GROUPS.slice();
 
