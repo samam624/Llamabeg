@@ -1085,6 +1085,98 @@
     return { snapshots: filteredSnapshots, events: filteredEvents };
   }
 
+  async function sha256Hex(text) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  function ledgerUploadIso(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  function uniqueSorted(values) {
+    return [...new Set(values.filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
+  }
+
+  // Reshapes this browser's own in-memory ledger (already read straight off
+  // the recorder's JSONL files, whether via the auto-connected folder or the
+  // manual file pickers) into the same campaign/snapshot/event row shapes
+  // scripts/import-llama-ledgers-to-supabase.js's loadCampaign() produces
+  // server-side - kept in lockstep with that function deliberately, so a
+  // "Share link" upload and a CLI `data:import` run land identical rows.
+  // Only ever called on data this browser already trusts (its own recorder
+  // output), so this is reshaping, not validating untrusted input.
+  async function shapeCampaignLedgerForUpload(campaignKey, snapshots, events) {
+    const shapedSnapshots = [];
+    for (let i = 0; i < snapshots.length; i++) {
+      const snapshot = snapshots[i];
+      const lineNumber = i + 1;
+      const sourceHash = snapshot.sourceHash || (await sha256Hex(`${campaignKey}:snapshot:${lineNumber}`));
+      shapedSnapshots.push({
+        campaign_key: snapshot.campaignKey || campaignKey,
+        source_hash: sourceHash,
+        line_number: lineNumber,
+        captured_at: ledgerUploadIso(snapshot.capturedAt),
+        source_file: snapshot.sourceFile || null,
+        game_date: snapshot.date || null,
+        game_year: Number.isFinite(snapshot.year) ? snapshot.year : null,
+        playthrough_name: snapshot.playthroughName || null,
+        game_version: snapshot.gameVersion || null,
+        player_country_count: Array.isArray(snapshot.playerCountries) ? snapshot.playerCountries.length : 0,
+        war_count: Array.isArray(snapshot.wars) ? snapshot.wars.length : 0,
+        war_filter: snapshot.warFilter || null,
+        snapshot,
+      });
+    }
+
+    const shapedEvents = [];
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+      const lineNumber = i + 1;
+      const sourceHash = event.sourceHash || null;
+      const eventId = await sha256Hex(`${campaignKey}:event:${lineNumber}:${sourceHash || ""}:${event.type || ""}:${event.warNumber || ""}`);
+      shapedEvents.push({
+        event_id: eventId,
+        campaign_key: campaignKey,
+        source_hash: sourceHash,
+        line_number: lineNumber,
+        event_type: event.type || null,
+        war_number: Number.isFinite(event.warNumber) ? event.warNumber : null,
+        game_date: event.date || null,
+        event,
+      });
+    }
+
+    const latest =
+      shapedSnapshots
+        .filter((row) => row.captured_at)
+        .slice()
+        .sort((a, b) => a.captured_at.localeCompare(b.captured_at))
+        .pop() || shapedSnapshots[shapedSnapshots.length - 1] || null;
+    const latestPlayers = latest && Array.isArray(latest.snapshot.playerCountries) ? latest.snapshot.playerCountries : [];
+    const playerNames = uniqueSorted(latestPlayers.flatMap((country) => (Array.isArray(country.players) ? country.players : [])));
+
+    const campaign = {
+      campaign_key: campaignKey,
+      playthrough_name: latest ? latest.playthrough_name : null,
+      game_version: latest ? latest.game_version : null,
+      latest_game_date: latest ? latest.game_date : null,
+      latest_game_year: latest ? latest.game_year : null,
+      latest_captured_at: latest ? latest.captured_at : null,
+      latest_source_hash: latest ? latest.source_hash : null,
+      snapshot_count: shapedSnapshots.length,
+      event_count: shapedEvents.length,
+      player_names: playerNames,
+      latest_players: latestPlayers,
+    };
+
+    return { campaign, snapshots: shapedSnapshots, events: shapedEvents };
+  }
+
   const LLAMA_LEDGER_WAR_COLUMNS = [
     { key: "startDate", label: "Started", render: (r) => escapeHtml(r.startDate || "-") },
     { key: "endDate", label: "Ended", render: (r) => escapeHtml(r.endDate || "-") },
@@ -2850,6 +2942,29 @@
     }, 2000);
   }
 
+  // Pushes whatever campaign ledger is CURRENTLY DISPLAYED on the Llama
+  // Score tab (however it got loaded - auto-connected folder, manual file
+  // pickers, or even a previous remote fetch) up to Supabase as part of
+  // "Share link", so a recipient with no recorder folder of their own still
+  // sees real war data instead of "no recorder ledger loaded" - see
+  // tryRemoteCampaignLedger's read side. Upsert-based (same as the CLI
+  // import script), so re-sharing after more games are recorded just adds
+  // to what's already there. Best-effort: a failure here shouldn't block
+  // the save link itself from being shared.
+  async function uploadCurrentLlamaLedger() {
+    if (typeof ShareStore === "undefined" || !ShareStore.uploadCampaignLedger) return;
+    if (!Array.isArray(llamaSnapshotsLedger) || !llamaSnapshotsLedger.length) return;
+    try {
+      const campaignKey = pickLatestCampaignKey(llamaSnapshotsLedger);
+      if (!campaignKey) return;
+      const { snapshots, events } = filterLedgerToCampaign(llamaSnapshotsLedger, llamaEventsLedger || [], campaignKey);
+      const { campaign, snapshots: shapedSnapshots, events: shapedEvents } = await shapeCampaignLedgerForUpload(campaignKey, snapshots, events);
+      await ShareStore.uploadCampaignLedger(campaign, shapedSnapshots, shapedEvents);
+    } catch (err) {
+      if (typeof console !== "undefined") console.warn("Ledger upload failed (save link was still shared):", err);
+    }
+  }
+
   // A configured backend turns "Copy link" into a real share (upload the
   // compressed save, then copy a link anyone can open); without one it stays
   // the old local-only copy. Label reflects which one you get.
@@ -2871,6 +2986,7 @@
       try {
         latestResult.__schemaVersion = RESULT_SCHEMA_VERSION;
         await ShareStore.upload(saveId, latestResult);
+        await uploadCurrentLlamaLedger();
         await copyToClipboard(location.href).catch(() => {});
         flashCopyLink("Link copied — anyone can view");
       } catch (err) {

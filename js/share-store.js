@@ -129,5 +129,48 @@
     };
   }
 
-  root.ShareStore = { isConfigured, upload, fetch: fetchShared, fetchCampaignLedger, BUCKET };
+  // Chunk sizes mirror scripts/import-llama-ledgers-to-supabase.js's
+  // TABLE_CHUNK_SIZES exactly - snapshot rows embed a large jsonb blob each,
+  // and a single request carrying too many of them hits the anon role's
+  // statement timeout (measured directly: 49 snapshots + 116 events in one
+  // combined call timed out; this project's own service-role CLI importer
+  // already learned the same lesson and chunks snapshots one at a time).
+  const LEDGER_SNAPSHOT_CHUNK_SIZE = 1;
+  const LEDGER_EVENT_CHUNK_SIZE = 100;
+
+  async function callLedgerRpc(fn, body) {
+    const c = config();
+    if (!c || !c.supabaseUrl || !c.supabaseAnonKey) throw new Error("Sharing backend not configured");
+    const res = await fetch(`${c.supabaseUrl}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: {
+        apikey: c.supabaseAnonKey,
+        Authorization: `Bearer ${c.supabaseAnonKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Ledger upload failed (${fn}, ${res.status}) ${text.slice(0, 200)}`);
+    }
+  }
+
+  // Push a campaign's ledger (already shaped by js/app.js's
+  // shapeCampaignLedgerForUpload to match the eu5_campaigns/
+  // eu5_campaign_snapshots/eu5_war_events row shapes) via three narrow
+  // RPCs - the write-side twin of fetchCampaignLedger above. Anon-callable
+  // by design (see that migration's comment) so "Share link" can push this
+  // browser's own currently-linked ledger with no service-role key involved.
+  async function uploadCampaignLedger(campaign, snapshots, events) {
+    await callLedgerRpc("eu5_upsert_campaign", { p_campaign: campaign });
+    for (let i = 0; i < snapshots.length; i += LEDGER_SNAPSHOT_CHUNK_SIZE) {
+      await callLedgerRpc("eu5_upsert_campaign_snapshots", { p_snapshots: snapshots.slice(i, i + LEDGER_SNAPSHOT_CHUNK_SIZE) });
+    }
+    for (let i = 0; i < events.length; i += LEDGER_EVENT_CHUNK_SIZE) {
+      await callLedgerRpc("eu5_upsert_campaign_events", { p_events: events.slice(i, i + LEDGER_EVENT_CHUNK_SIZE) });
+    }
+  }
+
+  root.ShareStore = { isConfigured, upload, fetch: fetchShared, fetchCampaignLedger, uploadCampaignLedger, BUCKET };
 })(typeof self !== "undefined" ? self : this);
