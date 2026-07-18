@@ -286,6 +286,44 @@ function readCampaignLedger(campaignKey) {
   return entry;
 }
 
+// --- hidden/departed players (per campaign, shared with the web app) ---
+//
+// A player who quietly stops showing up, with nobody else ever taking over
+// their seat, is genuinely invisible to the save/ledger data - confirmed by
+// direct inspection of a real campaign's own snapshots and raw save file
+// (see [[player_session_handling]]): the country's `players` list, and even
+// `ai_personality`, are byte-identical whether a human is still actively
+// connected or gave up on the campaign entirely. There is no field to auto-
+// detect this from, so this is a one-time manual action (the "Hide" button
+// below) rather than something the recorder can infer on its own.
+//
+// Stored as a small JSON file NEXT TO that campaign's own ledger
+// (data/campaigns/<key>/hidden-players.json, name -> in-game date they were
+// marked departed as of, or null if unknown) rather than in this app's own
+// settings/userData - so the SAME hide, made once here, is immediately
+// visible to the web app too (it already has read access to this same
+// campaign folder via "Connect campaign folder..."), and vice versa if the
+// web app ever writes one. `js/llama-score.js`'s computeFromLedger only
+// treats a war as excluded once it STARTED at-or-after the recorded date -
+// a war fought while the player was still genuinely active keeps its real
+// score, only wars against/by a phantom opponent get excluded. See
+// buildModeView below for how this gets threaded into scoring.
+function hiddenPlayersFile(campaignKey) {
+  return path.join(config.campaignsDir, campaignKey, "hidden-players.json");
+}
+function readHiddenPlayers(campaignKey) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(hiddenPlayersFile(campaignKey), "utf8"));
+    return new Map(Object.entries(raw));
+  } catch {
+    return new Map();
+  }
+}
+function writeHiddenPlayers(campaignKey, map) {
+  fs.mkdirSync(path.dirname(hiddenPlayersFile(campaignKey)), { recursive: true });
+  fs.writeFileSync(hiddenPlayersFile(campaignKey), JSON.stringify(Object.fromEntries(map), null, 2));
+}
+
 function countryLabel(countries, playerCountries, number) {
   const info = (countries && countries[number]) || (playerCountries || []).find((c) => c.number === number);
   return {
@@ -337,8 +375,8 @@ function buildOngoingWars(latestSnapshot, mode) {
     .sort((a, b) => String(b.startDate || "").localeCompare(String(a.startDate || "")));
 }
 
-function buildModeView(snapshots, events, mode) {
-  const { rows, leaderboard, latestSnapshot, unscoreableCount } = LlamaScore.computeFromLedger(snapshots, events, {}, new Set(), mode);
+function buildModeView(snapshots, events, mode, hiddenPlayers) {
+  const { rows, leaderboard, latestSnapshot, unscoreableCount } = LlamaScore.computeFromLedger(snapshots, events, {}, hiddenPlayers, mode);
   const { wars: concludedWars, playerWhitePeaceCount, aiWhitePeaceCount } = LlamaScore.summarizeWars(rows, mode);
   return {
     latestSnapshot,
@@ -367,14 +405,25 @@ function pushUpdate() {
   };
   if (campaignKey) {
     const { snapshots, events } = readCampaignLedger(campaignKey);
+    const hiddenPlayers = readHiddenPlayers(campaignKey);
+    // "Every automation flag enabled at once" (see js/llama-score.js's
+    // isFullyAutomated/computeAutomationDepartures) is a fully-automatic
+    // departure signal, confirmed against real data - merged in alongside
+    // the manual/shared hidden-players.json list (which wins on conflict,
+    // since an explicit human choice should never be silently overridden by
+    // an inferred one). No IPC/file write involved - purely computed fresh
+    // from the ledger every tick.
+    for (const [name, date] of LlamaScore.computeAutomationDepartures(snapshots)) {
+      if (!hiddenPlayers.has(name)) hiddenPlayers.set(name, date);
+    }
     // computeFromLedger/summarizeWars are called twice (once per mode) -
     // each call is independent/pure, so this is simply "score the same
     // ledger data twice under a different filter", not a duplicated recorder
     // scan or a second read of the files. latestSnapshot is identical either
     // way (it's derived from the snapshots themselves, not mode-dependent) -
     // taken from the pvp call for the header line.
-    const pvp = buildModeView(snapshots, events, "pvp");
-    const pve = buildModeView(snapshots, events, "pve");
+    const pvp = buildModeView(snapshots, events, "pvp", hiddenPlayers);
+    const pve = buildModeView(snapshots, events, "pve", hiddenPlayers);
     const latestSnapshot = pvp.latestSnapshot;
     // latestSnapshot itself (hundreds of countries' worth of data) is only
     // needed internally to build ongoingWars above - stripped before it goes
@@ -466,6 +515,33 @@ ipcMain.handle("dialog:pick-folder", async (_event, defaultPath) => {
 });
 
 ipcMain.handle("shell:open-path", (_event, targetPath) => shell.openPath(targetPath));
+
+// Marks `name` departed as of the CURRENT campaign's latest known in-game
+// date (state.lastDateByCampaign, already tracked by the recorder for other
+// purposes - no need to re-derive it from the ledger here) - see the
+// hidden-players.json comment above for why this can't be a fully automatic
+// detection. Applies to whichever campaign is actually being viewed right
+// now (respects the Campaign picker's pin), not necessarily the one the
+// recorder is live-scanning.
+ipcMain.handle("players:hide", (_event, name) => {
+  const campaignKey = currentCampaignKey();
+  if (!campaignKey || !name) return false;
+  const hidden = readHiddenPlayers(campaignKey);
+  hidden.set(name, (state.lastDateByCampaign && state.lastDateByCampaign[campaignKey]) || null);
+  writeHiddenPlayers(campaignKey, hidden);
+  pushUpdate();
+  return true;
+});
+
+ipcMain.handle("players:unhide", (_event, name) => {
+  const campaignKey = currentCampaignKey();
+  if (!campaignKey || !name) return false;
+  const hidden = readHiddenPlayers(campaignKey);
+  hidden.delete(name);
+  writeHiddenPlayers(campaignKey, hidden);
+  pushUpdate();
+  return true;
+});
 
 app.whenReady().then(async () => {
   createWindow();

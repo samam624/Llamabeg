@@ -5,6 +5,12 @@
 # Map tile/location data - not bundled per README, licensing.
 /map_data/
 
+# Extracted game-design data (e.g. modifier sources) pulled from the local
+# EU5 install by tools/scan-modifier-sources.js - Paradox's own design/balance
+# data, same never-commit treatment as map_data/'s raw files. Regenerate
+# locally by pointing the tool at your own install; see tools/README.md.
+/game_data/
+
 # Intermediate input for tools/bake-home-hero.js (a per-location ownership
 # snapshot derived from a chosen save) - not needed at runtime once
 # assets/home-hero-map.jpg is baked and committed; regenerate on demand.
@@ -18,6 +24,13 @@
 .env
 .env.local
 .env.*.local
+
+# Generated public browser config (Supabase URL + anon key) - kept out of
+# source even though both values are public-safe. Netlify generates its own
+# at build time; locally, `node scripts/write-config.js` regenerates it. See
+# config.example.js. Lives at root (not /js/) so it dodges the immutable
+# cache header /js/* gets.
+/config.js
 
 # Netlify local project metadata.
 .netlify/

@@ -316,20 +316,32 @@ body.map-view-active .map-panel {
 }
 
 body.map-view-active .map-toolbar {
+  /* Sits beside the app-tabs nav on the same top row, squeezed into
+     `calc(100vw - 9rem-ish)` of horizontal space, rather than getting its
+     own full-width row below the tabs - collapsing most of the mode buttons
+     into the Economy/Trade/Demographic dropdown groups (see TOOLBAR_GROUPS
+     in js/map.js) got the always-visible control count down from 13 to 7,
+     which fits back in this shared strip at typical window widths without
+     re-triggering the overflow that originally forced the full-width/2-row
+     layout. Still wraps onto more rows if the window's narrow enough to
+     need it (flex-wrap stays on) - `.location-details`/`.country-details`
+     below read this box's REAL rendered height back via `--map-toolbar-h`
+     (js/map.js sets it, kept live with a ResizeObserver on the toolbar
+     itself) rather than assuming a fixed row count, so however many rows
+     it ends up wrapping to, the detail panels still start right below it. */
   top: 0.75rem;
   right: 7.25rem;
   left: calc(min(42rem, calc(100vw - 9rem)) + 1.75rem);
   width: auto;
   min-height: 2.35rem;
   padding: 0.25rem;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
-body.map-view-active .location-details {
-  top: 4.4rem;
+body.map-view-active .location-details,
+body.map-view-active .country-details {
+  top: calc(0.75rem + var(--map-toolbar-h, 2.35rem) + 0.75rem);
   bottom: 1rem;
   max-height: none;
 }
@@ -679,6 +691,50 @@ body.map-view-active .location-details {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
+.estate-metric-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0 0 0.65rem;
+  padding: 0.45rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+}
+
+.estate-metric-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 1.9rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.estate-metric-icon {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.estate-metric-tab:hover {
+  color: var(--text);
+  border-color: var(--panel-border);
+}
+
+.estate-metric-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
 .llama-mode-tabs {
   display: flex;
   gap: 0.4rem;
@@ -963,6 +1019,19 @@ td.metric-heat {
   text-decoration: underline;
 }
 
+.copy-image-btn {
+  margin-left: 0.75rem;
+  font-size: 0.75rem;
+  font-style: normal;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.copy-image-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .llama-toggle-row {
   display: flex;
   align-items: center;
@@ -1188,6 +1257,50 @@ body.map-view-active .map-toolbar .map-mode-btn {
   border-color: var(--accent);
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* Related mapmodes (Tax Base/Tax Gap/Prosperity/Control, Markets/Trade
+   Network/RGO, Religion/Culture) collapse behind one click-to-expand
+   button each - `.map-mode-group` is the flex item that takes the group
+   button's place in the toolbar row; `.map-mode-group-panel` is the
+   dropdown itself, absolutely positioned so opening it never changes the
+   toolbar's own height (which `--map-toolbar-h` tracks - see js/map.js). */
+.map-mode-group {
+  position: relative;
+  display: inline-flex;
+}
+
+.map-mode-group-caret {
+  margin-left: 0.15rem;
+  font-size: 0.65rem;
+  opacity: 0.75;
+}
+
+.map-mode-group-panel {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  left: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 100%;
+  padding: 0.35rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  background: rgba(20, 15, 10, 0.96);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+}
+
+.map-mode-group-panel[hidden] {
+  display: none;
+}
+
+.map-mode-group-panel .map-mode-btn {
+  width: 100%;
+  justify-content: flex-start;
+  white-space: nowrap;
 }
 
 .map-canvas-wrap {
@@ -1542,6 +1655,73 @@ body.map-view-active #mapContainer {
   text-overflow: ellipsis;
 }
 
+.market-good-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.market-good-row {
+  display: grid;
+  grid-template-columns: 30% 1fr 4rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+}
+
+.market-good-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-good-bars,
+.market-good-value {
+  display: grid;
+  grid-template-rows: repeat(2, 1fr);
+  gap: 0.16rem;
+}
+
+.market-good-bar-line {
+  display: grid;
+  grid-template-columns: 0.7rem 1fr;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.market-good-bar-key {
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-good-bar-track {
+  height: 8px;
+  background: var(--panel-border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.market-good-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+}
+
+.market-good-supply {
+  background: var(--good);
+}
+
+.market-good-demand {
+  background: var(--bad);
+}
+
+.market-good-value {
+  text-align: right;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .location-detail-section tr.demographic-row {
   background: linear-gradient(90deg, color-mix(in srgb, var(--demographic-color) 14%, transparent), transparent 55%);
 }
@@ -1798,15 +1978,19 @@ body.map-view-active .map-loading {
     max-width: none;
   }
 
+  /* Not enough room left beside the tabs nav for the toolbar's squeezed
+     strip anymore at this width - same "drop to its own full-width row"
+     fallback as before groups existed, just needed at a narrower breakpoint
+     now that there are only 7 always-visible controls instead of 13. */
   body.map-view-active .map-toolbar {
     top: 3.65rem;
-    right: 1rem;
     left: 1rem;
+    right: 1rem;
   }
 
   body.map-view-active .location-details,
-  .country-details {
-    top: 7.25rem;
+  body.map-view-active .country-details {
+    top: calc(3.65rem + var(--map-toolbar-h, 2.35rem) + 0.75rem);
   }
 }
 
@@ -1832,6 +2016,7 @@ body.map-view-active .map-loading {
     top: 0.5rem;
     left: 0.5rem;
     right: 7.25rem;
+    transform: none;
     width: auto;
     max-width: none;
   }

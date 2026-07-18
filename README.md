@@ -3,8 +3,11 @@
 A browser-based analyzer for Europa Universalis V save files — players, countries, world
 stats, and multiplayer war scoring — in the spirit of [pdx.tools](https://pdx.tools) and
 [Skanderbeg](https://www.skanderbeg.pm/) (neither of which support EU5). Everything runs
-client-side: no build step to view it, no server, no upload — your save file never leaves
-your browser.
+client-side: no build step to view it, and parsing happens entirely in your browser — a
+save you open never leaves it. The one exception is opt-in: on a configured deploy, an
+explicit **Share link** uploads a compressed copy of that one save so you can hand a
+viewable link to someone who doesn't have the file (see "Sharing a save" below). Nothing
+is uploaded automatically, ever.
 
 Comes with two companion pieces for tracking a multiplayer campaign's wars over time (EU5
 purges a concluded war from the save faster than most autosave intervals, so a single save
@@ -66,6 +69,28 @@ local-only (gitignored, never committed or deployed — see `map_data/README.md`
 generated in step 2 are a derived, data-only transform (a location-ID-to-pixel lookup image
 and a name/color table — not a copy of Paradox's artwork) and *are* shipped with the
 deployed site; see "License / data note" below.
+
+### Sharing a save (optional backend)
+
+Every view is addressable by a `?save=<playthrough-uuid>_<game-date>&tab=<tab>` URL. Out
+of the box that link only resolves in a browser that already has the save (your own, or a
+previous visit that cached it). Wire up the optional backend and **Copy link** becomes
+**Share link**: it uploads a gzip-compressed copy of the *parsed* save (~5–6 MB, vs a
+~60 MB raw `.eu5`, and the recipient just decompresses it — no re-parsing) to a public
+[Supabase Storage](https://supabase.com/docs/guides/storage) bucket keyed by that same id,
+so anyone you send the link to sees the actual save.
+
+To enable it:
+
+1. Create the bucket + read/write policies (one-time): `supabase db push` applies
+   `supabase/migrations/*_shared_saves_bucket.sql`.
+2. Provide the **public** project URL + anon key. On Netlify, set `SUPABASE_URL` /
+   `SUPABASE_ANON_KEY` as build env vars (the build generates `config.js`). Locally, add
+   the same two to `.env.local` and run `node scripts/write-config.js`. Both values are
+   public-safe; the `service_role` key must never go here. See `config.example.js`.
+
+The random campaign UUID in the key makes links unguessable (the bucket is public-read but
+its listing isn't exposed). Nothing uploads automatically — only an explicit Share click.
 
 ## Tests
 

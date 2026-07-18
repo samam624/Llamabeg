@@ -43,6 +43,10 @@
   const savesLibraryPanel = document.getElementById("savesLibraryPanel");
   const savesLibraryTableEl = document.getElementById("savesLibraryTable");
   const copyLinkBtn = document.getElementById("copyLinkBtn");
+  const copyPlayersImageBtn = document.getElementById("copyPlayersImageBtn");
+  const copyBlackDeathImageBtn = document.getElementById("copyBlackDeathImageBtn");
+  const copyCountriesImageBtn = document.getElementById("copyCountriesImageBtn");
+  const copyTrendsImageBtn = document.getElementById("copyTrendsImageBtn");
   const themeToggleBtn = document.getElementById("themeToggleBtn");
   const pendingShareNoticeEl = document.getElementById("pendingShareNotice");
   const countryMetricTabs = document.querySelectorAll("#metricTabs .metric-tab");
@@ -71,6 +75,13 @@
   let llamaSnapshotsLedger = null;
   let llamaEventsLedger = null;
   let ledgerConnection = null; // { dataDirHandle, campaignKey, lastModified } while auto-connected
+  // Name -> in-game date they were marked departed as of, read from this
+  // campaign's own hidden-players.json (written by the Llamabeg desktop
+  // dashboard's Hide button - see llama-dashboard/main.js). Read-only here;
+  // this app never writes that file itself, see getAllExcludedPlayers()/
+  // excludedPlayersForScoring() below for how it's merged with the manual
+  // Hide list.
+  let sharedHiddenPlayers = new Map();
   let ledgerPollTimer = null;
   // The filename of whatever save is currently loaded - autosave_<uuid>.eu5
   // names carry the recorder's own campaign key, so this is what lets the
@@ -91,7 +102,9 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
+  const ASSET_VERSION = "v1.2.8";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
+  let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
   // browser's local history yet - see initFromShareUrl()/onParsed().
   let pendingShareId = null;
@@ -191,6 +204,24 @@
   // stays the raw manual set, since the Hide/Show buttons read AND WRITE it
   // directly and shouldn't accidentally persist an auto-detected name into
   // permanent manual storage.
+  // Name -> departed-as-of date, computed fresh from the ledger every call -
+  // "every automation flag enabled at once" (see js/llama-score.js's
+  // isFullyAutomated/computeAutomationDepartures) is the third automatic
+  // departure signal alongside roster-change detection and the shared Hide
+  // file, per the user's explicit call after confirming the real-data
+  // pattern. Requires a ledger (single-save mode has no automatedSystems
+  // history to walk).
+  function computeAutomationDeparturesForCurrentLedger() {
+    if (!llamaSnapshotsLedger || !llamaSnapshotsLedger.length || typeof LlamaScore === "undefined" || !LlamaScore.computeAutomationDepartures) return new Map();
+    try {
+      const campaignKey = pickLatestCampaignKey(llamaSnapshotsLedger) || "campaign";
+      const { snapshots } = filterLedgerToCampaign(llamaSnapshotsLedger, llamaEventsLedger, campaignKey);
+      return LlamaScore.computeAutomationDepartures(snapshots);
+    } catch (err) {
+      return new Map(); // Ledger data mid-write or otherwise malformed - fall back to nothing extra.
+    }
+  }
+
   function getAllExcludedPlayers() {
     const excluded = getExcludedPlayers();
     if (llamaSnapshotsLedger && llamaSnapshotsLedger.length && typeof LlamaScore !== "undefined" && LlamaScore.computeDepartedPlayers) {
@@ -202,7 +233,26 @@
         // Ledger data mid-write or otherwise malformed - fall back to just the manual list.
       }
     }
+    for (const name of computeAutomationDeparturesForCurrentLedger().keys()) excluded.add(name);
+    // Anyone hidden via Llamabeg's Hide button (see sharedHiddenPlayers'
+    // comment above) should disappear from this app's current-state views
+    // too, without the user needing to hide them a second time here.
+    for (const name of sharedHiddenPlayers.keys()) excluded.add(name);
     return excluded;
+  }
+
+  // The manual list + shared file + automation-detected departures, MERGED
+  // as a Map (name -> departed-as-of date or null) rather than flattened to
+  // a bare Set of names - this is what the ledger-based Llama Score panel's
+  // computeFromLedger call needs so a dated departure only excludes wars
+  // that started after that date, while the manual Hide button here (no
+  // date info, never has had any) keeps its existing all-or-nothing
+  // behavior. See computeFromLedger's own comment in js/llama-score.js.
+  function excludedPlayersForScoring() {
+    const merged = new Map(sharedHiddenPlayers);
+    for (const [name, date] of computeAutomationDeparturesForCurrentLedger()) if (!merged.has(name)) merged.set(name, date);
+    for (const name of getExcludedPlayers()) if (!merged.has(name)) merged.set(name, null);
+    return merged;
   }
 
   fileInput.addEventListener("change", () => {
@@ -286,7 +336,7 @@
   function runParse(file, formatCode) {
     let worker;
     try {
-      worker = new Worker("js/parse-worker.js");
+      worker = new Worker(`js/parse-worker.js?v=${ASSET_VERSION}`);
     } catch (err) {
       worker = null;
     }
@@ -372,10 +422,17 @@
     // actually is. The library only stores the parsed result, not the
     // original file, so there's nothing to auto-recover from - flag it and
     // let the user drop the stale entry and re-upload the original file.
-    if (options.persist === false && result.__schemaVersion !== RESULT_SCHEMA_VERSION) {
+    const missingPopulationRecords =
+      Array.isArray(result.locations) &&
+      result.locations.some((loc) => loc && Array.isArray(loc.popIds) && loc.popIds.length) &&
+      (!Array.isArray(result.popRecords) || !result.popRecords.length);
+    const staleParsedResult = (result.__schemaVersion !== undefined && result.__schemaVersion !== RESULT_SCHEMA_VERSION) || missingPopulationRecords;
+    if (staleParsedResult) {
+      const canRemoveStale = options.persist === false && options.libraryId;
+      const missingPopText = missingPopulationRecords ? " population database records" : " newer fields (including estate tax rates)";
       showError(
-        `This save was loaded from your local save history, saved by an older version of this analyzer - some data (e.g. Black Death) may be missing or wrong until it's re-parsed. ` +
-          `<button type="button" id="staleCacheRemoveBtn" class="link-btn">Remove from history</button> and re-upload the original <code>.eu5</code> file to refresh it.`
+        `This save was loaded from parsed data saved by an older version of this analyzer - some${missingPopText} may be missing until it's re-parsed. ` +
+          `${canRemoveStale ? `<button type="button" id="staleCacheRemoveBtn" class="link-btn">Remove from history</button> and ` : ""}re-upload the original <code>.eu5</code> file to refresh it.`
       );
       const removeBtn = document.getElementById("staleCacheRemoveBtn");
       if (removeBtn) removeBtn.addEventListener("click", () => removeStaleLibraryEntry(options.libraryId));
@@ -384,6 +441,12 @@
     }
 
     latestResult = result;
+    // Temporary debug hook (2026-07-17, Tax Income rollout) - exposes the
+    // parsed result on window so a live-game issue can be diagnosed from
+    // the browser console without the save ever leaving the machine. Safe
+    // to leave in; remove once Tax Income is confirmed working across
+    // patch versions.
+    if (typeof window !== "undefined") window.__eu5Result = result;
     mapRenderedForResult = false;
     setResultTabsAvailable(true);
     if (wasOnLoadTab) activateTab("metrics");
@@ -392,9 +455,55 @@
     // either renders, rather than only inside renderCountries() (which used
     // to run after renderPlayers(), so player rows briefly/always read
     // undefined for these).
+    // Neither Trade Income nor Tax Income has a single per-country field in
+    // the save - both only exist as last_month.trade_income/paid_taxes on
+    // each of a country's individual estates (nobles_estate/clergy_estate/
+    // burghers_estate/...), so each has to be summed across every estate
+    // belonging to that country first. See js/clausewitz.js's
+    // extractEstateAssetFields for where estateTradeIncomes comes from, and
+    // its comments for why tradeIncome (private estate wealth, best-effort
+    // proxy only) and paidTaxes (real state revenue) aren't equally trustworthy.
+    const tradeIncomeByCountry = new Map();
+    const taxIncomeByCountry = new Map();
+    for (const entry of result.estateTradeIncomes || []) {
+      if (typeof entry.country !== "number") continue;
+      if (typeof entry.tradeIncome === "number") tradeIncomeByCountry.set(entry.country, (tradeIncomeByCountry.get(entry.country) || 0) + entry.tradeIncome);
+      if (typeof entry.paidTaxes === "number") taxIncomeByCountry.set(entry.country, (taxIncomeByCountry.get(entry.country) || 0) + entry.paidTaxes);
+    }
     result.countries.forEach((c) => {
       c.__isPlayerCountry = c.players && c.players.length > 0;
+      c.tradeIncome = tradeIncomeByCountry.get(c.number);
+      c.taxIncome = taxIncomeByCountry.get(c.number);
       computeDerivedMetrics(c);
+    });
+    // Army Size/Levies/Regulars/Mercenaries (above, via attachArmyCounts) are
+    // bare regiment COUNTS - a country with 10 nearly-wiped-out regiments and
+    // one with 10 full-strength ones show identically. The "(k)" columns show
+    // real troop HEADCOUNTS instead, and the save already carries them: each
+    // subunit's `strength` field IS its current troop count, in the exact same
+    // "thousands" unit as population/manpower (strength 0.40 = 400 troops).
+    // Proven two ways against a real save: (1) a Byzantine cataphract regiment
+    // at strength 0.40 shows as exactly 400 men in-game, an archer at 0.50 as
+    // 500; (2) across 2003 regiments, strength*1000 NEVER exceeds that unit
+    // type's own max capacity and lands exactly at it for the 1156 full ones.
+    // So the "(k)" figure is simply the sum of strength values - no unit-size
+    // table, no game-install files, no age/bonus math needed (an earlier
+    // version multiplied strength by a separately-derived max size, which
+    // double-counted and read ~2.5x low).
+    const troopsByCountry = new Map();
+    for (const troop of result.armySubunitDetails || []) {
+      if (typeof troop.controller !== "number" || typeof troop.strength !== "number") continue;
+      if (!troopsByCountry.has(troop.controller)) troopsByCountry.set(troop.controller, { levy: 0, regular: 0, mercenary: 0 });
+      const bucket = troopsByCountry.get(troop.controller);
+      bucket[troop.category] = (bucket[troop.category] || 0) + troop.strength;
+    }
+    result.countries.forEach((c) => {
+      const bucket = troopsByCountry.get(c.number);
+      if (!bucket) return;
+      c.armyLeviesK = bucket.levy;
+      c.armyRegularsK = bucket.regular;
+      c.armyMercenariesK = bucket.mercenary;
+      c.armyTotalK = bucket.levy + bucket.regular + bucket.mercenary;
     });
     computeCountryLocationMetrics(result);
     renderOverview(result);
@@ -424,7 +533,7 @@
     // Loading a save back out of the local history (see save-library.js)
     // re-parses nothing and shouldn't bump its "uploaded" timestamp - only
     // a fresh parse (options.persist left at its default) gets saved.
-    if (options.persist !== false) saveResultToLibrary(displayName, result);
+    if (options.persist !== false && !staleParsedResult) saveResultToLibrary(displayName, result);
 
     // If the page loaded from a ?save=<id> link that wasn't in this
     // browser's history yet (see initFromShareUrl()), and the save that
@@ -626,7 +735,8 @@
     "vs-player": "Auto-excluded: the opposing side had a real player in this war, so it isn't a PvE result and doesn't count under Alpaca Points. Uncheck to score it anyway.",
     "player-departed": "Auto-excluded: this player had already stopped controlling this country (recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it. Uncheck to score it anyway.",
     "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign before this war even began (fighting an abandoned country doesn't score) - a war fought against a real opponent still counts even if they left partway through it. Uncheck to score it anyway.",
-    "player-hidden": "Auto-excluded: you've hidden this player in the Players table (Hide button) as departed - unhide them there to include their wars again.",
+    "player-hidden": "Auto-excluded: this player was marked departed (Hide button here, or in the Llamabeg desktop dashboard) - wars that started before that point still count, only later ones are excluded. Unhide them to include everything again.",
+    revolt: "Auto-excluded: this is a revolt (independence war or civil war) against your own rebels/pretender, not a fight against a foreign AI nation - it's shown for reference (and the winner is still tracked correctly) but never moves PVE/Alpaca Points either direction. Uncheck to score it anyway.",
     "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. PvP-only (not applied to PvE, where a win engineered through your vassals doing the fighting should still count). Uncheck to score it anyway.",
   };
   function autoExcludeBadge(reason) {
@@ -683,6 +793,7 @@
   const LLAMA_REASON_LABELS = {
     "post-war-reparations-enforced": "War reparations enforced (peace-treaty term)",
     "post-war-independence-granted": "Independence granted (peace-treaty term)",
+    "post-war-revolt-crushed": "Rebellion fully crushed (annexed/reabsorbed)",
     "post-war-land-transfer": "Land changed hands (clean 1-on-1 data)",
     "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
     "battle-losses-inflicted": "Battle losses (no economic signal)",
@@ -807,7 +918,13 @@
   // side (see Charts.renderStackedBarChart).
   function renderLlamaLeaderboardChart(leaderboardEl, leaderboard) {
     if (typeof Charts === "undefined") return;
-    if (!leaderboard.length) {
+    // A hidden/departed player's entry stays in the array now (see
+    // computeFromLedger/computeLlamaScores - their earned/lost score is
+    // preserved, not deleted), but this chart still shouldn't clutter the
+    // default view with someone who's left - same default-hidden behavior
+    // as before, just no longer at the cost of losing the number itself.
+    const visible = leaderboard.filter((l) => !l.hidden);
+    if (!visible.length) {
       leaderboardEl.innerHTML = '<p class="panel-note">No players found.</p>';
       return;
     }
@@ -824,7 +941,7 @@
     // confused for the same leaderboard at a glance.
     Charts.renderStackedBarChart(document.getElementById("llamaLeaderboardChart"), {
       title: llamaScoreMode === "pve" ? "Alpaca Points" : "Llama Points",
-      items: leaderboard.map((l) => ({
+      items: visible.map((l) => ({
         label: `${l.player} (${l.countryTag || "?"})`,
         player: l.player,
         countryTag: l.countryTag,
@@ -1030,7 +1147,7 @@
         snapshots,
         events,
         overrides,
-        getExcludedPlayers(),
+        excludedPlayersForScoring(),
         llamaScoreMode
       );
       rows.forEach((r) => {
@@ -1285,6 +1402,7 @@
     llamaSnapshotsLedger = ledger.snapshots;
     llamaEventsLedger = ledger.events;
     ledgerConnection = { dataDirHandle, campaignKey: best.campaignKey, lastModified: ledger.lastModified };
+    sharedHiddenPlayers = await LedgerConnect.readHiddenPlayers(best.dirHandle).catch(() => new Map());
   }
 
   // autosave_<uuid>(.eu5 / _1.eu5 / _2.eu5 / ...) - same pattern
@@ -1623,12 +1741,23 @@
     lastMonthGoldIncome: "Gold income from last month (last_month_gold_income in the save) - the game's own single \"how much did I make\" figure.",
     income: "Gross income - all sources of income added together, before any expenses are subtracted.",
     expense: "Gross expense - all outgoing spending added together, before weighing it against income.",
+    tradeIncome: "Best-effort estimate only: summed across every estate (nobles/clergy/burghers/...) this country has, but this is each estate's own private trade wealth (it has its own gold/balance pool, separate from the treasury) - not confirmed to match the government ledger's own \"Trade Income\" line. Treat as approximate.",
+    taxIncome: "Gold actually collected by the crown from every estate (nobles/clergy/burghers/...) last month - summed from each estate's real paid_taxes field, a component of Gross Income. See each estate's tax rate in the country detail view.",
     profit: "Income minus Expense - what's actually left over each month after paying for everything.",
     efficiency: "Profit divided by Income - the share of gross income kept as profit rather than spent. 100% = no expenses at all; 0% = spending exactly what you make; negative = spending more than you make.",
     lastMonthsArmyMaintenance: "Gold spent maintaining the standing army last month.",
     lastMonthsNavyMaintenance: "Gold spent maintaining the navy last month.",
-    incomePerPop: "Last month's gold income divided by population - how much this country earns per person, independent of its total size.",
+    // Verified 2026-07-16 against the game's own Countries-tab ledger (a
+    // "Sort by GDP" tooltip on that column) across all 15 rows of a real
+    // save: raw gold-income / raw-population-field matched the game's
+    // displayed figure to 3-4 significant digits every time (e.g. France
+    // 825.46 / 10570 = 0.0781 vs the game's shown 0.0780) - this IS the
+    // game's own GDP stat, just computed here rather than read from a saved
+    // field (no literal "gdp" field exists anywhere in the save format).
+    incomePerPop: "Last month's gold income divided by population - the game's own \"GDP\" figure (verified to match its Countries-tab ledger) - how much this country earns per person, independent of its total size.",
     taxBasePerPop: "Latest tax base value divided by population - how much taxable value this country generates per person.",
+    latestTaxBase: "Base Tax - the country's current total tax base (from the last entry of its historical tax base, which is always \"now\"). The taxable value the crown draws its tax income from.",
+    latestEconomicalBase: "Economic Base - the country's current total economic base (last entry of its historical economical base). A broader measure of the economy's size than tax base alone. Blank on older saves (pre-1.3), which don't record this.",
     manpowerPerPop: "Manpower divided by population - how much of this country's population is available as army reinforcements, per person.",
     greatPowerRank: "This country's rank on the game's Great Power standings (lower is better) - factors in population, income, advances, stability, prestige, markets, military, and more per the game's own Great Power Score.",
     popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
@@ -1637,6 +1766,15 @@
     E: "Enemies - count of distinct enemy countries on the other side of this war (players only, for a scored PvP row).",
     A: "Allies - count of distinct allied countries on this player's own side of the war, not counting themselves.",
     warScore: "This war's contribution to the player's Llama/Alpaca Points, from the formula: 10·E·W/(A+1) + 10·(W−1)·(A+1)/(2·E) - bigger for beating more enemies with fewer allies helping.",
+    navyShips: "Real ship count from subunit_manager (built warships only) - levy ships (conscripted fishing boats/birlinns) are excluded, since nobody counts those as real naval strength. Blank if this save has no naval subunit data to count from.",
+    armyTotal: "Regiment COUNT from subunit_manager: Levies + Regulars + Mercenaries added together - one regiment counts the same whether it's full-strength or nearly wiped out. See the (k) columns for real troop headcounts. Blank if this save has no subunit data to count from.",
+    armyLevies: "Feudal/tribal levy regiment COUNT, raised from estates (peasant levies, noble/tribal cavalry, etc.) - identified by carrying a levies block in the save, same signal used to separate levy ships from built ones in Navy Size.",
+    armyRegulars: "Professionally built standing-army regiment COUNT - not raised from a levy, not a hired mercenary company.",
+    armyMercenaries: "Hired mercenary company COUNT from the mercenary pool. Counted by whoever currently controls/employs them, not the save's own owner field for a mercenary unit - that field is always a constant placeholder, not the hiring country.",
+    armyTotalK: "Real total troop headcount (thousands), not a bare regiment count - summed from each regiment's own current troop count (the save's per-regiment strength figure, e.g. a Byzantine cataphract regiment at 400 men), across Levies + Regulars + Mercenaries. Blank if this save has no subunit data.",
+    armyLeviesK: "Real CURRENTLY-MUSTERED levy troop headcount (thousands) - summed per-regiment troop counts, restricted to levy regiments. Correctly 0 for a country at peace with no levies raised.",
+    armyRegularsK: "Real regular troop headcount (thousands) - summed per-regiment troop counts, restricted to professionally-built regiments.",
+    armyMercenariesK: "Real mercenary troop headcount (thousands) - summed per-regiment troop counts, restricted to hired mercenary companies.",
   };
 
   const COUNTRY_COLUMNS = [
@@ -1659,6 +1797,10 @@
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (c) => fmtNum(c.lastMonthGoldIncome, 2) },
     { key: "income", label: "Gross Income", numeric: true, render: (c) => fmtNum(c.income, 1) },
     { key: "expense", label: "Gross Expense", numeric: true, render: (c) => fmtNum(c.expense, 1) },
+    { key: "tradeIncome", label: "Trade Income", numeric: true, render: (c) => fmtNum(c.tradeIncome, 2) },
+    { key: "taxIncome", label: "Tax Income", numeric: true, render: (c) => fmtNum(c.taxIncome, 2) },
+    { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (c) => fmtNum(c.latestTaxBase, 1) },
+    { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (c) => fmtNum(c.latestEconomicalBase, 1) },
     { key: "profit", label: "Profit", numeric: true, render: (c) => fmtNum(c.profit, 1) },
     {
       key: "efficiency",
@@ -1666,19 +1808,26 @@
       numeric: true,
       render: (c) => (typeof c.efficiency === "number" ? (c.efficiency * 100).toFixed(0) + "%" : "-"),
     },
+    { key: "manpower", label: "Manpower (k)", numeric: true, render: (c) => fmtNum(c.manpower, 2) },
     { key: "lastMonthsArmyMaintenance", label: "Army Upkeep", numeric: true, render: (c) => fmtNum(c.lastMonthsArmyMaintenance, 2) },
-    { key: "lastMonthsNavyMaintenance", label: "Navy Upkeep", numeric: true, render: (c) => fmtNum(c.lastMonthsNavyMaintenance, 2) },
-    { key: "manpower", label: "Manpower", numeric: true, render: (c) => fmtNum(c.manpower, 2) },
-    { key: "sailors", label: "Sailors", numeric: true, render: (c) => fmtNum(c.sailors, 2) },
-    { key: "expectedArmySize", label: "Army Size", numeric: true, render: (c) => fmtNum(c.expectedArmySize, 2) },
-    { key: "expectedNavySize", label: "Navy Size", numeric: true, render: (c) => fmtNum(c.expectedNavySize, 0) },
+    { key: "armyTotalK", label: "Active Army (k)", numeric: true, render: (c) => fmtNum(c.armyTotalK, 2) },
+    { key: "armyTotal", label: "Active Regiments", numeric: true, render: (c) => fmtNum(c.armyTotal, 0) },
+    { key: "armyLeviesK", label: "Levies (k)", numeric: true, render: (c) => fmtNum(c.armyLeviesK, 2) },
+    { key: "armyLevies", label: "Levy Regiments", numeric: true, render: (c) => fmtNum(c.armyLevies, 0) },
+    { key: "armyRegularsK", label: "Regulars (k)", numeric: true, render: (c) => fmtNum(c.armyRegularsK, 2) },
+    { key: "armyRegulars", label: "Regular Regiments", numeric: true, render: (c) => fmtNum(c.armyRegulars, 0) },
+    { key: "armyMercenariesK", label: "Mercenaries (k)", numeric: true, render: (c) => fmtNum(c.armyMercenariesK, 2) },
+    { key: "armyMercenaries", label: "Merc. Regiments", numeric: true, render: (c) => fmtNum(c.armyMercenaries, 0) },
     { key: "population", label: "Population (people)", numeric: true, render: (c) => fmtPopulation(c.population) },
-    { key: "incomePerPop", label: "Income/1k people", numeric: true, render: (c) => fmtNum(c.incomePerPop, 3) },
+    { key: "incomePerPop", label: "GDP (Income/1k people)", numeric: true, render: (c) => fmtNum(c.incomePerPop, 3) },
     { key: "taxBasePerPop", label: "Tax Base/1k people", numeric: true, render: (c) => fmtNum(c.taxBasePerPop, 3) },
     { key: "manpowerPerPop", label: "Manpower/1k people", numeric: true, render: (c) => fmtNum(c.manpowerPerPop, 3) },
     { key: "stability", label: "Stability", numeric: true, render: (c) => fmtNum(c.stability, 1) },
     { key: "prestige", label: "Prestige", numeric: true, render: (c) => fmtNum(c.prestige, 1) },
     { key: "greatPowerRank", label: "GP Rank", numeric: true, render: (c) => fmtNum(c.greatPowerRank, 0) },
+    { key: "lastMonthsNavyMaintenance", label: "Navy Upkeep", numeric: true, render: (c) => fmtNum(c.lastMonthsNavyMaintenance, 2) },
+    { key: "sailors", label: "Sailors (k)", numeric: true, render: (c) => fmtNum(c.sailors, 2) },
+    { key: "navyShips", label: "Navy Size", numeric: true, render: (c) => fmtNum(c.navyShips, 0) },
   ];
 
   const BASE_ESTATE_TAX_GROUPS = [
@@ -1691,12 +1840,11 @@
     { key: "cossacks", label: "Cossacks" },
     { key: "slaves", label: "Slaves" },
   ];
-  const UNTAXED_ESTATE_METRIC_GROUPS = new Set(["soldiers", "slaves"]);
   let activeEstateTaxGroups = BASE_ESTATE_TAX_GROUPS.slice();
 
   function estateMetricGroup(name) {
     const base = String(name || "").replace(/_estate$/, "");
-    if (base === "peasants" || base === "commoners" || base === "common" || base === "laborers") return "commoners";
+    if (base === "peasants" || base === "commoners" || base === "common" || base === "laborers" || base === "soldiers") return "commoners";
     if (base === "nobility") return "nobles";
     if (base === "tribes") return "tribesmen";
     return base;
@@ -1721,12 +1869,58 @@
     return `${key}PopShare`;
   }
 
+  const WIKI_FILE_BASE = "https://eu5.paradoxwikis.com/Special:Redirect/file/";
+  function wikiIcon(name) {
+    return WIKI_FILE_BASE + encodeURIComponent(name);
+  }
+
+  function estateIcon(groupKey) {
+    const icons = {
+      commoners: "Estate peasants.png",
+      peasants: "Estate peasants.png",
+      burghers: "Estate burghers.png",
+      clergy: "Estate clergy.png",
+      nobles: "Estate nobles.png",
+      tribesmen: "Estate tribes.png",
+      tribes: "Estate tribes.png",
+      dhimmi: "Estate dhimmi.png",
+      cossacks: "Estate cossacks.png",
+      crown: "Estate crown.png",
+    };
+    return icons[groupKey] ? wikiIcon(icons[groupKey]) : wikiIcon("Estates.png");
+  }
+
   function estateTaxPer1kKey(key) {
     return `${key}TaxPer1k`;
   }
 
+  function estateTaxBaseTotalKey(key) {
+    return `${key}TaxBaseTotal`;
+  }
+
+  function estateTaxRateKey(key) {
+    return `${key}TaxRate`;
+  }
+
+  function estateExtractedTaxTotalKey(key) {
+    return `${key}ExtractedTaxTotal`;
+  }
+
+  function estateExtractedTaxPer1kKey(key) {
+    return `${key}ExtractedTaxPer1k`;
+  }
+
   function estateMetricValue(row, key) {
     return row && typeof row[key] === "number" ? row[key] : undefined;
+  }
+
+  function populationRecordMap(result) {
+    const map = new Map();
+    for (const pop of result && result.popRecords ? result.popRecords : []) {
+      if (!pop || typeof pop.number !== "number" || typeof pop.size !== "number") continue;
+      map.set(pop.number, pop);
+    }
+    return map;
   }
 
   function appendColumns(target, columns) {
@@ -1734,35 +1928,83 @@
   }
 
   function estateTaxColumnTitle(group) {
-    return `${group.label} tax per 1k ${group.label.toLowerCase()} population`;
+    return `${group.label} tax base per 1k ${group.label.toLowerCase()} population. This is the save's estate-attributed tax base, not an estate tax policy toggle.`;
+  }
+
+  function estateExtractedTaxColumnTitle(group) {
+    return `${group.label} extracted tax per 1k ${group.label.toLowerCase()} population, computed as estate-attributed tax base per 1k multiplied by this country's ${group.label.toLowerCase()} tax rate.`;
+  }
+
+  function estateTaxRateColumnTitle(group) {
+    return `${group.label} tax rate from the country's economy.tax_rates save data.`;
   }
 
   function hasEstateTaxRateColumn(group) {
-    return !UNTAXED_ESTATE_METRIC_GROUPS.has(group.key);
+    return true;
   }
 
-  function estateCountryColumns() {
-    const columns = [];
-    activeEstateTaxGroups.forEach((group) => {
-      columns.push({
+  function estateColumnsForGroup(group, renderValue, rows) {
+    if (!group) return [];
+    return [
+      {
         key: estateShareKey(group.key),
         label: `${group.label} %`,
         title: `${group.label} share of population in the estate/taxation breakdown`,
         numeric: true,
         heatColumn: true,
-        render: (c) => fmtPercent(estateMetricValue(c, estateShareKey(group.key)), 1),
-      });
-      if (hasEstateTaxRateColumn(group)) {
-        columns.push({
-          key: estateTaxPer1kKey(group.key),
-          label: `${group.label} /1k`,
-          title: estateTaxColumnTitle(group),
-          numeric: true,
-          heatColumn: true,
-          render: (c) => fmtNum(estateMetricValue(c, estateTaxPer1kKey(group.key)), 4),
-        });
-      }
-    });
+        render: (row) => fmtPercent(renderValue(row, estateShareKey(group.key)), 1),
+      },
+      {
+        key: estateTaxBaseTotalKey(group.key),
+        label: "Base Tax",
+        title: `${group.label} total estate-attributed tax base.`,
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtNum(renderValue(row, estateTaxBaseTotalKey(group.key)), 3),
+      },
+      {
+        key: estateTaxPer1kKey(group.key),
+        label: "Base Tax/1k",
+        title: estateTaxColumnTitle(group),
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtNum(renderValue(row, estateTaxPer1kKey(group.key)), 4),
+      },
+      {
+        key: estateTaxRateKey(group.key),
+        label: "Rate",
+        title: estateTaxRateColumnTitle(group),
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtPercent(renderValue(row, estateTaxRateKey(group.key)), 1),
+      },
+      {
+        key: estateExtractedTaxTotalKey(group.key),
+        label: "Income Tax",
+        title: `${group.label} total extracted tax, computed as estate-attributed tax base multiplied by this country's ${group.label.toLowerCase()} tax rate.`,
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtNum(renderValue(row, estateExtractedTaxTotalKey(group.key)), 3),
+      },
+      {
+        key: estateExtractedTaxPer1kKey(group.key),
+        label: "Income Tax/1k",
+        title: estateExtractedTaxColumnTitle(group),
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtNum(renderValue(row, estateExtractedTaxPer1kKey(group.key)), 4),
+      },
+    ];
+  }
+
+  function selectedEstateMetricGroup() {
+    if (!activeEstateTaxGroups.length) return null;
+    return activeEstateTaxGroups.find((group) => group.key === currentEstateMetricGroup) || activeEstateTaxGroups[0];
+  }
+
+  function estateCountryColumns(rows) {
+    const columns = [];
+    appendColumns(columns, estateColumnsForGroup(selectedEstateMetricGroup(), estateMetricValue, rows));
     return columns;
   }
 
@@ -1776,6 +2018,10 @@
     { key: "avgDevelopment", label: "Avg Dev/location", numeric: true, render: (p) => fmtNum(p.country && p.country.avgDevelopment, 2) },
     { key: "gold", label: "Treasury", numeric: true, render: (p) => fmtNum(p.country && p.country.gold, 1) },
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (p) => fmtNum(p.country && p.country.lastMonthGoldIncome, 2) },
+    { key: "tradeIncome", label: "Trade Income", numeric: true, render: (p) => fmtNum(p.country && p.country.tradeIncome, 2) },
+    { key: "taxIncome", label: "Tax Income", numeric: true, render: (p) => fmtNum(p.country && p.country.taxIncome, 2) },
+    { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (p) => fmtNum(p.country && p.country.latestTaxBase, 1) },
+    { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (p) => fmtNum(p.country && p.country.latestEconomicalBase, 1) },
     { key: "profit", label: "Profit", numeric: true, render: (p) => fmtNum(p.country && p.country.profit, 1) },
     {
       key: "efficiency",
@@ -1784,19 +2030,26 @@
       render: (p) => (p.country && typeof p.country.efficiency === "number" ? (p.country.efficiency * 100).toFixed(0) + "%" : "-"),
     },
     { key: "population", label: "Population (people)", numeric: true, render: (p) => fmtPopulation(p.country && p.country.population) },
-    { key: "incomePerPop", label: "Income/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.incomePerPop, 3) },
+    { key: "incomePerPop", label: "GDP (Income/1k people)", numeric: true, render: (p) => fmtNum(p.country && p.country.incomePerPop, 3) },
     { key: "taxBasePerPop", label: "Tax Base/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.taxBasePerPop, 3) },
-    { key: "manpower", label: "Manpower", numeric: true, render: (p) => fmtNum(p.country && p.country.manpower, 2) },
+    { key: "manpower", label: "Manpower (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.manpower, 2) },
     { key: "manpowerPerPop", label: "Manpower/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.manpowerPerPop, 3) },
-    { key: "sailors", label: "Sailors", numeric: true, render: (p) => fmtNum(p.country && p.country.sailors, 2) },
-    { key: "expectedArmySize", label: "Army Size", numeric: true, render: (p) => fmtNum(p.country && p.country.expectedArmySize, 2) },
-    { key: "expectedNavySize", label: "Navy Size", numeric: true, render: (p) => fmtNum(p.country && p.country.expectedNavySize, 0) },
+    { key: "armyTotalK", label: "Active Army (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.armyTotalK, 2) },
+    { key: "armyTotal", label: "Active Regiments", numeric: true, render: (p) => fmtNum(p.country && p.country.armyTotal, 0) },
+    { key: "armyLeviesK", label: "Levies (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.armyLeviesK, 2) },
+    { key: "armyLevies", label: "Levy Regiments", numeric: true, render: (p) => fmtNum(p.country && p.country.armyLevies, 0) },
+    { key: "armyRegularsK", label: "Regulars (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.armyRegularsK, 2) },
+    { key: "armyRegulars", label: "Regular Regiments", numeric: true, render: (p) => fmtNum(p.country && p.country.armyRegulars, 0) },
+    { key: "armyMercenariesK", label: "Mercenaries (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.armyMercenariesK, 2) },
+    { key: "armyMercenaries", label: "Merc. Regiments", numeric: true, render: (p) => fmtNum(p.country && p.country.armyMercenaries, 0) },
     { key: "admScore", label: "ADM", numeric: true, render: (p) => fmtNum(p.country && p.country.admScore, 2) },
     { key: "dipScore", label: "DIP", numeric: true, render: (p) => fmtNum(p.country && p.country.dipScore, 2) },
     { key: "milScore", label: "MIL", numeric: true, render: (p) => fmtNum(p.country && p.country.milScore, 2) },
     { key: "stability", label: "Stability", numeric: true, render: (p) => fmtNum(p.country && p.country.stability, 1) },
     { key: "prestige", label: "Prestige", numeric: true, render: (p) => fmtNum(p.country && p.country.prestige, 1) },
     { key: "greatPowerRank", label: "GP Rank", numeric: true, lowerIsBetter: true, render: (p) => fmtNum(p.country && p.country.greatPowerRank, 0) },
+    { key: "sailors", label: "Sailors (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.sailors, 2) },
+    { key: "navyShips", label: "Navy Size", numeric: true, render: (p) => fmtNum(p.country && p.country.navyShips, 0) },
     {
       key: "__hide",
       label: "",
@@ -1804,27 +2057,37 @@
     },
   ];
 
-  function estatePlayerColumns() {
+  function estatePlayerColumns(rows) {
     const columns = [];
-    activeEstateTaxGroups.forEach((group) => {
-      columns.push({
-        key: estateShareKey(group.key),
-        label: `${group.label} %`,
-        title: `${group.label} share of population in the estate/taxation breakdown`,
-        numeric: true,
-        render: (p) => fmtPercent(estateMetricValue(p.country, estateShareKey(group.key)), 1),
-      });
-      if (hasEstateTaxRateColumn(group)) {
-        columns.push({
-          key: estateTaxPer1kKey(group.key),
-          label: `${group.label} /1k`,
-          title: estateTaxColumnTitle(group),
-          numeric: true,
-          render: (p) => fmtNum(estateMetricValue(p.country, estateTaxPer1kKey(group.key)), 4),
-        });
-      }
-    });
+    appendColumns(columns, estateColumnsForGroup(selectedEstateMetricGroup(), (row, key) => estateMetricValue(row.country, key), rows));
     return columns;
+  }
+
+  function estateTabsHtml() {
+    if (!activeEstateTaxGroups.length) return "";
+    const selected = selectedEstateMetricGroup();
+    return `<div class="estate-metric-tabs" role="group" aria-label="Estate metrics">
+      ${activeEstateTaxGroups
+        .map(
+          (group) => `<button type="button" class="estate-metric-tab${selected && selected.key === group.key ? " active" : ""}" data-estate="${escapeHtml(group.key)}" title="${escapeHtml(group.label)}">
+            <img class="estate-metric-icon" src="${estateIcon(group.key)}" alt="" loading="lazy">
+            <span>${escapeHtml(group.label)}</span>
+          </button>`
+        )
+        .join("")}
+    </div>`;
+  }
+
+  function attachEstateTabHandlers(container) {
+    container.querySelectorAll(".estate-metric-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const next = btn.dataset.estate;
+        if (!next || next === currentEstateMetricGroup) return;
+        currentEstateMetricGroup = next;
+        if (currentPlayerMetricGroup === "estates") drawPlayerTable();
+        if (currentMetricGroup === "estates") drawCountryTable();
+      });
+    });
   }
 
   const PLAYER_COUNTRY_SORT_KEYS = [
@@ -1834,6 +2097,10 @@
     "avgDevelopment",
     "gold",
     "lastMonthGoldIncome",
+    "tradeIncome",
+    "taxIncome",
+    "latestTaxBase",
+    "latestEconomicalBase",
     "profit",
     "efficiency",
     "population",
@@ -1842,8 +2109,15 @@
     "manpowerPerPop",
     "manpower",
     "sailors",
-    "expectedArmySize",
-    "expectedNavySize",
+    "armyTotalK",
+    "armyLeviesK",
+    "armyRegularsK",
+    "armyMercenariesK",
+    "armyTotal",
+    "armyLevies",
+    "armyRegulars",
+    "armyMercenaries",
+    "navyShips",
     "admScore",
     "dipScore",
     "milScore",
@@ -1853,7 +2127,7 @@
   ];
 
   const COUNTRY_METRIC_GROUPS = {
-    key: ["tag", "playerNames", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop"],
+    key: ["tag", "playerNames", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "manpowerPerPop"],
     economy: [
       "tag",
       "playerNames",
@@ -1861,6 +2135,10 @@
       "lastMonthGoldIncome",
       "income",
       "expense",
+      "tradeIncome",
+      "taxIncome",
+      "latestTaxBase",
+      "latestEconomicalBase",
       "profit",
       "efficiency",
       "lastMonthsArmyMaintenance",
@@ -1868,7 +2146,23 @@
       "incomePerPop",
       "taxBasePerPop",
     ],
-    military: ["tag", "playerNames", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize"],
+    military: [
+      "tag",
+      "playerNames",
+      "scorePlace",
+      "manpower",
+      "manpowerPerPop",
+      "armyTotalK",
+      "armyTotal",
+      "armyLeviesK",
+      "armyLevies",
+      "armyRegularsK",
+      "armyRegulars",
+      "armyMercenariesK",
+      "armyMercenaries",
+      "sailors",
+      "navyShips",
+    ],
     demographic: [
       "tag",
       "playerNames",
@@ -1887,18 +2181,35 @@
   };
 
   const PLAYER_METRIC_GROUPS = {
-    key: ["name", "tag", "lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
-    economy: ["name", "tag", "gold", "lastMonthGoldIncome", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
-    military: ["name", "tag", "scorePlace", "manpower", "manpowerPerPop", "sailors", "expectedArmySize", "expectedNavySize", "__hide"],
+    key: ["name", "tag", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
+    economy: ["name", "tag", "gold", "lastMonthGoldIncome", "tradeIncome", "taxIncome", "latestTaxBase", "latestEconomicalBase", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
+    military: [
+      "name",
+      "tag",
+      "scorePlace",
+      "manpower",
+      "manpowerPerPop",
+      "armyTotalK",
+      "armyTotal",
+      "armyLeviesK",
+      "armyLevies",
+      "armyRegularsK",
+      "armyRegulars",
+      "armyMercenariesK",
+      "armyMercenaries",
+      "sailors",
+      "navyShips",
+      "__hide",
+    ],
     demographic: ["name", "tag", "greatPowerRank", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "__hide"],
     estates: ["name", "tag", "__estates", "__hide"],
   };
 
-  function countryColumnsForCurrentGroup() {
+  function countryColumnsForCurrentGroup(rows) {
     const keys = COUNTRY_METRIC_GROUPS[currentMetricGroup] || COUNTRY_METRIC_GROUPS.key;
     const columns = [];
     keys.forEach((key) => {
-      if (key === "__estates") appendColumns(columns, estateCountryColumns());
+      if (key === "__estates") appendColumns(columns, estateCountryColumns(rows));
       else {
         const column = COUNTRY_COLUMNS.find((col) => col.key === key);
         if (column) columns.push(column);
@@ -1907,11 +2218,11 @@
     return columns;
   }
 
-  function playerColumnsForCurrentGroup() {
+  function playerColumnsForCurrentGroup(rows) {
     const keys = PLAYER_METRIC_GROUPS[currentPlayerMetricGroup] || PLAYER_METRIC_GROUPS.key;
     const columns = [];
     keys.forEach((key) => {
-      if (key === "__estates") appendColumns(columns, estatePlayerColumns());
+      if (key === "__estates") appendColumns(columns, estatePlayerColumns(rows));
       else {
         const column = PLAYER_COLUMNS.find((col) => col.key === key);
         if (column) columns.push(column);
@@ -1921,7 +2232,7 @@
   }
 
   function isEstateMetricKey(key) {
-    return /(?:PopShare|TaxPer1k)$/.test(key || "");
+    return /(?:PopShare|TaxBaseTotal|TaxPer1k|TaxRate|ExtractedTaxTotal|ExtractedTaxPer1k)$/.test(key || "");
   }
 
   function sortValue(row, col) {
@@ -1972,7 +2283,9 @@
   // (unchanged fallback behavior).
   function defaultSortKeyFor(columns) {
     if (columns.some((col) => col.key === "lastMonthGoldIncome")) return "lastMonthGoldIncome";
-    if (columns.some((col) => col.key === estateTaxPer1kKey("commoners"))) return estateTaxPer1kKey("commoners");
+    const estateGroup = selectedEstateMetricGroup();
+    if (estateGroup && columns.some((col) => col.key === estateExtractedTaxPer1kKey(estateGroup.key))) return estateExtractedTaxPer1kKey(estateGroup.key);
+    if (estateGroup && columns.some((col) => col.key === estateExtractedTaxTotalKey(estateGroup.key))) return estateExtractedTaxTotalKey(estateGroup.key);
     if (columns.some((col) => col.key === "scorePlace")) return "scorePlace";
     return columns[0] && columns[0].key;
   }
@@ -2027,7 +2340,8 @@
         .join("");
 
       const tableClass = columns.length >= 12 ? ' class="dense-metric-table"' : "";
-      container.innerHTML = `<table${tableClass}><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
+      const headerHtml = options.headerHtml ? options.headerHtml() : "";
+      container.innerHTML = `${headerHtml}<table${tableClass}><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
 
       container.querySelectorAll("th").forEach((th) => {
         th.addEventListener("click", () => {
@@ -2077,7 +2391,7 @@
       });
     }
 
-    const columns = playerColumnsForCurrentGroup();
+    const columns = playerColumnsForCurrentGroup(visible);
     renderSortableTable(playersTableEl, visible, columns, {
       defaultSortKey: defaultSortKeyFor(columns),
       colorKeyMetrics: true,
@@ -2087,7 +2401,9 @@
       // heatScoreFor), the Players table is a handful of rows where relative
       // worst-to-best ranking is exactly what's useful.
       relativeEfficiencyHeat: true,
+      headerHtml: currentPlayerMetricGroup === "estates" ? estateTabsHtml : null,
       onRender: (container) => {
+        if (currentPlayerMetricGroup === "estates") attachEstateTabHandlers(container);
         container.querySelectorAll(".hide-player-btn").forEach((btn) => {
           btn.addEventListener("click", () => {
             const excluded = getExcludedPlayers();
@@ -2119,7 +2435,15 @@
     // "Efficiency": share of gross income kept as profit, not spent - 1.0
     // means no expenses at all, 0 means spending exactly what you make.
     c.efficiency = typeof c.profit === "number" && c.income > 0 ? c.profit / c.income : undefined;
+    // Base Tax and Economic Base have no dedicated current-value field that
+    // survives across game versions (`current_tax_base` exists on 1.1.x saves
+    // but was dropped by 1.3.x; `current_economical_base` never existed) - but
+    // both `historical_*_base` arrays' LAST entry is always "now", so that's
+    // the version-stable source for the current figure. historicalEconomicalBase
+    // is itself newer (absent on pre-1.3 saves), so Economic Base is simply
+    // blank on an older save rather than wrong.
     c.latestTaxBase = Array.isArray(c.historicalTaxBase) && c.historicalTaxBase.length ? c.historicalTaxBase[c.historicalTaxBase.length - 1] : undefined;
+    c.latestEconomicalBase = Array.isArray(c.historicalEconomicalBase) && c.historicalEconomicalBase.length ? c.historicalEconomicalBase[c.historicalEconomicalBase.length - 1] : undefined;
     c.incomePerPop = typeof c.lastMonthGoldIncome === "number" && c.population > 0 ? c.lastMonthGoldIncome / c.population : undefined;
     c.taxBasePerPop = typeof c.latestTaxBase === "number" && c.population > 0 ? c.latestTaxBase / c.population : undefined;
     c.manpowerPerPop = typeof c.manpower === "number" && c.population > 0 ? c.manpower / c.population : undefined;
@@ -2129,18 +2453,39 @@
     const byCountry = new Map((result.countries || []).map((c) => [c.number, c]));
     const totals = new Map();
     const discoveredEstateGroups = new Map(BASE_ESTATE_TAX_GROUPS.map((group) => [group.key, group.label]));
+    const popsById = populationRecordMap(result);
+    const hasPopRecords = popsById.size > 0;
+    for (const country of result.countries || []) {
+      for (const estate of Object.keys(country.taxRates || {})) {
+        const group = estateTaxMetricGroup(estate);
+        if (group !== "crown" && !discoveredEstateGroups.has(group)) discoveredEstateGroups.set(group, estateMetricLabel(group));
+      }
+    }
     for (const loc of result.locations || []) {
       if (!loc || typeof loc.owner !== "number") continue;
       const row = totals.get(loc.owner) || { development: 0, locations: 0, estateSharePop: {}, estateTaxPop: {}, estateTax: {} };
       if (typeof loc.development === "number") row.development += loc.development;
-      for (const popClass of loc.populationClasses || []) {
-        if (typeof popClass.total !== "number") continue;
-        const shareGroup = estateMetricGroup(popClass.name);
-        const taxGroup = estateTaxMetricGroup(popClass.name);
-        if (!discoveredEstateGroups.has(shareGroup)) discoveredEstateGroups.set(shareGroup, estateMetricLabel(shareGroup));
-        if (!discoveredEstateGroups.has(taxGroup)) discoveredEstateGroups.set(taxGroup, estateMetricLabel(taxGroup));
-        row.estateSharePop[shareGroup] = (row.estateSharePop[shareGroup] || 0) + popClass.total;
-        row.estateTaxPop[taxGroup] = (row.estateTaxPop[taxGroup] || 0) + popClass.total;
+      if (hasPopRecords && Array.isArray(loc.popIds) && loc.popIds.length) {
+        for (const popId of loc.popIds) {
+          const pop = popsById.get(popId);
+          if (!pop || typeof pop.size !== "number") continue;
+          const shareGroup = estateMetricGroup(pop.estate || pop.type);
+          const taxGroup = estateTaxMetricGroup(pop.estate || pop.type);
+          if (!discoveredEstateGroups.has(shareGroup)) discoveredEstateGroups.set(shareGroup, estateMetricLabel(shareGroup));
+          if (!discoveredEstateGroups.has(taxGroup)) discoveredEstateGroups.set(taxGroup, estateMetricLabel(taxGroup));
+          row.estateSharePop[shareGroup] = (row.estateSharePop[shareGroup] || 0) + pop.size;
+          row.estateTaxPop[taxGroup] = (row.estateTaxPop[taxGroup] || 0) + pop.size;
+        }
+      } else {
+        for (const popClass of loc.populationClasses || []) {
+          if (typeof popClass.total !== "number") continue;
+          const shareGroup = estateMetricGroup(popClass.name);
+          const taxGroup = estateTaxMetricGroup(popClass.name);
+          if (!discoveredEstateGroups.has(shareGroup)) discoveredEstateGroups.set(shareGroup, estateMetricLabel(shareGroup));
+          if (!discoveredEstateGroups.has(taxGroup)) discoveredEstateGroups.set(taxGroup, estateMetricLabel(taxGroup));
+          row.estateSharePop[shareGroup] = (row.estateSharePop[shareGroup] || 0) + popClass.total;
+          row.estateTaxPop[taxGroup] = (row.estateTaxPop[taxGroup] || 0) + popClass.total;
+        }
       }
       for (const [estate, value] of Object.entries(loc.estateTax || {})) {
         if (typeof value !== "number") continue;
@@ -2153,18 +2498,39 @@
       totals.set(loc.owner, row);
     }
     activeEstateTaxGroups = [...discoveredEstateGroups.entries()].map(([key, label]) => ({ key, label }));
+    if (!activeEstateTaxGroups.some((group) => group.key === currentEstateMetricGroup)) {
+      currentEstateMetricGroup = activeEstateTaxGroups[0] ? activeEstateTaxGroups[0].key : "commoners";
+    }
     for (const [countryNumber, row] of totals.entries()) {
       const country = byCountry.get(countryNumber);
       if (!country) continue;
       country.totalDevelopment = row.development;
       country.avgDevelopment = row.locations > 0 ? row.development / row.locations : undefined;
       const totalEstatePop = Object.values(row.estateSharePop).reduce((sum, value) => sum + (typeof value === "number" ? value : 0), 0);
+      const countryEstateTaxRates = {};
+      for (const [estate, value] of Object.entries(country.taxRates || {})) {
+        if (typeof value !== "number") continue;
+        const group = estateTaxMetricGroup(estate);
+        if (group === "crown") continue;
+        countryEstateTaxRates[group] = value;
+      }
       for (const group of activeEstateTaxGroups) {
         const sharePop = row.estateSharePop[group.key] || 0;
         const taxPop = row.estateTaxPop[group.key] || 0;
         const tax = row.estateTax[group.key] || 0;
+        const basePer1k = taxPop > 0 ? tax / taxPop : undefined;
+        const rate =
+          country.taxRates && Object.prototype.hasOwnProperty.call(countryEstateTaxRates, group.key)
+            ? countryEstateTaxRates[group.key]
+            : country.taxRates
+              ? 0
+              : undefined;
         country[estateShareKey(group.key)] = totalEstatePop > 0 ? sharePop / totalEstatePop : undefined;
-        country[estateTaxPer1kKey(group.key)] = taxPop > 0 ? tax / taxPop : undefined;
+        country[estateTaxBaseTotalKey(group.key)] = tax;
+        country[estateTaxPer1kKey(group.key)] = basePer1k;
+        country[estateTaxRateKey(group.key)] = rate;
+        country[estateExtractedTaxTotalKey(group.key)] = typeof rate === "number" ? tax * rate : undefined;
+        country[estateExtractedTaxPer1kKey(group.key)] = typeof basePer1k === "number" && typeof rate === "number" ? basePer1k * rate : undefined;
       }
     }
   }
@@ -2182,11 +2548,14 @@
   }
 
   function drawCountryTable() {
-    const columns = countryColumnsForCurrentGroup();
+    const rows = filteredCountries();
+    const columns = countryColumnsForCurrentGroup(rows);
     const defaultSortKey = defaultSortKeyFor(columns);
-    countriesController = renderSortableTable(countriesTableEl, filteredCountries(), columns, {
+    countriesController = renderSortableTable(countriesTableEl, rows, columns, {
       defaultSortKey,
       colorKeyMetrics: currentMetricGroup === "key" || currentMetricGroup === "estates",
+      headerHtml: currentMetricGroup === "estates" ? estateTabsHtml : null,
+      onRender: currentMetricGroup === "estates" ? attachEstateTabHandlers : null,
     });
   }
 
@@ -2216,7 +2585,36 @@
   // from before this predates the fix and would keep showing individual
   // locations as unowned even though the code is now correct, since the
   // fallback has nothing to fall back to without the province data.
-  const RESULT_SCHEMA_VERSION = 3;
+  // v7 (2026-07-16): each result.popRecords entry now carries `culture` (not
+  // just religion/estate/size) - the Culture/Religion map modes' pop-weighted
+  // secondary-group hash pattern needs it per-pop. A cached save from before
+  // this predates the field entirely, so its map would silently fall back to
+  // the old flat single-color fill with no visible error.
+  // v8 (2026-07-17): added result.estateTradeIncomes (per-estate
+  // last_month.trade_income, summed per country into country.tradeIncome for
+  // the Economy tab's new "Trade Income" column) - a cached save from before
+  // this predates the field entirely, so that column would silently show
+  // nothing rather than an error.
+  // v9 (2026-07-17): estateTradeIncomes entries now also carry `paidTaxes`
+  // (per-estate last_month.paid_taxes, summed per country into
+  // country.taxIncome for the Economy tab's new "Tax Income" column) - a
+  // cached save from before this predates the field entirely.
+  // v10 (2026-07-17): added result.armySubunitDetails (per-regiment
+  // controller/category/type/strength, joined against the optional local
+  // game_data/unit_sizes.json to compute real troop headcounts for the
+  // Military tab's new Army/Levies/Regulars/Mercenaries "(k)" columns) - a
+  // cached save from before this predates the field entirely, so those
+  // columns would silently show nothing.
+  // v11 (2026-07-17): added the Military tab's "(k)" troop-headcount columns,
+  // fed by armySubunitDetails' per-regiment `strength`.
+  // v12 (2026-07-18): corrected what `strength` MEANS - it's the regiment's
+  // current troop count in "thousands" units (0.40 = 400 men), not a 0-1 fill
+  // fraction to multiply by a separately-derived unit max size (which
+  // double-counted and read ~2.5x low). The "(k)" columns are now just the sum
+  // of strength, and an absent strength field is read as an unraised levy (0
+  // troops) rather than a phantom full regiment. A cached save from before
+  // this carries the old per-regiment strength baked in - needs a fresh parse.
+  const RESULT_SCHEMA_VERSION = 12;
 
   function saveResultToLibrary(fileName, result) {
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) return;
@@ -2293,12 +2691,17 @@
 
   // --- Shareable/restorable URL state ---
   //
-  // Fully client-side, no server (see README): a link can't hand a save's
-  // data to someone who's never uploaded it. What it CAN do is carry a
-  // stable save id + tab so reloading, bookmarking, or re-opening a link on
-  // a browser that already has that save (via the local history above)
-  // restores the exact view instead of resetting to a blank uploader - the
-  // behavior this was built to fix.
+  // A "?save=<id>&tab=<tab>" link carries a stable save id (playthrough uuid +
+  // game date, see save-library.js's deriveSaveId) plus the active tab.
+  // Resolving it, in order of preference:
+  //   1. This browser's own local history (IndexedDB) - instant, no network.
+  //   2. The shared-save backend (Supabase Storage, see js/share-store.js) -
+  //      lets a link hand the actual save to a recipient who never uploaded
+  //      it. Only active when config.js is present (a configured deploy);
+  //      absent in a plain checkout, where this degrades to local-only.
+  //   3. Otherwise, prompt the user to drop that save file in.
+  // Uploading to the backend happens only on an explicit Share click, never
+  // automatically - a save you merely open never leaves your browser.
 
   function updateShareUrl() {
     if (!latestResult || typeof SaveLibrary === "undefined") return;
@@ -2330,37 +2733,143 @@
     if (!id) return;
     const requestedTab = params.get("tab");
     pendingShareTab = VALID_TABS.includes(requestedTab) ? requestedTab : "metrics";
-    if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) {
+
+    // Fastest path first: this browser already has the save locally (its own
+    // upload, or a previous visit to this link that cached it) - no network.
+    const local = typeof SaveLibrary !== "undefined" && SaveLibrary.available ? SaveLibrary.get(id) : Promise.resolve(null);
+    local
+      .then((record) => {
+        if (record) {
+          onParsed(record.result, { persist: false, displayName: record.fileName });
+          activateTab(pendingShareTab);
+          return;
+        }
+        return loadSharedSaveOrPrompt(id);
+      })
+      .catch(() => loadSharedSaveOrPrompt(id));
+  }
+
+  // Local miss: try the shared-save backend (someone handed this link to a
+  // recipient who never uploaded the save - see js/share-store.js). On
+  // success, render it exactly like a freshly-parsed save AND cache it
+  // locally so reopening the link is instant/offline. On a miss or a build
+  // with no backend configured, fall back to the existing "drop that save
+  // file in" prompt.
+  function loadSharedSaveOrPrompt(id) {
+    if (typeof ShareStore === "undefined" || !ShareStore.isConfigured()) {
+      pendingShareId = id;
       activateTab("load");
       showPendingShareNotice(id);
       return;
     }
-    SaveLibrary.get(id).then((record) => {
-      if (record) {
-        onParsed(record.result, { persist: false, displayName: record.fileName });
+    activateTab("load");
+    pendingShareNoticeEl.hidden = false;
+    pendingShareNoticeEl.textContent = "Loading shared save…";
+    return ShareStore.fetch(id)
+      .then((result) => {
+        if (!result) {
+          pendingShareId = id;
+          showPendingShareNotice(id);
+          return;
+        }
+        pendingShareNoticeEl.hidden = true;
+        onParsed(result, { displayName: sharedDisplayName(id, result) });
         activateTab(pendingShareTab);
-      } else {
+      })
+      .catch((err) => {
         pendingShareId = id;
-        activateTab("load");
-        showPendingShareNotice(id);
-      }
-    });
+        const date = decodeShareDate(id);
+        pendingShareNoticeEl.hidden = false;
+        pendingShareNoticeEl.textContent = `Couldn't load the shared save (${err.message}). Drop the ${
+          date ? `save from ${date}` : "save file"
+        } in above to view it.`;
+      });
   }
 
-  copyLinkBtn.addEventListener("click", () => {
-    if (!latestResult || !navigator.clipboard) return;
+  function sharedDisplayName(id, result) {
+    const name = result && result.metadata && result.metadata.playthrough_name;
+    const date = decodeShareDate(id);
+    return `Shared: ${name || "campaign"}${date ? ` (${date})` : ""}`;
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return Promise.reject(new Error("clipboard unavailable"));
+  }
+
+  function flashCopyLink(msg) {
+    copyLinkBtn.textContent = msg;
+    setTimeout(() => {
+      copyLinkBtn.textContent = copyLinkBtn.dataset.label || "Copy link";
+    }, 2000);
+  }
+
+  // A configured backend turns "Copy link" into a real share (upload the
+  // compressed save, then copy a link anyone can open); without one it stays
+  // the old local-only copy. Label reflects which one you get.
+  const shareBackendOn = typeof ShareStore !== "undefined" && ShareStore.isConfigured();
+  if (shareBackendOn) {
+    copyLinkBtn.textContent = "Share link";
+    copyLinkBtn.title = "Upload this save and copy a link anyone can open";
+  }
+  copyLinkBtn.dataset.label = copyLinkBtn.textContent;
+
+  copyLinkBtn.addEventListener("click", async () => {
+    if (!latestResult) return;
     updateShareUrl();
-    navigator.clipboard
-      .writeText(location.href)
-      .then(() => {
-        const original = copyLinkBtn.textContent;
-        copyLinkBtn.textContent = "Copied!";
-        setTimeout(() => {
-          copyLinkBtn.textContent = original;
-        }, 1500);
-      })
+    const saveId = typeof SaveLibrary !== "undefined" ? SaveLibrary.deriveSaveId(latestResult) : null;
+
+    if (shareBackendOn && saveId) {
+      copyLinkBtn.disabled = true;
+      copyLinkBtn.textContent = "Sharing…";
+      try {
+        latestResult.__schemaVersion = RESULT_SCHEMA_VERSION;
+        await ShareStore.upload(saveId, latestResult);
+        await copyToClipboard(location.href).catch(() => {});
+        flashCopyLink("Link copied — anyone can view");
+      } catch (err) {
+        await copyToClipboard(location.href).catch(() => {});
+        flashCopyLink("Upload failed — copied local link");
+        if (typeof console !== "undefined") console.warn("Shared-save upload failed:", err);
+      } finally {
+        copyLinkBtn.disabled = false;
+      }
+      return;
+    }
+
+    copyToClipboard(location.href)
+      .then(() => flashCopyLink("Copied!"))
       .catch(() => {});
   });
+
+  // "Copy image" buttons on each table/chart panel - separate from the save-
+  // link sharing above, this just puts a picture of the current view on the
+  // clipboard so it can be pasted straight into Discord. Targets the actual
+  // <table> element (not the surrounding `.table-wrap`, which is a scrollable
+  // `max-height` box) so a long Countries table captures every row, not just
+  // whatever's currently scrolled into view. `js/copy-image.js` (loaded
+  // before this file) does the actual rasterization/clipboard work.
+  function wireTableCopyImageButton(btn, containerEl, filename) {
+    if (!btn || !containerEl) return;
+    CopyImage.wireCopyImageButton(
+      btn,
+      () => {
+        const target = containerEl.querySelector("table") || containerEl;
+        return CopyImage.elementToCanvas(target);
+      },
+      { filename }
+    );
+  }
+  wireTableCopyImageButton(copyPlayersImageBtn, playersTableEl, "players.png");
+  wireTableCopyImageButton(copyBlackDeathImageBtn, blackDeathTableEl, "black-death.png");
+  wireTableCopyImageButton(copyCountriesImageBtn, countriesTableEl, "countries.png");
+  if (copyTrendsImageBtn) {
+    CopyImage.wireCopyImageButton(
+      copyTrendsImageBtn,
+      () => CopyImage.elementToCanvas(document.querySelector(".trends-grid")),
+      { filename: "trends.png" }
+    );
+  }
 
   // The inline <script> in index.html's <head> already stamped data-theme
   // from localStorage (if any) before this file even loaded, to avoid a

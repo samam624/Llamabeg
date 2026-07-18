@@ -1,7 +1,12 @@
 // Runs the (potentially multi-second) save parse off the main thread so the
 // page stays responsive on large files. Handles both melted (plaintext) and
 // compressed (binary-tokenized) EU5 saves.
-importScripts("clausewitz.js", "eu5-fixed-ids.js", "clausewitz-binary.js");
+const WORKER_ASSET_VERSION = "v1.2.16";
+importScripts(
+  `clausewitz.js?v=${WORKER_ASSET_VERSION}`,
+  `eu5-fixed-ids.js?v=${WORKER_ASSET_VERSION}`,
+  `clausewitz-binary.js?v=${WORKER_ASSET_VERSION}`
+);
 
 self.onmessage = async (event) => {
   const file = event.data.file;
@@ -43,10 +48,14 @@ self.onmessage = async (event) => {
         players: result.players,
         playerSessions: result.playerSessions,
         locations: result.locations,
+        popRecords: result.popRecords,
+        estateTradeIncomes: result.estateTradeIncomes,
+        armySubunitDetails: result.armySubunitDetails,
         dependencies: result.dependencies,
         cultures: result.cultures,
         religions: result.religions,
         markets: result.markets,
+        tradeRoutes: result.tradeRoutes,
         wars: result.wars,
         blackDeath: result.blackDeath,
         provinceOwnerByDefinition: result.provinceOwnerByDefinition,

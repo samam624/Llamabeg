@@ -48,6 +48,15 @@
       </section>
 
       <section class="panel">
+        <div class="panel-header">
+          <h2 data-field="leaderboardHeading">Llama Points Leaderboard</h2>
+          <label class="check-label"><input type="checkbox" data-field="showDeparted" /> Show departed players</label>
+        </div>
+        <p class="note">Hide a player once they've left the campaign for good - their Llama Score from while they were actually playing stays counted, they just stop cluttering the current standings. This is shared with the web app's map/player list too.</p>
+        <div data-field="leaderboardTable" class="table-wrap"><p class="note">No players found yet.</p></div>
+      </section>
+
+      <section class="panel">
         <h2>Ongoing Wars</h2>
         <div data-field="ongoingWarsTable" class="table-wrap"><p class="note">No ongoing wars.</p></div>
       </section>
@@ -60,11 +69,6 @@
         <p data-field="whitePeaceNote" class="note"></p>
         <p class="note">Check a war off once you've confirmed the outcome against your own memory of the game - your checks are saved on this PC.</p>
         <div data-field="concludedWarsTable" class="table-wrap"><p class="note">No concluded wars scored yet.</p></div>
-      </section>
-
-      <section class="panel">
-        <h2 data-field="leaderboardHeading">Llama Points Leaderboard</h2>
-        <div data-field="leaderboardTable" class="table-wrap"><p class="note">No players found yet.</p></div>
       </section>
     </template>
 

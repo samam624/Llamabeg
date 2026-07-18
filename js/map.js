@@ -23,13 +23,38 @@
     development: wikiIcon("Tab production.png"),
     population: wikiIcon("Tab demography.png"),
     tax: wikiIcon("Tax base.png"),
-    trade: wikiIcon("Goods.png"),
+    trade: wikiIcon("Building category rgo building category.png"),
     religion: wikiIcon("Religion.png"),
     culture: wikiIcon("Culture.png"),
     control: wikiIcon("Estates.png"),
     prosperity: wikiIcon("Tab advances.png"),
     marketAccess: wikiIcon("Market.png"),
+    // "Local autonomy.png"/"Trade route.png" (the original picks for these
+    // two) both looked fine on a HEAD-only check (redirect exists, 301) but
+    // actually resolve to an HTML wiki page, not a real image, once the
+    // redirect is followed - the img.onerror fallback quietly dropped the
+    // icon and left a text-only button, easy to miss. Re-verified THESE two
+    // with `curl -sL -w "%{content_type}"` (not just the status code) before
+    // picking them - both come back image/png.
+    taxGap: wikiIcon("Tax efficiency.png"),
+    tradeNetwork: wikiIcon("Trade capacity.png"),
   };
+
+  // Per a real user screenshot showing the whole toolbar wrapped to 2 rows
+  // and "blocking off" too much of the screen - collapsing related mapmodes
+  // into a click-to-expand group cuts the always-visible button count from
+  // 13 down to 7 (4 solo modes + 3 group buttons), while still leaving room
+  // to add more modes to a group later without growing the toolbar itself.
+  // Order matches where these modes used to sit in the flat button row.
+  // Any mode key NOT listed here (or in TOOLBAR_SOLO_MODES below) still
+  // renders as a normal solo button - nothing needs to change here just
+  // because a brand new standalone mapmode gets added later.
+  const TOOLBAR_SOLO_MODES = ["political", "players", "development", "population"];
+  const TOOLBAR_GROUPS = [
+    { label: "Economy", keys: ["tax", "taxGap", "prosperity", "control"] },
+    { label: "Trade", keys: ["marketAccess", "tradeNetwork", "trade"] },
+    { label: "Demographic", keys: ["religion", "culture"] },
+  ];
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -293,23 +318,77 @@
     { t: 0.99, color: [120, 200, 90] }, // next 45%: green
     { t: 1.0, color: [90, 225, 235] }, // top 1%: bright cyan-blue
   ];
-  function heatColor(t) {
+  // Colorblind-safe alternative ramp, same t-breakpoints as HEAT_STOPS above
+  // (so "where the transitions happen" stays identical, only the hues
+  // change) - this is the Viridis colormap, the standard perceptually-
+  // uniform/colorblind-safe sequential palette (dark purple -> blue -> teal
+  // -> green -> yellow), chosen over a tweaked version of the default ramp
+  // because the default's brown-to-green transition is exactly the
+  // confusion axis deuteranopia/protanopia (red-green colorblindness)
+  // collapses. Toggled via the map toolbar's "Colorblind mode" checkbox
+  // (mapState.colorblind) - see heatColor()'s second argument.
+  const HEAT_STOPS_COLORBLIND = [
+    { t: 0.0, color: [68, 1, 84] },
+    { t: 0.25, color: [59, 82, 139] },
+    { t: 0.54, color: [33, 144, 141] },
+    { t: 0.99, color: [93, 201, 99] },
+    { t: 1.0, color: [253, 231, 37] },
+  ];
+  function heatColor(t, colorblind) {
     t = Math.max(0, Math.min(1, t));
-    for (let i = 0; i < HEAT_STOPS.length - 1; i++) {
-      const a = HEAT_STOPS[i];
-      const b = HEAT_STOPS[i + 1];
+    const stops = colorblind ? HEAT_STOPS_COLORBLIND : HEAT_STOPS;
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i];
+      const b = stops[i + 1];
       if (t < a.t || t > b.t) continue;
       const span = b.t - a.t;
       const u = span > 0 ? (t - a.t) / span : 0;
       return [0, 1, 2].map((i) => Math.round(a.color[i] + (b.color[i] - a.color[i]) * u));
     }
-    return HEAT_STOPS[HEAT_STOPS.length - 1].color;
+    return stops[stops.length - 1].color;
+  }
+
+  // Colorblind mode is an accessibility preference, not a per-save setting -
+  // persisted across saves/reloads (unlike "shade vassals", which resets
+  // every session) so a colorblind user doesn't have to re-toggle it every
+  // time they open a save.
+  const COLORBLIND_STORAGE_KEY = "eu5-analyzer-map-colorblind";
+  function readColorblindPref() {
+    try {
+      return localStorage.getItem(COLORBLIND_STORAGE_KEY) === "1";
+    } catch (err) {
+      return false; // localStorage unavailable (private browsing etc.) - just default off.
+    }
+  }
+  function writeColorblindPref(value) {
+    try {
+      localStorage.setItem(COLORBLIND_STORAGE_KEY, value ? "1" : "0");
+    } catch (err) {
+      // Nothing to do - the toggle still works for the rest of this session.
+    }
   }
 
   const NO_DATA_COLOR = [107, 96, 74]; // unclaimed/no-data land - distinct from water so it still reads as land
   const WATER_COLOR = [26, 48, 78];
   const NON_PLAYER_MUTED = [58, 54, 46]; // "Players" mapmode: everyone else fades into the background
+  const TRADE_NETWORK_BG_COLOR = [32, 28, 22]; // Trade Network mapmode: quiet backdrop for locations outside any market
+  const TRADE_NETWORK_MEMBER_COLOR = [46, 41, 32]; // Trade Network mapmode: slightly lighter backdrop for a market member location
   const BORDER_DARKEN = -0.62; // player-realm outline: this much darker than the location's own political color
+
+  // Culture/Religion mapmodes: a diagonal two-color hash over a location's
+  // flat fill, same idea as the base game's own culture/religion maps - the
+  // secondary stripe color is whichever group is the second-largest by real
+  // (pop-weighted) population share within that one location, not just a
+  // flag on the location record. Below MINORITY_HASH_MIN_SHARE the second
+  // group is treated as noise (a single stray migrant pop shouldn't paint a
+  // visible stripe over an otherwise-uniform location). HASH_STRIPE_PERIOD
+  // is in SOURCE pixels (map space), not screen pixels, so the pattern is
+  // fixed to the underlying data and doesn't slide around while panning/
+  // zooming - only ever applied at box===1 (see renderViewport/the shader's
+  // u_box check), same "skip fine detail once zoomed out far enough that
+  // it'd just be noise" rule the per-location border pass already follows.
+  const MINORITY_HASH_MIN_SHARE = 0.08;
+  const HASH_STRIPE_PERIOD = 8;
 
   // `mapState` is a small mutable object (not rebuilt per-repaint) so a
   // checkbox like "shade vassals by overlord color" can be toggled without
@@ -325,6 +404,59 @@
     const religionByNumber = new Map((result.religions || []).map((r) => [r.number, r]));
     const marketByNumber = new Map((result.markets || []).map((m) => [m.number, m]));
 
+    // Real per-location group shares (culture or religion), summed from each
+    // location's actual pop instances (result.popRecords, referenced by
+    // result.locations[].popIds) - the same `size` figures the population-
+    // total fix trusts (see memory: individual pop `size` values sum exactly
+    // to the location's own pop_stats class totals, confirmed against real
+    // save data), so this can never disagree with a location's own (now-
+    // correct) population count. Falls back to the location's single flat
+    // `culture`/`religion` field (no secondary, no hash) when there's no
+    // resolvable pop breakdown - a stale cached save from before per-pop
+    // culture was parsed, includeLocations without population data, or a
+    // genuinely pop-less location (e.g. wasteland).
+    function computeGroupShares(field) {
+      const sharesByLocation = new Map();
+      const popsById = new Map();
+      for (const pop of result.popRecords || []) {
+        if (pop && typeof pop.number === "number") popsById.set(pop.number, pop);
+      }
+      const hasPopData = popsById.size > 0;
+      for (const loc of result.locations || []) {
+        if (!loc) continue;
+        if (hasPopData && Array.isArray(loc.popIds) && loc.popIds.length) {
+          const totals = new Map();
+          let total = 0;
+          for (const popId of loc.popIds) {
+            const pop = popsById.get(popId);
+            const groupId = pop && pop[field];
+            // 0 is this codebase's "not set" sentinel (same convention as
+            // owner/culture/religion elsewhere - e.g. ownerLUT above) rather
+            // than a real id, so it's excluded here the same way the old
+            // flat-field check (`!loc.culture`) treated it as falsy.
+            if (!pop || typeof pop.size !== "number" || typeof groupId !== "number" || !groupId) continue;
+            totals.set(groupId, (totals.get(groupId) || 0) + pop.size);
+            total += pop.size;
+          }
+          if (total > 0) {
+            const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+            const entry = { primary: sorted[0][0], primaryShare: sorted[0][1] / total };
+            if (sorted.length > 1 && sorted[1][1] / total >= MINORITY_HASH_MIN_SHARE) {
+              entry.secondary = sorted[1][0];
+              entry.secondaryShare = sorted[1][1] / total;
+            }
+            sharesByLocation.set(loc.number, entry);
+            continue;
+          }
+        }
+        const single = loc[field];
+        if (single) sharesByLocation.set(loc.number, { primary: single, primaryShare: 1 });
+      }
+      return sharesByLocation;
+    }
+    const cultureShares = computeGroupShares("culture");
+    const religionShares = computeGroupShares("religion");
+
     function isFocusedLoc(loc) {
       return !mapState.focusCountry || (loc && loc.owner === mapState.focusCountry);
     }
@@ -339,14 +471,14 @@
     // Scaling min -> max instead (per user request) uses the FULL color
     // range for the actual spread of values that exist, so real
     // differences between locations are visible rather than compressed.
-    const HEAT_SCALE_FIELDS = ["development", "population", "tax", "control", "prosperity"];
+    const HEAT_SCALE_FIELDS = ["development", "population", "tax", "control", "prosperity", "taxGap"];
     // development/population/tax get colored by PERCENTILE RANK among this
     // scope's locations, not by where the value sits between min and max
     // (even in log space) - see the note above filteredHeatColor for why:
     // real save data stays right-skewed even after a log transform, so a
     // continuous scale still crowds most locations toward one end. Needs a
     // sorted list of every real value in scope to look up a rank from.
-    const PERCENTILE_FIELDS = new Set(["development", "population", "tax"]);
+    const PERCENTILE_FIELDS = new Set(["development", "population", "tax", "taxGap"]);
     function computeMetricScales(countryNumber) {
       const scales = {};
       for (const field of HEAT_SCALE_FIELDS) scales[field] = { min: Infinity, max: -Infinity, sorted: PERCENTILE_FIELDS.has(field) ? [] : null };
@@ -468,8 +600,24 @@
       return HEAT_SCALE_FIELDS.some((f) => typeof loc[f] === "number");
     }
 
+    // "Tax Gap" isn't a field the save carries directly - it's derived from
+    // two that already are: `tax` (Tax Base, this location's tax value AT
+    // FULL/100% control - confirmed by the field being labeled "Tax Base"
+    // in the existing Tax mode, not "effective" or "collected") and
+    // `control` (0-1 fraction of that base actually being collected right
+    // now). tax*(1-control) is exactly "how much more base tax you'd gain
+    // here if you brought control to 100%" - the PDX-tools-style signal the
+    // user asked for. Needs BOTH tax and control to be real numbers (not
+    // just tax) - a location with tax but no control value at all (see
+    // hasAnyLocationData's comment - ~2,100 of 13,500 owned locations lack
+    // one) falls through to the same "owned but missing = 0" treatment as
+    // every other heat field, rather than guessing a control value.
     function ownedNumericOrZero(loc, field) {
       if (!loc || isImpassable(loc)) return undefined;
+      if (field === "taxGap") {
+        if (typeof loc.tax === "number" && typeof loc.control === "number") return Math.max(0, loc.tax * (1 - loc.control));
+        return hasAnyLocationData(loc) && typeof loc.owner === "number" ? 0 : undefined;
+      }
       if (typeof loc[field] === "number") return loc[field];
       if (!hasAnyLocationData(loc)) return undefined;
       return typeof loc.owner === "number" ? 0 : undefined;
@@ -492,9 +640,9 @@
       if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
       const scale = (mapState.metricScales && mapState.metricScales[field]) || { min: 0, max: 1 };
       if (PERCENTILE_FIELDS.has(field)) {
-        return heatColor(percentileRank(scale.sorted, value));
+        return heatColor(percentileRank(scale.sorted, value), mapState.colorblind);
       }
-      return heatColor((value - scale.min) / (scale.max - scale.min));
+      return heatColor((value - scale.min) / (scale.max - scale.min), mapState.colorblind);
     }
 
     function countryColor(countryNumber) {
@@ -604,7 +752,7 @@
     }
 
     function gradientLegend(minValue, maxValue, formatFn) {
-      return { type: "gradient", colorAt: heatColor, minLabel: formatFn(minValue), maxLabel: formatFn(maxValue) };
+      return { type: "gradient", colorAt: (t) => heatColor(t, mapState.colorblind), minLabel: formatFn(minValue), maxLabel: formatFn(maxValue) };
     }
 
     function scaleFor(field) {
@@ -709,6 +857,21 @@
           return gradientLegend(s.min, s.max, (v) => fmtNum(v, 2) + " tax");
         },
       },
+      taxGap: {
+        label: "Tax Gap",
+        colorFor(id) {
+          return filteredHeatColor(locByNumber.get(id), "taxGap");
+        },
+        tooltipFor(id) {
+          const loc = locByNumber.get(id);
+          const value = ownedNumericOrZero(loc, "taxGap");
+          return typeof value === "number" ? `Tax Gap: ${fmtNum(value, 3)} tax (at ${fmtPercent(loc.control, 0)} control)` : null;
+        },
+        legend: () => {
+          const s = scaleFor("taxGap");
+          return gradientLegend(s.min, s.max, (v) => fmtNum(v, 2) + " tax");
+        },
+      },
       control: {
         label: "Control",
         colorFor(id) {
@@ -747,7 +910,7 @@
           if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
           // No market id on record for this location (rare) - fall back to
           // the old single global gradient rather than showing flat grey.
-          if (loc.market === undefined || loc.market === null) return heatColor(loc.marketAccess);
+          if (loc.market === undefined || loc.market === null) return heatColor(loc.marketAccess, mapState.colorblind);
           return marketAccessColor(loc.market, loc.marketAccess);
         },
         tooltipFor(id) {
@@ -768,8 +931,32 @@
           note: "Hue varies by market - hover a location for its exact % and market name.",
         }),
       },
+      tradeNetwork: {
+        label: "Trade Network",
+        colorFor(id) {
+          const loc = locByNumber.get(id);
+          // A dim, uniform backdrop rather than the usual political/no-data
+          // fill - this mode's whole point is the overlay of trade-route
+          // lines and market nodes drawn on top (see drawLabelOverlay's
+          // tradeNetwork branch), which needs a quiet, low-contrast base to
+          // read against instead of competing with a data-driven per-
+          // location color underneath it.
+          return loc && loc.market !== undefined && loc.market !== null ? TRADE_NETWORK_MEMBER_COLOR : TRADE_NETWORK_BG_COLOR;
+        },
+        tooltipFor(id) {
+          const loc = locByNumber.get(id);
+          const market = loc && marketName(loc.market);
+          return market ? `${market}` : null;
+        },
+        legend: () => ({
+          type: "categorical",
+          items: [],
+          overflow: 0,
+          note: "Line width/brightness = total trade volume between two markets; node size = total trade volume through that market. Click a market to see its trade stats.",
+        }),
+      },
       trade: {
-        label: "Trade Goods",
+        label: "RGO",
         colorFor(id) {
           const loc = locByNumber.get(id);
           if (!loc || !loc.rawMaterial) return NO_DATA_COLOR;
@@ -789,26 +976,44 @@
       religion: {
         label: "Religion",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || !loc.religion) return NO_DATA_COLOR;
-          return definitionColor(religionByNumber.get(loc.religion), loc.religion);
+          const shares = religionShares.get(id);
+          if (!shares) return NO_DATA_COLOR;
+          return definitionColor(religionByNumber.get(shares.primary), shares.primary);
+        },
+        hashFor(id) {
+          const shares = religionShares.get(id);
+          if (!shares || !shares.secondary) return null;
+          return { color: definitionColor(religionByNumber.get(shares.secondary), shares.secondary), share: shares.secondaryShare };
         },
         tooltipFor(id) {
-          const loc = locByNumber.get(id);
-          return loc && loc.religion ? definitionName(religionByNumber.get(loc.religion), "Religion", loc.religion) : null;
+          const shares = religionShares.get(id);
+          if (!shares) return null;
+          const primaryName = definitionName(religionByNumber.get(shares.primary), "Religion", shares.primary);
+          if (!shares.secondary) return `${primaryName} (${fmtPercent(shares.primaryShare, 0)})`;
+          const secondaryName = definitionName(religionByNumber.get(shares.secondary), "Religion", shares.secondary);
+          return `${primaryName} ${fmtPercent(shares.primaryShare, 0)} / ${secondaryName} ${fmtPercent(shares.secondaryShare, 0)}`;
         },
         // No legend - see the Trade Goods mode's comment above.
       },
       culture: {
         label: "Culture",
         colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || !loc.culture) return NO_DATA_COLOR;
-          return definitionColor(cultureByNumber.get(loc.culture), loc.culture);
+          const shares = cultureShares.get(id);
+          if (!shares) return NO_DATA_COLOR;
+          return definitionColor(cultureByNumber.get(shares.primary), shares.primary);
+        },
+        hashFor(id) {
+          const shares = cultureShares.get(id);
+          if (!shares || !shares.secondary) return null;
+          return { color: definitionColor(cultureByNumber.get(shares.secondary), shares.secondary), share: shares.secondaryShare };
         },
         tooltipFor(id) {
-          const loc = locByNumber.get(id);
-          return loc && loc.culture ? definitionName(cultureByNumber.get(loc.culture), "Culture", loc.culture) : null;
+          const shares = cultureShares.get(id);
+          if (!shares) return null;
+          const primaryName = definitionName(cultureByNumber.get(shares.primary), "Culture", shares.primary);
+          if (!shares.secondary) return `${primaryName} (${fmtPercent(shares.primaryShare, 0)})`;
+          const secondaryName = definitionName(cultureByNumber.get(shares.secondary), "Culture", shares.secondary);
+          return `${primaryName} ${fmtPercent(shares.primaryShare, 0)} / ${secondaryName} ${fmtPercent(shares.secondaryShare, 0)}`;
         },
         // No legend - see the Trade Goods mode's comment above.
       },
@@ -984,6 +1189,7 @@
     uniform sampler2D u_borderTex;  // rgb = political-darkened border color, a = isSea
     uniform sampler2D u_ownerTex;   // rg = ownerLUT (16-bit), ba = playerRealmLUT (16-bit)
     uniform sampler2D u_neutralTex; // rg = neutralEnclosedRealmLUT (16-bit), b = isLake
+    uniform sampler2D u_hashTex;    // Culture/Religion diagonal hash: rgb = secondary color, a = secondary share (0 = no hash for this id, matches JS's HASH_STRIPE_PERIOD)
 
     uniform vec2 u_mapSize;
     uniform vec2 u_lutSize;
@@ -1052,6 +1258,21 @@
           }
         }
         if (n > 0.0) color = sum / n;
+      } else {
+        // Culture/Religion diagonal two-color hash - mirrors the CPU
+        // renderViewport's box===1 branch exactly (same source-space phase,
+        // same stripe-count rounding), only ever active when hashHere.a > 0
+        // (every other mapmode packs an all-zero hash texture, so this is a
+        // no-op elsewhere). Phased off srcPixel (map space), not v_destPixel
+        // (screen space), so the pattern stays fixed to the underlying data
+        // while panning/zooming instead of sliding around.
+        vec4 hashHere = texture(u_hashTex, lutUV(id));
+        if (hashHere.a > 0.0) {
+          float period = 8.0;
+          float stripe = mod(srcPixel.x + srcPixel.y, period);
+          float secondaryStripes = floor(hashHere.a * period + 0.5);
+          if (stripe < secondaryStripes) color = hashHere.rgb * 255.0;
+        }
       }
 
       vec2 rightSrc = srcPixelFor(v_destPixel + vec2(1.0, 0.0));
@@ -1181,6 +1402,7 @@
   function packModeLutTextures(maxId, w, h, luts, isWater, isSea) {
     const fill = new Uint8Array(w * h * 4);
     const border = new Uint8Array(w * h * 4);
+    const hash = new Uint8Array(w * h * 4);
     for (let id = 0; id <= maxId; id++) {
       const o = id * 4;
       fill[o] = luts.lutR[id];
@@ -1191,8 +1413,12 @@
       border[o + 1] = luts.borderG[id];
       border[o + 2] = luts.borderB[id];
       border[o + 3] = isSea[id] ? 255 : 0;
+      hash[o] = luts.hashR[id];
+      hash[o + 1] = luts.hashG[id];
+      hash[o + 2] = luts.hashB[id];
+      hash[o + 3] = luts.hashShare[id];
     }
-    return { fill, border };
+    return { fill, border, hash };
   }
 
   // Tries to stand up a WebGL2 renderer for the given canvas; returns null
@@ -1238,6 +1464,7 @@
       "u_borderTex",
       "u_ownerTex",
       "u_neutralTex",
+      "u_hashTex",
     ]) {
       u[name] = gl.getUniformLocation(program, name);
     }
@@ -1260,6 +1487,7 @@
     const borderTex = makeTexture(2);
     const ownerTex = makeTexture(3);
     const neutralTex = makeTexture(4);
+    const hashTex = makeTexture(5);
 
     const staticLuts = packStaticLutTextures(maxId, initialLuts);
     const lutW = staticLuts.w;
@@ -1272,13 +1500,16 @@
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, staticLuts.neutral);
 
     function setModeLuts(luts) {
-      const { fill, border } = packModeLutTextures(maxId, lutW, lutH, luts, initialLuts.isWater, initialLuts.isSea);
+      const { fill, border, hash } = packModeLutTextures(maxId, lutW, lutH, luts, initialLuts.isWater, initialLuts.isSea);
       gl.activeTexture(gl.TEXTURE0 + 1);
       gl.bindTexture(gl.TEXTURE_2D, fillTex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, fill);
       gl.activeTexture(gl.TEXTURE0 + 2);
       gl.bindTexture(gl.TEXTURE_2D, borderTex);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, border);
+      gl.activeTexture(gl.TEXTURE0 + 5);
+      gl.bindTexture(gl.TEXTURE_2D, hashTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, lutW, lutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, hash);
     }
 
     function render(destW, destH, view, dpr, box, drawLocationBorders, drawRealmBorders, selectedId) {
@@ -1308,6 +1539,7 @@
       gl.uniform1i(u.u_borderTex, 2);
       gl.uniform1i(u.u_ownerTex, 3);
       gl.uniform1i(u.u_neutralTex, 4);
+      gl.uniform1i(u.u_hashTex, 5);
 
       gl.bindBuffer(gl.ARRAY_BUFFER, quad);
       gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
@@ -1337,7 +1569,28 @@
     if (canvas.width !== destW) canvas.width = destW;
     if (canvas.height !== destH) canvas.height = destH;
 
-    const { lutR, lutG, lutB, borderR, borderG, borderB, isWater, isSea, isLake, ownerLUT, playerRealmLUT, neutralEnclosedRealmLUT, playerLabels, tradeGoodLabels } = luts;
+    const {
+      lutR,
+      lutG,
+      lutB,
+      hashR,
+      hashG,
+      hashB,
+      hashShare,
+      borderR,
+      borderG,
+      borderB,
+      isWater,
+      isSea,
+      isLake,
+      ownerLUT,
+      playerRealmLUT,
+      neutralEnclosedRealmLUT,
+      playerLabels,
+      tradeGoodLabels,
+      tradeNetworkEdges,
+      marketNodes,
+    } = luts;
     const s = view.scale * dpr;
     const ox = view.offX * dpr;
     const oy = view.offY * dpr;
@@ -1400,9 +1653,30 @@
         destRealm[di] = ownerLUT[id];
         inMap[di] = 1;
         if (box === 1) {
-          out[i] = lutR[id];
-          out[i + 1] = lutG[id];
-          out[i + 2] = lutB[id];
+          // Diagonal two-color hash (Culture/Religion mapmodes only -
+          // hashShare is 0 for every id in every other mode): phase is keyed
+          // off the SOURCE pixel, not the destination one, so the pattern is
+          // fixed to the map data and doesn't slide around while panning.
+          // Only attempted at box===1 (zoomed in enough to matter) - same
+          // "skip fine detail once zoomed out" rule as the per-location
+          // border pass below.
+          if (hashShare[id] > 0) {
+            const stripe = (((srcX + srcY) % HASH_STRIPE_PERIOD) + HASH_STRIPE_PERIOD) % HASH_STRIPE_PERIOD;
+            const secondaryStripes = Math.round((hashShare[id] / 255) * HASH_STRIPE_PERIOD);
+            if (stripe < secondaryStripes) {
+              out[i] = hashR[id];
+              out[i + 1] = hashG[id];
+              out[i + 2] = hashB[id];
+            } else {
+              out[i] = lutR[id];
+              out[i + 1] = lutG[id];
+              out[i + 2] = lutB[id];
+            }
+          } else {
+            out[i] = lutR[id];
+            out[i + 1] = lutG[id];
+            out[i + 2] = lutB[id];
+          }
         } else {
           let sumR = 0,
             sumG = 0,
@@ -1662,7 +1936,7 @@
     }
 
     ctx.putImageData(imgData, 0, 0);
-    drawLabelOverlay(ctx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, view.scale);
+    drawLabelOverlay(ctx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, view.scale, { edges: tradeNetworkEdges, nodes: marketNodes });
   }
 
   // Shared between the CPU renderViewport() above (drawing straight onto
@@ -1672,8 +1946,88 @@
   // context) - same label positions/styling either way. Callers are
   // responsible for clearing `targetCtx` first if it needs clearing (the
   // CPU path doesn't - putImageData just overwrote it).
-  function drawLabelOverlay(targetCtx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, viewScale) {
+  function drawLabelOverlay(targetCtx, destW, destH, dpr, s, ox, oy, playerLabels, tradeGoodLabels, viewScale, tradeNetwork) {
+    // Drawn first (before labels) so player/trade-good text always sits on
+    // top of the network lines rather than getting crossed out by one.
+    if (tradeNetwork && tradeNetwork.edges && tradeNetwork.edges.length) {
+      const { edges, nodes } = tradeNetwork;
+      const maxAmount = edges[0].amount || 1;
+      targetCtx.save();
+      targetCtx.lineCap = "round";
+      for (const e of edges) {
+        const ax = e.ax * s + ox;
+        const ay = e.ay * s + oy;
+        const bx = e.bx * s + ox;
+        const by = e.by * s + oy;
+        if (
+          (ax < -40 && bx < -40) ||
+          (ay < -40 && by < -40) ||
+          (ax > destW + 40 && bx > destW + 40) ||
+          (ay > destH + 40 && by > destH + 40)
+        )
+          continue;
+        // Log-scaled, not linear: trade volume between market pairs is
+        // heavily skewed (a handful of major routes dwarf most others) - a
+        // linear scale would render almost every route at the thin/faint
+        // end and only the single largest as visible, same lesson as the
+        // heat-gradient fields' own percentile/log handling above.
+        const t = Math.log1p(e.amount) / Math.log1p(maxAmount);
+        const width = (0.6 + t * 3.4) * dpr;
+        const alpha = 0.22 + t * 0.66;
+        // A slight bow (quadratic curve) rather than a straight chord - one
+        // of a handful of routes between the same two markets doesn't just
+        // overdraw the others, and the whole diagram reads as a "flow"
+        // network rather than a rigid straight-line grid.
+        const mx = (ax + bx) / 2;
+        const my = (ay + by) / 2;
+        const dx = bx - ax;
+        const dy = by - ay;
+        const len = Math.hypot(dx, dy) || 1;
+        const bow = Math.min(len * 0.12, 60 * dpr);
+        const cx = mx - (dy / len) * bow;
+        const cy = my + (dx / len) * bow;
+        const grad = targetCtx.createLinearGradient(ax, ay, bx, by);
+        grad.addColorStop(0, `rgba(${e.aColor[0]},${e.aColor[1]},${e.aColor[2]},${alpha})`);
+        grad.addColorStop(1, `rgba(${e.bColor[0]},${e.bColor[1]},${e.bColor[2]},${alpha})`);
+        targetCtx.strokeStyle = grad;
+        targetCtx.lineWidth = width;
+        targetCtx.beginPath();
+        targetCtx.moveTo(ax, ay);
+        targetCtx.quadraticCurveTo(cx, cy, bx, by);
+        targetCtx.stroke();
+      }
+      targetCtx.restore();
+
+      if (nodes && nodes.length) {
+        const maxVolume = nodes.reduce((m, n) => Math.max(m, n.volume), 0) || 1;
+        targetCtx.save();
+        for (const n of nodes) {
+          const x = n.x * s + ox;
+          const y = n.y * s + oy;
+          if (x < -20 || y < -20 || x > destW + 20 || y > destH + 20) continue;
+          const r = (2.2 + Math.sqrt(n.volume / maxVolume) * 6) * dpr;
+          targetCtx.beginPath();
+          targetCtx.arc(x, y, r, 0, Math.PI * 2);
+          targetCtx.fillStyle = `rgb(${n.color[0]},${n.color[1]},${n.color[2]})`;
+          targetCtx.fill();
+          targetCtx.lineWidth = Math.max(1, dpr);
+          targetCtx.strokeStyle = "rgba(10,8,6,0.85)";
+          targetCtx.stroke();
+        }
+        targetCtx.restore();
+      }
+    }
+
     if (playerLabels && playerLabels.length) {
+      // A player's label sits on their CAPITAL's pixel (computePlayerLabels) -
+      // which is very often the same location as its market's center, so in
+      // Trade Network mode the label's own text used to land directly on top
+      // of that market's node dot, hiding it entirely. Shift the label up
+      // just far enough to clear the biggest possible node radius (see the
+      // node-drawing block above: max radius is ~8.2*dpr) whenever that
+      // overlay is actually on screen - every other mapmode (no nodes to
+      // hide) keeps the label centered exactly on the capital, unchanged.
+      const playerLabelYOffset = tradeNetwork && tradeNetwork.nodes && tradeNetwork.nodes.length ? -20 * dpr : 0;
       targetCtx.save();
       targetCtx.font = `600 ${Math.round(16 * dpr)}px ${PLAYER_LABEL_FONT}`;
       targetCtx.textAlign = "center";
@@ -1683,7 +2037,7 @@
       targetCtx.fillStyle = "rgba(244, 232, 188, 0.98)";
       for (const label of playerLabels) {
         const x = label.x * s + ox;
-        const y = label.y * s + oy;
+        const y = label.y * s + oy + playerLabelYOffset;
         if (x < -80 || y < -20 || x > destW + 80 || y > destH + 20) continue;
         const text = label.text.toUpperCase();
         targetCtx.strokeText(text, x, y);
@@ -1813,6 +2167,99 @@
     return labels;
   }
 
+  // Real color for a market: its own in-game color if it has one, else a
+  // hashed fallback - same fallback rule as buildMapModes' own marketColor(),
+  // duplicated here (not imported) since this runs in createMapView's scope
+  // rather than buildMapModes', and both only need the two module-level
+  // helpers (parseRgbString/colorForId) to agree.
+  function marketRgb(marketId, marketByNumber) {
+    const market = marketByNumber.get(marketId);
+    const rgb = market && parseRgbString(market.color);
+    return rgb || colorForId(marketId);
+  }
+
+  // Finds each market's own anchor pixel: the first pixel (full-resolution
+  // scan, same reasoning as computePlayerLabels - a small market center
+  // location shouldn't be missed by a strided sample) belonging to that
+  // market's `center` location id. Used by the trade-network mapmode to
+  // place each market's node and anchor its trade routes.
+  function computeMarketCenters(idGrid, marketByNumber) {
+    const centerIdToMarket = new Map();
+    for (const market of marketByNumber.values()) {
+      if (typeof market.center === "number") centerIdToMarket.set(market.center, market.number);
+    }
+    if (!centerIdToMarket.size) return new Map();
+
+    const centers = new Map();
+    for (let y = 0; y < MAP_H; y++) {
+      const row = y * MAP_W;
+      for (let x = 0; x < MAP_W; x++) {
+        const marketNumber = centerIdToMarket.get(idGrid[row + x]);
+        if (marketNumber === undefined) continue;
+        if (!centers.has(marketNumber)) centers.set(marketNumber, { x, y });
+      }
+    }
+    return centers;
+  }
+
+  // Aggregates result.tradeRoutes (one row per good/trade - see
+  // js/clausewitz.js's attachTradeRoutes) into one edge per unordered market
+  // pair, summing every good/country's real `amount` in either direction
+  // into a single trade-volume weight - the network mapmode draws one line
+  // per pair (colored/thickened by that total), not one per good, leaving
+  // per-good detail to the market stats popup instead. Endpoint pixel
+  // coordinates and each side's real market color are baked onto the edge
+  // here (once, not per animation frame) so the per-frame draw call is a
+  // flat array walk with no further lookups. Drops any route whose market
+  // has no resolvable pixel center (shouldn't happen for a real market, but
+  // shouldn't crash the overlay if it ever does).
+  function computeTradeNetworkEdges(tradeRoutes, marketCenters, marketByNumber) {
+    const pairs = new Map();
+    for (const route of tradeRoutes || []) {
+      if (typeof route.from !== "number" || typeof route.to !== "number" || route.from === route.to) continue;
+      if (!marketCenters.has(route.from) || !marketCenters.has(route.to)) continue;
+      const a = Math.min(route.from, route.to);
+      const b = Math.max(route.from, route.to);
+      const key = `${a}:${b}`;
+      let edge = pairs.get(key);
+      if (!edge) {
+        edge = { a, b, amount: 0 };
+        pairs.set(key, edge);
+      }
+      edge.amount += route.amount || 0;
+    }
+    const edges = [...pairs.values()].filter((e) => e.amount > 0);
+    for (const e of edges) {
+      const ca = marketCenters.get(e.a);
+      const cb = marketCenters.get(e.b);
+      e.ax = ca.x;
+      e.ay = ca.y;
+      e.bx = cb.x;
+      e.by = cb.y;
+      e.aColor = marketRgb(e.a, marketByNumber);
+      e.bColor = marketRgb(e.b, marketByNumber);
+    }
+    edges.sort((x, y) => y.amount - x.amount);
+    return edges;
+  }
+
+  // One node per market with a resolvable center pixel, sized by how much
+  // trade actually flows through it (sum of every edge touching it) - a
+  // market that's a real hub reads as a bigger node, not just a same-size
+  // dot with more lines.
+  function computeMarketNodes(marketCenters, marketByNumber, edges) {
+    const volumeByMarket = new Map();
+    for (const e of edges) {
+      volumeByMarket.set(e.a, (volumeByMarket.get(e.a) || 0) + e.amount);
+      volumeByMarket.set(e.b, (volumeByMarket.get(e.b) || 0) + e.amount);
+    }
+    const nodes = [];
+    for (const [marketId, xy] of marketCenters) {
+      nodes.push({ x: xy.x, y: xy.y, color: marketRgb(marketId, marketByNumber), volume: volumeByMarket.get(marketId) || 0 });
+    }
+    return nodes;
+  }
+
   // A fresh createMapView() call rebuilds the whole DOM subtree (a new save
   // was loaded, or the user switched back to the Map tab), but setupPanZoom
   // registers its drag listeners on `window` rather than the (replaced)
@@ -1828,6 +2275,7 @@
     if (activeSession) {
       activeSession.abortController.abort();
       activeSession.resizeObserver.disconnect();
+      activeSession.toolbarResizeObserver.disconnect();
       activeSession = null;
     }
 
@@ -1883,7 +2331,7 @@
     let glRenderer;
     let ctx = null;
     const labelCtx = labelCanvas.getContext("2d");
-    const mapState = { vassalShading: true, focusCountry: 0, focusTradeGood: null, excludedPlayers: excludedPlayers || new Set() };
+    const mapState = { vassalShading: true, colorblind: readColorblindPref(), focusCountry: 0, focusTradeGood: null, excludedPlayers: excludedPlayers || new Set() };
     const { modes, politicalColor, marketName, updateMetricScale } = buildMapModes(result, locationsMeta, mapState);
     let currentMode = modes.political;
     let selectedLocationId = 0;
@@ -1898,8 +2346,12 @@
     const subjectToOverlord = new Map((result.dependencies || []).map((d) => [d.subject, d.overlord]));
     const cultureByNumber = new Map((result.cultures || []).map((c) => [c.number, c]));
     const religionByNumber = new Map((result.religions || []).map((r) => [r.number, r]));
+    const marketByNumber = new Map((result.markets || []).map((m) => [m.number, m]));
     const playerLabels = computePlayerLabels(idGrid, countryByNumber, mapState.excludedPlayers);
     const tradeGoodLabels = computeTradeGoodLabels(idGrid, locByNumber, locationsMeta);
+    const marketCenters = computeMarketCenters(idGrid, marketByNumber);
+    const tradeNetworkEdges = computeTradeNetworkEdges(result.tradeRoutes, marketCenters, marketByNumber);
+    const marketNodes = computeMarketNodes(marketCenters, marketByNumber, tradeNetworkEdges);
 
     function countryLabel(countryNumber) {
       const country = countryByNumber.get(countryNumber);
@@ -2342,14 +2794,14 @@
         .join("");
       return `
         <section class="location-detail-section">
-          <h4>Demographic Taxation</h4>
+          <h4>Demographic Tax Base</h4>
           <div class="demographic-chart">
             <div class="demographic-pie" style="background:conic-gradient(${segments.join(", ")})">
               <div class="demographic-pie-tax" style="background:conic-gradient(${taxSegments.join(", ")})"></div>
             </div>
             <div class="demographic-summary">
-              ${detailStat("Weighted Tax / 1k People", fmtNum(summary.overallEfficiency, 4) + " tax")}
-              ${detailStat("Total Group Tax", fmtNum(summary.totalTax, 3) + " tax")}
+              ${detailStat("Weighted Tax Base / 1k People", fmtNum(summary.overallEfficiency, 4) + " tax")}
+              ${detailStat("Total Group Tax Base", fmtNum(summary.totalTax, 3) + " tax")}
             </div>
           </div>
           <table class="demographic-tax-table">
@@ -2357,8 +2809,8 @@
               ${sortableTh("Group", "group", sortState)}
               ${sortableTh("Pop.", "pop", sortState)}
               ${sortableTh("Share", "share", sortState)}
-              ${sortableTh("Tax", "tax", sortState)}
-              ${sortableTh("/1k", "per1k", sortState)}
+              ${sortableTh("Tax Base", "tax", sortState)}
+              ${sortableTh("Base/1k", "per1k", sortState)}
             </tr></thead>
             <tbody>${rowsHtml}</tbody>
           </table>
@@ -2421,6 +2873,139 @@
         <section class="location-detail-section">
           <h4>Map Focus</h4>
           <p>Numeric heat maps are scaled to this country's owned locations.</p>
+        </section>
+      `;
+    }
+
+    // Sum of every good's real trade-in + trade-out at this market (see
+    // js/clausewitz.js's extractMarketFields - tradeIn/tradeOut are each
+    // good's `supplied.Trade`/`demanded.Trade`, confirmed against a real
+    // save to equal the sum of every trade_manager entry actually arriving
+    // there) - the single "how much trade happens here" headline number,
+    // and the basis for ranking markets against each other.
+    function marketTradeVolume(market) {
+      if (!market || !market.goods) return 0;
+      let total = 0;
+      for (const g of Object.values(market.goods)) total += (g.tradeIn || 0) + (g.tradeOut || 0);
+      return total;
+    }
+
+    // Computed once (not per popup open) - every market's trade volume and
+    // its rank among all of them, so opening a market's popup is an O(1)
+    // lookup instead of re-sorting the whole market list each click.
+    const marketRankInfo = (() => {
+      const ranked = [...marketByNumber.values()].map((m) => ({ id: m.number, volume: marketTradeVolume(m) })).sort((a, b) => b.volume - a.volume);
+      const byId = new Map();
+      ranked.forEach((m, i) => byId.set(m.id, { rank: i + 1, volume: m.volume, total: ranked.length }));
+      return byId;
+    })();
+
+    // Top `sign > 0` (biggest needs) or `sign < 0` (biggest surpluses),
+    // ordered by the same supply/demand balance the bars now display. Impact
+    // remains only a tie-breaker because capped impacts are why this popup
+    // needed a clearer ordering in the first place.
+    function marketGoodRows(market, sign) {
+      if (!market || !market.goods) return [];
+      const rows = Object.entries(market.goods)
+        .map(([name, g]) => {
+          const supply = Number(g.supply) || 0;
+          const demand = Number(g.demand) || 0;
+          return {
+            name,
+            impact: g.impact,
+            price: g.price,
+            supply: g.supply,
+            demand: g.demand,
+            balance: sign > 0 ? demand - supply : supply - demand,
+          };
+        })
+        .filter((r) => r.balance > 0);
+      rows.sort((a, b) => b.balance - a.balance || (sign > 0 ? (b.impact || 0) - (a.impact || 0) : (a.impact || 0) - (b.impact || 0)));
+      return rows.slice(0, 5);
+    }
+
+    // Impact still chooses which goods count as "needs" or "surpluses", but
+    // the visible bars show raw supply and demand so capped price impacts do
+    // not collapse the whole list into identical-looking meters.
+    function goodBarRows(rows) {
+      if (!rows.length) return "";
+      const maxAmount = Math.max(...rows.map((r) => Math.max(Number(r.supply) || 0, Number(r.demand) || 0)), 1e-9);
+      return rows
+        .map((r) => {
+          const supplyPct = Math.max(2, Math.round(((Number(r.supply) || 0) / maxAmount) * 100));
+          const demandPct = Math.max(2, Math.round(((Number(r.demand) || 0) / maxAmount) * 100));
+          const tip = `${humanize(r.name)}: supply ${fmtNum(r.supply, 2)}, demand ${fmtNum(r.demand, 2)}, price ${fmtNum(r.price, 3)}, price impact ${fmtNum(r.impact, 3)}`;
+          return `<div class="market-good-row" title="${tip}">
+            <span class="market-good-label">${humanize(r.name)}</span>
+            <span class="market-good-bars">
+              <span class="market-good-bar-line"><span class="market-good-bar-key">S</span><span class="market-good-bar-track"><span class="market-good-bar-fill market-good-supply" style="width:${supplyPct}%"></span></span></span>
+              <span class="market-good-bar-line"><span class="market-good-bar-key">D</span><span class="market-good-bar-track"><span class="market-good-bar-fill market-good-demand" style="width:${demandPct}%"></span></span></span>
+            </span>
+            <span class="market-good-value"><span>${fmtNum(r.supply, 1)}</span><span>${fmtNum(r.demand, 1)}</span></span>
+          </div>`;
+        })
+        .join("");
+    }
+
+    function marketMerchantRows(market) {
+      if (!market || !market.merchants || !market.merchants.length) return "";
+      return [...market.merchants]
+        .sort((a, b) => (b.power || 0) - (a.power || 0))
+        .map((m) => {
+          const country = countryByNumber.get(m.country);
+          const tag = country ? escapeHtml(country.tag || "?") : fmtMaybeId(m.country, "Country");
+          return `<tr><td>${tag}</td><td class="num">${fmtNum(m.power, 2)}</td><td class="num">${fmtNum(m.capacity, 2)}</td><td class="num">${fmtNum(m.used, 2)}</td></tr>`;
+        })
+        .join("");
+    }
+
+    function marketDetailsHtml(marketId) {
+      const market = marketByNumber.get(marketId);
+      if (!market) return '<div class="location-detail-empty">No data for this market.</div>';
+      const rankInfo = marketRankInfo.get(marketId) || { rank: null, volume: 0, total: marketByNumber.size };
+      const centerMeta = market.center !== undefined && market.center !== null ? locationsMeta[market.center] : null;
+      const swatch = marketRgb(marketId, marketByNumber);
+      const stats = [
+        detailStat("Rank by Trade Volume", rankInfo.rank ? `#${rankInfo.rank} of ${rankInfo.total}` : "&mdash;"),
+        detailStat("Total Trade Volume", fmtNum(rankInfo.volume, 2) + " goods/mo"),
+        detailStat("Population", fmtPopulation(market.population)),
+        detailStat("Capacity", fmtNum(market.capacity, 2)),
+        detailStat("Food", fmtNum(market.food, 2)),
+        detailStat("Migration Attraction", fmtPercent(market.migrationAttraction, 1)),
+        detailStat("Member Locations", fmtNum(market.memberCount, 0)),
+        detailStat("Connected Markets", fmtNum((market.connectedMarkets || []).length, 0)),
+        detailStat("Merchant Entries", fmtNum((market.merchants || []).length, 0)),
+      ].join("");
+
+      const needs = marketGoodRows(market, 1);
+      const surplus = marketGoodRows(market, -1);
+      const merchantRows = marketMerchantRows(market);
+
+      return `
+        <div class="location-detail-head">
+          <div>
+            <h3><span class="color-swatch" style="background:rgb(${swatch[0]},${swatch[1]},${swatch[2]})"></span>${escapeHtml(marketName(marketId))}</h3>
+            <div class="location-detail-sub">Market #${marketId}${centerMeta ? ` - ${escapeHtml(titleCaseName(centerMeta.name))}` : ""}</div>
+          </div>
+          <button type="button" class="location-detail-close market-detail-close" title="Close market details">x</button>
+        </div>
+        <h4 class="location-detail-stats-label">Market Stats</h4>
+        <div class="location-detail-stats">${stats}</div>
+        <section class="location-detail-section">
+          <h4>Biggest Needs</h4>
+          ${needs.length ? `<div class="market-good-list">${goodBarRows(needs)}</div>` : "<p>No undersupplied goods recorded.</p>"}
+        </section>
+        <section class="location-detail-section">
+          <h4>Biggest Surpluses</h4>
+          ${surplus.length ? `<div class="market-good-list">${goodBarRows(surplus)}</div>` : "<p>No oversupplied goods recorded.</p>"}
+        </section>
+        <section class="location-detail-section">
+          <h4>Merchant Entries</h4>
+          ${
+            merchantRows
+              ? `<table class="location-two-col-table"><thead><tr><th>Country</th><th>Power</th><th>Capacity</th><th>Used</th></tr></thead><tbody>${merchantRows}</tbody></table>`
+              : "<p>No merchants stationed here.</p>"
+          }
         </section>
       `;
     }
@@ -2533,6 +3118,14 @@
       render();
     }
 
+    function clearMarketDetailsOutsideMarketModes() {
+      if ((currentMode === modes.marketAccess || currentMode === modes.tradeNetwork) || !details.querySelector(".market-detail-close")) return;
+      selectedLocationId = 0;
+      details.hidden = true;
+      details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
+      updateMapBodyClasses();
+    }
+
     function clearCountryDetails() {
       selectedCountryId = 0;
       mapState.focusCountry = 0;
@@ -2586,6 +3179,18 @@
         mapState.focusTradeGood = loc.rawMaterial;
         updateMetricScale(mapState.focusCountry);
       }
+      // Markets/Trade Network: clicking ANYWHERE inside a market's territory
+      // (not just its exact center pixel) shows that market's own stats
+      // popup instead of the usual per-location panel - per the user's ask,
+      // clicking a market should surface trade volume/rank/needs-surplus,
+      // not development/population/tax for whichever location happened to
+      // be under the cursor.
+      if ((currentMode === modes.marketAccess || currentMode === modes.tradeNetwork) && loc && loc.market !== undefined && loc.market !== null) {
+        if (selectedCountryId) clearCountryDetails();
+        selectedLocationId = id;
+        showMarketDetails(loc.market);
+        return;
+      }
       if (loc && loc.owner) showCountryDetails(loc.owner, false);
       // A sea/lake tile is never owned, so it can't ever hit the branch
       // above - but a nation view from a PREVIOUS click can still be open.
@@ -2596,6 +3201,16 @@
       details.hidden = false;
       details.innerHTML = locationDetailsHtml(id);
       attachLocationDetailHandlers(id);
+      updateMapBodyClasses();
+      redraw();
+    }
+
+    function showMarketDetails(marketId) {
+      if (!marketByNumber.has(marketId)) return;
+      details.hidden = false;
+      details.innerHTML = marketDetailsHtml(marketId);
+      const close = details.querySelector(".market-detail-close");
+      if (close) close.addEventListener("click", clearLocationDetails);
       updateMapBodyClasses();
       redraw();
     }
@@ -2700,6 +3315,10 @@
       const lutR = new Uint8ClampedArray(maxId + 1);
       const lutG = new Uint8ClampedArray(maxId + 1);
       const lutB = new Uint8ClampedArray(maxId + 1);
+      const hashR = new Uint8ClampedArray(maxId + 1);
+      const hashG = new Uint8ClampedArray(maxId + 1);
+      const hashB = new Uint8ClampedArray(maxId + 1);
+      const hashShare = new Uint8ClampedArray(maxId + 1); // 0 = no secondary/no hash pattern for this id
       const borderR = new Uint8ClampedArray(maxId + 1);
       const borderG = new Uint8ClampedArray(maxId + 1);
       const borderB = new Uint8ClampedArray(maxId + 1);
@@ -2709,6 +3328,15 @@
         lutR[id] = c[0];
         lutG[id] = c[1];
         lutB[id] = c[2];
+        if (!water && currentMode.hashFor) {
+          const h = currentMode.hashFor(id);
+          if (h) {
+            hashR[id] = h.color[0];
+            hashG[id] = h.color[1];
+            hashB[id] = h.color[2];
+            hashShare[id] = Math.round(Math.max(0, Math.min(1, h.share)) * 255);
+          }
+        }
         const loc = locByNumber.get(id);
         const politicalBase = loc && loc.owner ? politicalColor(loc.owner) : water ? WATER_COLOR : NO_DATA_COLOR;
         const dark = shadeColor(politicalBase, BORDER_DARKEN);
@@ -2720,6 +3348,10 @@
         lutR,
         lutG,
         lutB,
+        hashR,
+        hashG,
+        hashB,
+        hashShare,
         borderR,
         borderG,
         borderB,
@@ -2734,6 +3366,8 @@
           currentMode === modes.trade && mapState.focusTradeGood
             ? tradeGoodLabels.filter((label) => label.material === mapState.focusTradeGood)
             : null,
+        tradeNetworkEdges: currentMode === modes.tradeNetwork ? tradeNetworkEdges : null,
+        marketNodes: currentMode === modes.tradeNetwork ? marketNodes : null,
       };
     }
 
@@ -2863,7 +3497,10 @@
         if (labelCanvas.width !== destW) labelCanvas.width = destW;
         if (labelCanvas.height !== destH) labelCanvas.height = destH;
         labelCtx.clearRect(0, 0, destW, destH);
-        drawLabelOverlay(labelCtx, destW, destH, DPR, s, view.offX * DPR, view.offY * DPR, luts.playerLabels, luts.tradeGoodLabels, view.scale);
+        drawLabelOverlay(labelCtx, destW, destH, DPR, s, view.offX * DPR, view.offY * DPR, luts.playerLabels, luts.tradeGoodLabels, view.scale, {
+          edges: luts.tradeNetworkEdges,
+          nodes: luts.marketNodes,
+        });
         return;
       }
       if (!ctx) ctx = canvas.getContext("2d");
@@ -2934,10 +3571,41 @@
     // it permanently attached, matches the pattern already used for every
     // other listener in this function.
     const abortController = new AbortController();
-    Object.keys(modes).forEach((key) => {
+
+    // One dropdown open at a time - opening a second group closes whichever
+    // was already open, same as a normal menu bar.
+    let openModeGroupPanel = null;
+    function closeOpenModeGroup() {
+      if (openModeGroupPanel) {
+        openModeGroupPanel.hidden = true;
+        openModeGroupPanel = null;
+      }
+    }
+
+    // A solo mode button's `.active` state is set directly on click, but a
+    // GROUPED mode's button lives inside a collapsed dropdown, so its own
+    // `.active` class isn't visible - the group's own toggle button needs to
+    // show as active instead whenever the currently-selected mode is one of
+    // its children, so collapsing the group after picking (say) Culture
+    // doesn't make it look like nothing is selected anymore.
+    function updateModeButtonActiveStates() {
+      toolbar.querySelectorAll(".map-mode-btn[data-mode-key]").forEach((b) => {
+        b.classList.toggle("active", modes[b.dataset.modeKey] === currentMode);
+      });
+      toolbar.querySelectorAll(".map-mode-group-btn").forEach((b) => {
+        b.classList.toggle("active", (b.dataset.groupKeys || "").split(",").some((k) => modes[k] === currentMode));
+      });
+    }
+
+    // Shared by both the always-visible solo buttons and the buttons inside
+    // a group's dropdown panel - same look, same click behavior, just a
+    // different parent to append to.
+    function buildModeButton(key) {
       const btn = document.createElement("button");
+      btn.type = "button";
       btn.className = "map-mode-btn";
       btn.title = modes[key].label;
+      btn.dataset.modeKey = key;
       if (MAP_MODE_ICONS[key]) {
         btn.innerHTML = `<img class="map-mode-icon" src="${MAP_MODE_ICONS[key]}" alt="" loading="lazy"><span>${escapeHtml(modes[key].label)}</span>`;
         const img = btn.querySelector("img");
@@ -2946,14 +3614,75 @@
         btn.textContent = modes[key].label;
       }
       btn.addEventListener("click", () => {
-        toolbar.querySelectorAll(".map-mode-btn").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
         currentMode = modes[key];
+        clearMarketDetailsOutsideMarketModes();
+        closeOpenModeGroup();
+        updateModeButtonActiveStates();
         redraw();
       });
-      if (modes[key] === currentMode) btn.classList.add("active");
-      toolbar.appendChild(btn);
+      return btn;
+    }
+
+    TOOLBAR_SOLO_MODES.forEach((key) => {
+      if (modes[key]) toolbar.appendChild(buildModeButton(key));
     });
+
+    // Collapses related mapmodes (Tax Base/Tax Gap/Prosperity/Control,
+    // Markets/Trade Network/RGO, Religion/Culture) behind a single
+    // click-to-expand button each, per a real user screenshot of the fully
+    // flat button row wrapping to 2 rows and "blocking off" too much of the
+    // screen - cuts the always-visible count from 13 buttons down to 7 (4
+    // solo + 3 group toggles) without losing one-click access to any mode,
+    // and leaves room to add more modes to a group later without the
+    // toolbar itself growing every time.
+    TOOLBAR_GROUPS.forEach((group) => {
+      const keys = group.keys.filter((key) => modes[key]);
+      if (!keys.length) return;
+
+      const wrap = document.createElement("div");
+      wrap.className = "map-mode-group";
+
+      const groupBtn = document.createElement("button");
+      groupBtn.type = "button";
+      groupBtn.className = "map-mode-btn map-mode-group-btn";
+      groupBtn.title = `${group.label} mapmodes`;
+      groupBtn.dataset.groupKeys = keys.join(",");
+      const repIcon = MAP_MODE_ICONS[keys[0]];
+      groupBtn.innerHTML =
+        (repIcon ? `<img class="map-mode-icon" src="${repIcon}" alt="" loading="lazy">` : "") +
+        `<span>${escapeHtml(group.label)}</span><span class="map-mode-group-caret" aria-hidden="true">&#9662;</span>`;
+      const repImg = groupBtn.querySelector("img");
+      if (repImg) repImg.addEventListener("error", () => repImg.remove(), { signal: abortController.signal });
+
+      const panel = document.createElement("div");
+      panel.className = "map-mode-group-panel";
+      panel.hidden = true;
+      keys.forEach((key) => panel.appendChild(buildModeButton(key)));
+
+      groupBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const willOpen = panel.hidden;
+        closeOpenModeGroup();
+        if (willOpen) {
+          panel.hidden = false;
+          openModeGroupPanel = panel;
+        }
+      });
+
+      wrap.appendChild(groupBtn);
+      wrap.appendChild(panel);
+      toolbar.appendChild(wrap);
+    });
+
+    updateModeButtonActiveStates();
+
+    document.addEventListener(
+      "click",
+      (e) => {
+        if (openModeGroupPanel && !openModeGroupPanel.parentElement.contains(e.target)) closeOpenModeGroup();
+      },
+      { signal: abortController.signal }
+    );
 
     const vassalLabel = document.createElement("label");
     vassalLabel.className = "map-vassal-toggle";
@@ -2967,6 +3696,25 @@
     vassalLabel.appendChild(vassalCheckbox);
     vassalLabel.appendChild(document.createTextNode("Shade vassals by overlord"));
     toolbar.appendChild(vassalLabel);
+
+    // Swaps the heat-gradient palette (Development/Population/Tax/Control/
+    // Prosperity/Tax Gap/Markets) for the colorblind-safe Viridis ramp - see
+    // HEAT_STOPS_COLORBLIND's comment. Persisted (readColorblindPref/
+    // writeColorblindPref), unlike vassal shading, since this is an
+    // accessibility setting the user shouldn't need to re-enable every save.
+    const colorblindLabel = document.createElement("label");
+    colorblindLabel.className = "map-vassal-toggle";
+    const colorblindCheckbox = document.createElement("input");
+    colorblindCheckbox.type = "checkbox";
+    colorblindCheckbox.checked = mapState.colorblind;
+    colorblindCheckbox.addEventListener("change", () => {
+      mapState.colorblind = colorblindCheckbox.checked;
+      writeColorblindPref(mapState.colorblind);
+      redraw();
+    });
+    colorblindLabel.appendChild(colorblindCheckbox);
+    colorblindLabel.appendChild(document.createTextNode("Colorblind mode"));
+    toolbar.appendChild(colorblindLabel);
 
     const tradeFocusBtn = document.createElement("button");
     tradeFocusBtn.type = "button";
@@ -2994,6 +3742,45 @@
     });
     toolbar.appendChild(resetBtn);
 
+    // "Copy image" - puts the current mapmode view on the clipboard for
+    // pasting into Discord. Composites `canvas` (the actual render - WebGL or
+    // CPU fallback) with `labelCanvas` (player/trade-good text, drawn on a
+    // separate 2D layer only when the WebGL path is active - see the comment
+    // where labelCanvas is created above; harmless to always include it, it's
+    // simply blank/transparent when unused). A fresh render() right before
+    // capturing guards against grabbing a stale WebGL frame if the buffer was
+    // ever cleared between paints. js/copy-image.js (loaded before this
+    // file) does the actual rasterization/clipboard work - the map's own
+    // canvases are already real pixels, no DOM-to-image step needed.
+    if (typeof CopyImage !== "undefined") {
+      const copyImageBtn = document.createElement("button");
+      copyImageBtn.type = "button";
+      copyImageBtn.className = "map-mode-btn map-copy-image-btn";
+      copyImageBtn.textContent = "\u{1F4CB} Copy image";
+      copyImageBtn.title = "Copy the current map view as an image, for pasting into Discord";
+      CopyImage.wireCopyImageButton(copyImageBtn, () => {
+        render();
+        return CopyImage.compositeCanvases([canvas, labelCanvas]);
+      });
+      toolbar.appendChild(copyImageBtn);
+    }
+
+    // The mode-button toolbar wraps onto however many rows its own button
+    // count/width needs (see its CSS comment) - `.location-details`/
+    // `.country-details` read the toolbar's REAL rendered height back via
+    // this custom property (set on their shared parent, `mapBody`) instead
+    // of a hardcoded row-count guess, which kept being off by exactly one
+    // row at real, plausible window widths. Kept live with a ResizeObserver
+    // since the toolbar's height can change after initial layout too - a
+    // window resize rewrapping it, or "Clear trade good focus" toggling
+    // `tradeFocusBtn`'s own visibility.
+    function updateToolbarHeightVar() {
+      mapBody.style.setProperty("--map-toolbar-h", `${Math.ceil(toolbar.getBoundingClientRect().height)}px`);
+    }
+    updateToolbarHeightVar();
+    const toolbarResizeObserver = new ResizeObserver(updateToolbarHeightVar);
+    toolbarResizeObserver.observe(toolbar);
+
     zoomToInitialPlayerCountry();
     redraw();
     setupPanZoom(canvasWrap, canvas, tooltip, idGrid, locationsMeta, () => currentMode, view, fit, scheduleRender, showLocationDetails, abortController.signal);
@@ -3003,6 +3790,10 @@
         if (e.key !== "Escape") return;
         const target = e.target;
         if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "")) return;
+        if (openModeGroupPanel) {
+          closeOpenModeGroup();
+          return;
+        }
         if (!selectedLocationId && !selectedCountryId && !mapState.focusCountry && !mapState.focusTradeGood) return;
         e.preventDefault();
         clearMapFocus();
@@ -3021,7 +3812,7 @@
       scheduleRender();
     });
     resizeObserver.observe(canvasWrap);
-    activeSession = { abortController, resizeObserver };
+    activeSession = { abortController, resizeObserver, toolbarResizeObserver };
   }
 
   // Wheel-to-zoom (toward cursor) + click-drag pan. Unlike the old CSS-

@@ -17,6 +17,7 @@ function fmtNum(n, digits) {
 const REASON_LABELS = {
   "post-war-reparations-enforced": "War reparations enforced (peace-treaty term)",
   "post-war-independence-granted": "Independence granted (peace-treaty term)",
+  "post-war-revolt-crushed": "Rebellion fully crushed (annexed/reabsorbed)",
   "post-war-land-transfer": "Land changed hands (clean 1-on-1 data)",
   "post-war-land-transfer-coalition": "Land changed hands (coalition-wide - less certain)",
   "battle-losses-inflicted": "Battle losses (no economic signal)",
@@ -36,14 +37,17 @@ function reasonLabel(reason) {
 // Maps js/llama-score.js's computeFromLedger() `autoExcludeReason` codes to
 // plain-English tooltips - mirrors js/app.js's AUTO_EXCLUDE_TITLES (kept in
 // sync deliberately) so the dashboard shows WHY a row is excluded, not just
-// that it is. "player-hidden" is web-app-only (there's no Hide-player UI
-// here yet) but included for forward compatibility if that's ever added.
+// that it is. "player-hidden" is set via this dashboard's own Hide button on
+// the leaderboard (writes hidden-players.json in the campaign folder, shared
+// with the web app - see main.js's players:hide handler) or the web app's
+// own manual Hide list.
 const AUTO_EXCLUDE_TITLES = {
   "vs-ai": "No country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score.",
   "vs-player": "The opposing side had a real player - this is a PvP war, so it isn't scored under PvE/Alpaca Points.",
   "player-departed": "This player had already stopped controlling this country (the recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it.",
   "opponent-departed": "Every enemy in this war had already left the campaign before this war even began - a war fought against a real opponent still counts even if they left partway through it.",
-  "player-hidden": "This player has been hidden as departed.",
+  "player-hidden": "This player was marked departed - wars that started before that point still count, only later ones are excluded.",
+  revolt: "This is a revolt (independence war or civil war) against your own rebels/pretender, not a fight against a foreign AI nation - the winner is still tracked correctly, but it never moves PVE/Alpaca Points either direction.",
   "no-battle-losses": "This country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought.",
 };
 function autoExcludeLabel(reason) {
@@ -241,6 +245,31 @@ function fmtFactorValue(value, isDelta) {
 // feature shipped simply has no breakdown data yet, same "can't retroactively
 // improve already-recorded ledger data" limitation as every other fix this
 // project has hit.
+// Raw in-game location IDs behind the "Land transfer" row's numbers (see
+// llama-log-machine.js's locationSetDelta/principalFieldUnion) - only
+// populated for wars recorded after that data model existed, null for
+// older ones. No province-name lookup exists in this pipeline yet, so
+// these are the game's own internal numeric IDs, capped to the first 20
+// per list so a big conquest doesn't dump an unreadable wall of numbers.
+function fmtLocationIds(ids) {
+  const shown = ids.slice(0, 20).join(", ");
+  return ids.length > 20 ? `${shown}, +${ids.length - 20} more` : shown;
+}
+function renderLocationExchangeDetail(landFactor) {
+  if (!landFactor) return "";
+  const rows = [
+    ["Attacker gained", landFactor.attackerLocationsGained],
+    ["Attacker lost", landFactor.attackerLocationsLost],
+    ["Defender gained", landFactor.defenderLocationsGained],
+    ["Defender lost", landFactor.defenderLocationsLost],
+  ].filter(([, ids]) => Array.isArray(ids) && ids.length);
+  if (!rows.length) return "";
+  const items = rows.map(([label, ids]) => `<li class="note">${escapeHtml(label)} ${ids.length} location(s): ${escapeHtml(fmtLocationIds(ids))}</li>`).join("");
+  return `
+    <p class="note"><strong>Locations exchanged</strong> (raw in-game location IDs, no name lookup yet):</p>
+    <ul class="location-exchange-list">${items}</ul>`;
+}
+
 function renderBreakdownDetail(w) {
   const factors = w.breakdown || [];
   if (!factors.length) {
@@ -286,7 +315,8 @@ function renderBreakdownDetail(w) {
       <thead><tr><th>Factor</th><th>Attacker</th><th>Defender</th><th>Leans</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="note">Only "War reparations", "Independence granted", and "Land transfer" can ever decide a winner - everything else is shown for context only. The highlighted row is what actually decided this war, if any.</p>`;
+    <p class="note">Only "War reparations", "Independence granted", and "Land transfer" can ever decide a winner - everything else is shown for context only. The highlighted row is what actually decided this war, if any.</p>
+    ${renderLocationExchangeDetail(factors.find((f) => f.key === "land-transfer"))}`;
 }
 
 // Persists which wars' breakdown detail is expanded, per mode - a plain
@@ -311,6 +341,7 @@ function setVerified(campaignKey, mode, warNumber, value) {
 let currentCampaignKey = null;
 let isPinnedToCampaign = false;
 let latestByMode = { pvp: [], pve: [] };
+let latestLeaderboardByMode = { pvp: [], pve: [] };
 
 function renderConcludedWars(mode, wars) {
   const el = document.querySelector(`#${mode}Section [data-field="concludedWarsTable"]`);
@@ -376,27 +407,56 @@ function pointsLabel(mode) {
   return mode === "pve" ? "Alpaca Points" : "Llama Points";
 }
 
+// A `hidden` row (see js/llama-score.js's computeFromLedger - a player
+// marked departed via the Hide button below) is collapsed out of the
+// DEFAULT view but never dropped from the underlying array - their
+// llamaPoints/W-L-D here still reflect everything they actually earned or
+// lost while genuinely active (only wars that started after their marked
+// departure date get excluded from the total), so revealing them via "Show
+// departed players" shows the real number, not a zeroed-out placeholder.
 function renderLeaderboard(mode, leaderboard) {
   const el = document.querySelector(`#${mode}Section [data-field="leaderboardTable"]`);
   const heading = document.querySelector(`#${mode}Section [data-field="leaderboardHeading"]`);
   if (heading) heading.textContent = `${pointsLabel(mode)} Leaderboard`;
   if (!el) return;
+  latestLeaderboardByMode[mode] = leaderboard;
   if (!leaderboard.length) {
     el.innerHTML = '<p class="note">No players found yet.</p>';
     return;
   }
-  const rows = leaderboard
-    .map(
-      (p, i) => `
-    <tr>
+  const showDepartedEl = document.querySelector(`#${mode}Section [data-field="showDeparted"]`);
+  const showDeparted = showDepartedEl ? showDepartedEl.checked : false;
+  const visible = showDeparted ? leaderboard : leaderboard.filter((p) => !p.hidden);
+  if (!visible.length) {
+    el.innerHTML = '<p class="note">Every player here has been hidden as departed - check "Show departed players" to see them again.</p>';
+    return;
+  }
+  const rows = visible
+    .map((p, i) => {
+      const departedTitle = p.hiddenSince ? `Hidden as of ${escapeHtml(p.hiddenSince)}` : "Hidden";
+      return `
+    <tr class="${p.hidden ? "row-departed" : ""}">
       <td>${i + 1}</td>
-      <td>${escapeHtml(p.player)} <span class="tag-badge">${escapeHtml(p.countryTag || "?")}</span></td>
+      <td>${escapeHtml(p.player)} <span class="tag-badge">${escapeHtml(p.countryTag || "?")}</span>${p.hidden ? ` <span class="departed-badge" title="${departedTitle}">departed</span>` : ""}</td>
       <td>${fmtNum(p.llamaPoints, 2)}</td>
       <td>${p.wins}/${p.losses}/${p.draws}</td>
-    </tr>`
-    )
+      <td><button type="button" class="btn-secondary btn-small hide-player-btn" data-player="${escapeHtml(p.player)}" data-hidden="${p.hidden ? "1" : "0"}">${p.hidden ? "Unhide" : "Hide"}</button></td>
+    </tr>`;
+    })
     .join("");
-  el.innerHTML = `<table><thead><tr><th>#</th><th>Player</th><th>${escapeHtml(pointsLabel(mode))}</th><th>W/L/D</th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.innerHTML = `<table><thead><tr><th>#</th><th>Player</th><th>${escapeHtml(pointsLabel(mode))}</th><th>W/L/D</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  el.querySelectorAll(".hide-player-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      const name = btn.dataset.player;
+      // main.js's players:hide/unhide handlers call pushUpdate() themselves
+      // right after writing hidden-players.json, which re-renders this
+      // table with the real, freshly-scored result - no local optimistic
+      // re-render needed here.
+      if (btn.dataset.hidden === "1") await window.llamaAPI.unhidePlayer(name);
+      else await window.llamaAPI.hidePlayer(name);
+    });
+  });
 }
 
 function applyModeSection(mode, section) {
@@ -458,6 +518,7 @@ const template = document.getElementById("modeSectionTemplate");
   const section = document.getElementById(`${mode}Section`);
   section.appendChild(template.content.cloneNode(true));
   section.querySelector('[data-field="hideVerified"]').addEventListener("change", () => renderConcludedWars(mode, latestByMode[mode]));
+  section.querySelector('[data-field="showDeparted"]').addEventListener("change", () => renderLeaderboard(mode, latestLeaderboardByMode[mode]));
 });
 
 document.querySelectorAll(".mode-tab").forEach((btn) => {

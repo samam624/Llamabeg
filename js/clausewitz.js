@@ -316,6 +316,7 @@
       // Economy
       income: economy.income,
       expense: economy.expense,
+      taxRates: economy.tax_rates && typeof economy.tax_rates === "object" ? economy.tax_rates : null,
       creditworthiness: economy.creditworthiness,
       loanCapacity: economy.loan_capacity,
       coinMinting: economy.coin_minting,
@@ -337,6 +338,29 @@
       primaryCulture: obj.primary_culture,
       primaryReligion: obj.primary_religion,
       locationCount: Array.isArray(obj.owned_locations) ? obj.owned_locations.length : 0,
+      // The actual location IDs, not just the count - used by the recorder's
+      // land-transfer signal (llama-log-machine.js's sideEconomyDeltas) to
+      // tell "this exact province moved to the enemy" apart from "the same
+      // net count, but only because an unrelated internal vassal transfer
+      // happened to land at the same moment a war concluded". Kept on every
+      // country here (cheap - it's already a fully-decoded array by this
+      // point) - the recorder's own countrySummary() is what bounds which
+      // countries actually get this field persisted into the ledger.
+      ownedLocations: Array.isArray(obj.owned_locations) ? obj.owned_locations : [],
+      // Which of the game's own automation-delegation options ("let the AI
+      // handle building queues", "let the AI replace dead generals", etc.)
+      // are currently enabled for this country. Confirmed on real data (see
+      // [[player_session_handling]]): every genuinely AI-only country in a
+      // real save carries ONLY the single default entry ("ProductionMethods"),
+      // with zero exceptions across a full ~2500-country population, while
+      // human players selectively enable a handful of others for
+      // convenience - EXCEPT a player who's actually stopped playing, whose
+      // country had literally every automation option enabled at once
+      // (confirmed real, not theoretical - dramatically more than any
+      // actively-played country in the same game). Used by
+      // js/llama-score.js's computeAutomationDepartures() as an automatic
+      // departed-player signal, alongside the existing manual Hide button.
+      automatedSystems: Array.isArray(obj.automated_systems) ? obj.automated_systems : [],
       // Population / historical trends (one entry per in-game year)
       population: obj.last_months_population,
       historicalPopulation: Array.isArray(obj.historical_population) ? obj.historical_population : null,
@@ -346,9 +370,34 @@
     };
   }
 
+  // Real bug found on real data: this used to prefer `population_ratio` as
+  // the whole class's headcount whenever present, falling back to summing
+  // the employment-state fields (unemployed/employed_in_rgo/
+  // employed_in_building/produced) only when it was absent. But
+  // `population_ratio` isn't a headcount at all - it's some other ratio/
+  // multiplier the game tracks internally, and it systematically UNDER-
+  // represents the real total for whichever classes happen to carry it
+  // (confirmed: a location's reported population was ~4.8k against an
+  // in-game ~30.7k for that exact location; summed across a country's full
+  // owned-location set, the same pattern held everywhere - every player
+  // country's summed location population landed at just 37-67% of that
+  // country's own trusted total). Classes that never carry
+  // `population_ratio` at all (peasants, tribesmen, slaves - often the
+  // LARGEST classes in rural/tribal locations) were already summing
+  // correctly via the fallback path the whole time, which is exactly why
+  // this was so easy to miss: only SOME classes were wrong, and never the
+  // same ones twice.
+  //
+  // Fix: always sum the employment-state fields, never population_ratio -
+  // verified against real save data by cross-checking the summed
+  // owned-location population against each country's own trusted total
+  // (last_months_population): every player country now lands within ~2% of
+  // its trusted figure (was 37-67%), across 8 different real countries.
+  // `population_ratio` itself is left on each class's own record
+  // (populationRatio in summarizePopulation below) in case it's useful for
+  // something else later - just never used as a total again.
   function popClassTotal(stats) {
     if (!stats || typeof stats !== "object") return undefined;
-    if (typeof stats.population_ratio === "number") return stats.population_ratio;
     let total = 0;
     let found = false;
     for (const key of ["unemployed", "employed_in_rgo", "employed_in_building", "produced"]) {
@@ -413,6 +462,7 @@
       tax: obj.tax,
       possibleTax: obj.possible_tax,
       estateTax: obj.estate_tax && typeof obj.estate_tax === "object" ? obj.estate_tax : null,
+      estatePossibleTax: obj.estate_possible_tax && typeof obj.estate_possible_tax === "object" ? obj.estate_possible_tax : null,
       control: obj.control,
       prosperity: obj.prosperity,
       valueFlow: obj.value_flow,
@@ -422,6 +472,20 @@
       populationClasses: pop.classes,
       popIds: pop.popIds,
       popCount: pop.popIds.length,
+    };
+  }
+
+  function extractPopFields(number, obj) {
+    if (!obj || typeof obj !== "object") return null;
+    const size = typeof obj.size === "number" ? obj.size : null;
+    if (size === null) return null;
+    return {
+      number,
+      type: obj.type,
+      estate: obj.estate || obj["#2e90"],
+      culture: obj.culture,
+      religion: obj.religion,
+      size,
     };
   }
 
@@ -438,6 +502,30 @@
       roadType: obj.road_type,
       rgo: obj.rgo,
       existence: obj.existence,
+      // `estate_manager.database` mixes two shapes under one numbering: real
+      // location assets (location/building/rgo present) AND, separately, one
+      // entry per country per estate type (nobles_estate/clergy_estate/...)
+      // carrying a `last_month` income/expense breakdown for that estate.
+      // `trade_income` there is that ESTATE's own private trade income (it
+      // feeds the estate's own gold/balance, a pool separate from the
+      // country's treasury - confirmed on real saves where these entries
+      // carry their own `gold`/`balance` fields) - summing it across a
+      // country's estates is still the best available proxy for the
+      // Economy tab's "Trade Income" column, but it is NOT verified to
+      // match the government ledger's own "Trade Income" line (no
+      // country-level field for that total exists anywhere in the save -
+      // see docs/ARCHITECTURE.md).
+      tradeIncome: obj.last_month && typeof obj.last_month.trade_income === "number" ? obj.last_month.trade_income : undefined,
+      // `paid_taxes` is the actual gold this estate sent to the crown last
+      // month - unlike `trade_income` above, this genuinely is state
+      // revenue, not private estate wealth (name and structure line up with
+      // the government income ledger's per-estate "Tax at X% from
+      // <estate>" lines, paired with the country-level
+      // `economy.tax_rates.<estate_type>` already extracted in
+      // extractCountryFields - dollar-for-dollar match against that ledger
+      // not yet confirmed against a real screenshot, but this is a real
+      // save field, not a guess/derived formula like tradeIncome above).
+      paidTaxes: obj.last_month && typeof obj.last_month.paid_taxes === "number" ? obj.last_month.paid_taxes : undefined,
     };
   }
 
@@ -474,15 +562,169 @@
     };
   }
 
+  // A market_manager.database entry's two id lists are easily confused:
+  // `members` is the list of LOCATION ids belonging to this market (values
+  // range over the full 1-28573 location space, clustered around `center`),
+  // while `market` is a list of other MARKET numbers this market is linked
+  // to (every value stays below the market count, ~121 on a real save) -
+  // confirmed by range-checking both lists against a real save. `market`
+  // used to be extracted here under the name `locations`, which nothing
+  // consumed - renamed to `connectedMarkets` now that the trade-network
+  // mapmode actually uses it.
   function extractMarketFields(number, obj) {
     if (!obj || typeof obj !== "object") return null;
+    const merchantsRaw = obj.merchant ? (Array.isArray(obj.merchant) ? obj.merchant : [obj.merchant]) : [];
+    const merchants = [];
+    for (const m of merchantsRaw) {
+      if (!m || typeof m !== "object") continue;
+      merchants.push({ country: m.country, power: m.power, capacity: m.capacity, used: m.used });
+    }
+    // Per-good market state, kept compact: the raw entry also carries a
+    // huge `impacts` price-modifier list and per-source `supplied`/
+    // `demanded`/`taken` breakdowns; only the fields the market-statistics
+    // panel actually renders are retained (results are cached in IndexedDB,
+    // so dead weight here is paid on every save in the library).
+    let goods = null;
+    if (obj.goods && typeof obj.goods === "object" && !Array.isArray(obj.goods)) {
+      goods = {};
+      for (const [name, g] of Object.entries(obj.goods)) {
+        if (!g || typeof g !== "object") continue;
+        goods[name] = {
+          price: g.price,
+          supply: g.supply,
+          demand: g.demand,
+          // Relative price deviation from the good's base price (negative =
+          // cheap/oversupplied here, positive = expensive/undersupplied) -
+          // the same signal the game's own market UI derives its "high/low
+          // price" coloring from, used for the needs/surpluses ranking.
+          impact: g.impact,
+          stockpile: g.stockpile,
+          rgoLocations: g.locations_with_this_as_raw_material,
+          // How much of this good arrived from / left for OTHER markets last
+          // tick (the Trade component of the supplied/demanded breakdowns).
+          tradeIn: g.supplied && typeof g.supplied === "object" ? g.supplied.Trade : undefined,
+          tradeOut: g.demanded && typeof g.demanded === "object" ? g.demanded.Trade : undefined,
+        };
+      }
+    }
     return {
       number,
       center: obj.center !== undefined ? obj.center : obj["#32"],
       color: colorValueToCss(obj.color),
       population: obj.population,
-      locations: Array.isArray(obj.market) ? obj.market : [],
+      food: obj.food,
+      capacity: obj.capacity,
+      migrationAttraction: obj.average_migration_attraction,
+      memberCount: Array.isArray(obj.members) ? obj.members.length : undefined,
+      connectedMarkets: Array.isArray(obj.market) ? obj.market : [],
+      merchants,
+      goods,
     };
+  }
+
+  // One trade_path_manager.database entry: a country's established route
+  // carrying goods from one market to another, with the actual location-id
+  // waypoint list the route traverses (mostly sea zones for naval routes) -
+  // the waypoints are what lets the trade-network mapmode draw flows along
+  // their real geography instead of straight lines.
+  function extractTradePathFields(number, obj) {
+    if (!obj || typeof obj !== "object") return null;
+    if (typeof obj.from !== "number" || typeof obj.to !== "number") return null;
+    return {
+      number,
+      country: obj.country,
+      from: obj.from,
+      to: obj.to,
+      cost: obj.cost,
+      path: Array.isArray(obj.path) ? obj.path : [],
+    };
+  }
+
+  // One trade_manager.database entry: a single good flowing along one trade
+  // path. `effect` is the actual amount moved (units of the good per month)
+  // - verified against a real save: summing `effect` over every trade
+  // arriving at a market reproduces that market's own per-good
+  // supplied.Trade figure exactly (e.g. iron into market #0: 4 trades'
+  // effects sum to 2.22435 = the market's supplied.Trade for iron).
+  function extractTradeFields(number, obj) {
+    if (!obj || typeof obj !== "object") return null;
+    if (typeof obj.which !== "string") return null;
+    return {
+      number,
+      good: obj.which,
+      amount: obj.effect,
+      power: obj.power,
+      happened: obj.happened === true || obj.happened === "yes" || obj.happened === "Yes",
+      tradePath: obj.trade_path,
+    };
+  }
+
+  // One subunit_manager.database entry, reduced to what the navy-size
+  // metric needs. Subunit types are prefixed by branch ("n_cog" vs
+  // "a_footmen" - checked across an early and a late-age real save, every
+  // naval type carries the n_ prefix), and a subunit raised as a levy
+  // carries a `levies={...}` block naming its source estates (every *_levy
+  // army type has one; so do levied ships like n_fishing_boat/n_birlinn,
+  // while built warships - cogs, galleys, carracks - never do).
+  function extractNavalSubunit(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    if (typeof obj.type !== "string" || !obj.type.startsWith("n_")) return null;
+    if (typeof obj.owner !== "number") return null;
+    return { owner: obj.owner, levy: obj.levies !== undefined };
+  }
+
+  // One subunit_manager.database entry, reduced to what the army-size
+  // metric needs. Army types carry the a_ prefix (the naval convention
+  // above, "n_"), and the SAME subunit_manager section also holds a large
+  // number of entirely unrelated entries (estate privileges, religions,
+  // diplomatic unions/leagues/coalitions...) that happen to carry their own
+  // unrelated `type` field too - confirmed on a real save (subunit_manager
+  // held ~70k entries total, of which only ~2k were real "a_" army subunits
+  // and ~850 were "n_" naval ones) - so the prefix check is load-bearing,
+  // not just documentation; a bare "doesn't start with n_" check would
+  // wrongly sweep all of those non-military entries in too.
+  //
+  // Three categories, confirmed mutually exclusive on a real save (zero
+  // subunits ever carried both a `mercenary` and a `levies` field):
+  // "mercenary" (a company hired from the mercenary pool), "levy" (a feudal/
+  // tribal levy raised from estates, same `levies={...}` signal the naval
+  // extractor uses), "regular" (a professional built regiment - neither of
+  // the above).
+  //
+  // Real bug found deriving this: a mercenary subunit's `owner` field is
+  // ALWAYS the constant sentinel 2 (confirmed identical across every
+  // mercenary company regardless of which country actually employs them) -
+  // `controller` is the real employer. Every category is counted by
+  // `controller`, not just mercenaries: a small fraction (~0.5% on the same
+  // real save) of ordinary levy/regular subunits also show a genuine
+  // owner/controller split (temporarily foreign-controlled troops), and
+  // "who currently fields this unit" is the more meaningful army-size
+  // signal regardless of category.
+  function extractArmySubunit(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    if (typeof obj.type !== "string" || !obj.type.startsWith("a_")) return null;
+    if (typeof obj.controller !== "number") return null;
+    const category = obj.mercenary !== undefined ? "mercenary" : obj.levies !== undefined ? "levy" : "regular";
+    // `strength` is this regiment's CURRENT troop count, in the same
+    // "thousands" unit the rest of this app uses for population/manpower
+    // (strength 0.40 = 400 men) - NOT a 0-1 fill fraction. Proven against a
+    // real save: a Byzantine cataphract regiment at strength 0.40 shows as
+    // exactly 400 men in-game, an archer at 0.50 as 500; and across 2003
+    // regiments strength*1000 never exceeds that unit type's own max
+    // capacity, landing exactly at it for full ones. js/app.js sums these
+    // straight into the Military tab's "(k)" troop-headcount columns - no
+    // unit-size table or game-install files needed.
+    //
+    // An ABSENT strength field means an unraised levy (0 current troops),
+    // not a full regiment: confirmed on a real save that all 179 of 1939
+    // strength-less subunits were levies (zero were built regulars, which
+    // always carry an explicit strength), each an allocated-but-not-mustered
+    // levy - it has its `levies={...}` pop list but no `experience` and no
+    // strength because nothing has gathered yet. So it contributes 0 to the
+    // current-troop sum. (An earlier version defaulted this to 1 under a
+    // wrong "full regiments omit strength" assumption, which would have
+    // added a phantom 1000 men per unraised levy.)
+    return { controller: obj.controller, category, type: obj.type, strength: typeof obj.strength === "number" ? obj.strength : 0 };
   }
 
   function attachLocationAssets(result) {
@@ -618,7 +860,7 @@
     }
   }
 
-  function parseEstateManagerSection(scanner, onAsset) {
+  function parseEstateManagerSection(scanner, onAsset, onEstateIncome) {
     while (true) {
       scanner.skipWs();
       if (scanner.text[scanner.pos] === "}") {
@@ -649,6 +891,13 @@
             // parse cost, so entries are skipped at the source instead of
             // being extracted and then discarded downstream.
             if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
+            // The OTHER shape this same database mixes in - a country's
+            // per-estate-type income summary (see extractEstateAssetFields'
+            // comment) - has neither `location` nor `building`/`rgo`, so it
+            // never hits the branch above; call the separate callback for
+            // it instead of silently dropping it like a road asset would be.
+            if (asset && onEstateIncome && typeof asset.country === "number" && (typeof asset.tradeIncome === "number" || typeof asset.paidTaxes === "number"))
+              onEstateIncome(asset);
           }
         } else {
           scanner.skipValue();
@@ -757,6 +1006,47 @@
             const obj = scanner.parseValue();
             const entry = extractMarketFields(parseInt(numTok.raw, 10), obj);
             if (entry) onMarket(entry);
+          }
+        } else {
+          scanner.skipValue();
+        }
+      } else {
+        scanner.skipValue();
+      }
+    }
+  }
+
+  // Generic "<section>={ database={ <n>={...} ... } }" walker for sections
+  // whose entries need no per-section quirk handling - each database entry
+  // is fully parsed and handed to onEntry(number, obj), everything else in
+  // the section is skipped. Used by the trade/subunit sections below;
+  // the older sections (markets, buildings, ...) predate this helper and
+  // keep their own structurally-identical copies.
+  function parsePlainDatabaseSection(scanner, onEntry) {
+    while (true) {
+      scanner.skipWs();
+      if (scanner.text[scanner.pos] === "}") {
+        scanner.pos++;
+        break;
+      }
+      if (scanner.eof()) break;
+      const key = scanner.readScalarToken().raw;
+      scanner.consumeIfPresent("=");
+      if (key === "database") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          while (true) {
+            scanner.skipWs();
+            if (scanner.text[scanner.pos] === "}") {
+              scanner.pos++;
+              break;
+            }
+            if (scanner.eof()) break;
+            const numTok = scanner.readScalarToken();
+            scanner.consumeIfPresent("=");
+            const obj = scanner.parseValue();
+            onEntry(parseInt(numTok.raw, 10), obj);
           }
         } else {
           scanner.skipValue();
@@ -1436,7 +1726,19 @@
 
   // Top-level sections we fully or partially parse; everything else is
   // skipped without allocating.
-  const BASE_TOP_LEVEL_KEYS = ["metadata", "countries", "played_country", "diplomacy_manager", "situation_manager", "disease_outbreak_manager", "loan_manager"];
+  const BASE_TOP_LEVEL_KEYS = [
+    "metadata",
+    "countries",
+    "played_country",
+    "diplomacy_manager",
+    "situation_manager",
+    "disease_outbreak_manager",
+    "loan_manager",
+    // Always parsed (not gated behind includeLocations): the Metrics tab's
+    // "Navy Size" column counts real ships from here, and the walk only
+    // materializes naval subunits (a small fraction of the section).
+    "subunit_manager",
+  ];
 
   function parseSave(text, options) {
     options = options || {};
@@ -1451,7 +1753,7 @@
     const includeWars = !!options.includeWars;
     const HANDLED_TOP_LEVEL_KEYS = new Set(
       BASE_TOP_LEVEL_KEYS.concat(
-        includeLocations ? ["locations", "estate_manager", "building_manager", "culture_manager", "religion_manager", "market_manager", "provinces"] : [],
+        includeLocations ? ["locations", "population", "estate_manager", "building_manager", "culture_manager", "religion_manager", "market_manager", "provinces", "trade_path_manager", "trade_manager"] : [],
         includeWars ? ["war_manager"] : []
       )
     );
@@ -1475,6 +1777,7 @@
       dependencies: [],
       warReparations: [],
       locationAssets: [],
+      estateTradeIncomes: [],
       buildings: [],
       cultures: [],
       religions: [],
@@ -1483,6 +1786,13 @@
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
       provinceOwnerByDefinition: {},
       countryDebt: new Map(),
+      tradePaths: [],
+      trades: [],
+      tradeRoutes: [],
+      navalSubunits: [],
+      armySubunits: [],
+      popRecords: [],
+      subunitManagerSeen: false,
     };
 
     let lastProgressPos = 0;
@@ -1542,6 +1852,17 @@
         } else {
           scanner.skipValue();
         }
+      } else if (key === "population") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          parsePlainDatabaseSection(scanner, (number, obj) => {
+            const pop = extractPopFields(number, obj);
+            if (pop) result.popRecords.push(pop);
+          });
+        } else {
+          scanner.skipValue();
+        }
       } else if (key === "diplomacy_manager") {
         scanner.skipWs();
         if (scanner.text[scanner.pos] === "{") {
@@ -1585,9 +1906,15 @@
         scanner.skipWs();
         if (scanner.text[scanner.pos] === "{") {
           scanner.pos++;
-          parseEstateManagerSection(scanner, (asset) => {
-            result.locationAssets.push(asset);
-          });
+          parseEstateManagerSection(
+            scanner,
+            (asset) => {
+              result.locationAssets.push(asset);
+            },
+            (entry) => {
+              result.estateTradeIncomes.push(entry);
+            }
+          );
         } else {
           scanner.skipValue();
         }
@@ -1653,6 +1980,42 @@
         } else {
           scanner.skipValue();
         }
+      } else if (key === "subunit_manager") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          result.subunitManagerSeen = true;
+          parsePlainDatabaseSection(scanner, (number, obj) => {
+            const ship = extractNavalSubunit(obj);
+            if (ship) result.navalSubunits.push(ship);
+            const troop = extractArmySubunit(obj);
+            if (troop) result.armySubunits.push(troop);
+          });
+        } else {
+          scanner.skipValue();
+        }
+      } else if (key === "trade_path_manager") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          parsePlainDatabaseSection(scanner, (number, obj) => {
+            const path = extractTradePathFields(number, obj);
+            if (path) result.tradePaths.push(path);
+          });
+        } else {
+          scanner.skipValue();
+        }
+      } else if (key === "trade_manager") {
+        scanner.skipWs();
+        if (scanner.text[scanner.pos] === "{") {
+          scanner.pos++;
+          parsePlainDatabaseSection(scanner, (number, obj) => {
+            const trade = extractTradeFields(number, obj);
+            if (trade) result.trades.push(trade);
+          });
+        } else {
+          scanner.skipValue();
+        }
       }
 
       if (scanner.pos - lastProgressPos > PROGRESS_STEP) {
@@ -1666,6 +2029,9 @@
     attachLocationBuildings(result);
     reconcileWarOccupation(result);
     attachCountryDebt(result);
+    attachTradeRoutes(result);
+    attachNavyCounts(result);
+    attachArmyCounts(result);
 
     onProgress(1);
     return result;
@@ -1734,6 +2100,94 @@
     }
   }
 
+  // Joins trade_manager entries (one good flowing, with its real amount)
+  // onto their trade_path_manager route (which markets it connects, whose
+  // route it is, and the location-id waypoints it traverses). Only trades
+  // that actually happened AND moved a real positive amount survive -
+  // trade_manager also carries placeholder entries with no `effect` at all
+  // (~20% of entries on a real save), which are queued/failed trades that
+  // moved nothing. Shared between the text and binary parsers (js/
+  // clausewitz-binary.js calls this too), same pattern as attachCountryDebt.
+  function attachTradeRoutes(result) {
+    const pathById = new Map((result.tradePaths || []).map((p) => [p.number, p]));
+    result.tradeRoutes = [];
+    for (const trade of result.trades || []) {
+      if (!trade.happened || typeof trade.amount !== "number" || trade.amount <= 0) continue;
+      const path = pathById.get(trade.tradePath);
+      if (!path) continue;
+      result.tradeRoutes.push({
+        from: path.from,
+        to: path.to,
+        country: path.country,
+        good: trade.good,
+        amount: trade.amount,
+        path: path.path,
+      });
+    }
+    // The raw halves aren't needed once joined (and would just bloat the
+    // IndexedDB-cached result) - tradeRoutes is the only consumer-facing form.
+    delete result.tradePaths;
+    delete result.trades;
+  }
+
+  // Sums each country's real fleet from its naval subunits: `navyShips` is
+  // ships that were BUILT (what the "Navy Size" metric shows - levy ships
+  // are excluded per user request, nobody counts a conscripted fishing
+  // fleet), `navyLevyShips` keeps the excluded count for transparency.
+  // Countries with no ships at all get explicit zeros so the UI reads
+  // "0" rather than a missing-data dash - but only when the save actually
+  // had a subunit_manager section to count from (subunitManagerSeen);
+  // otherwise both stay undefined and render as "-". Shared between the
+  // text and binary parsers.
+  function attachNavyCounts(result) {
+    if (!result.subunitManagerSeen) return;
+    const built = new Map();
+    const levy = new Map();
+    for (const ship of result.navalSubunits || []) {
+      const map = ship.levy ? levy : built;
+      map.set(ship.owner, (map.get(ship.owner) || 0) + 1);
+    }
+    for (const country of result.countries) {
+      country.navyShips = built.get(country.number) || 0;
+      country.navyLevyShips = levy.get(country.number) || 0;
+    }
+    delete result.navalSubunits;
+  }
+
+  // Sums each country's real army from its land subunits, split into the
+  // three mutually-exclusive categories extractArmySubunit identifies:
+  // levies, regulars (built professional regiments), and mercenaries -
+  // counted by CONTROLLER (see extractArmySubunit's comment on why, not
+  // owner - matters most for mercenaries, whose `owner` is always a
+  // constant sentinel). `armyTotal` is the real troop count the "Army Size"
+  // metric shows (replacing the game's own `expected_army_size` formula
+  // value, same fix as attachNavyCounts did for Navy Size) - same "explicit
+  // zero only when subunit_manager was actually seen" rule as the navy
+  // counts, so a save with no subunit data at all still renders "-" rather
+  // than a fake 0. Shared between the text and binary parsers.
+  function attachArmyCounts(result) {
+    if (!result.subunitManagerSeen) return;
+    const levies = new Map();
+    const regulars = new Map();
+    const mercs = new Map();
+    for (const troop of result.armySubunits || []) {
+      const map = troop.category === "levy" ? levies : troop.category === "mercenary" ? mercs : regulars;
+      map.set(troop.controller, (map.get(troop.controller) || 0) + 1);
+    }
+    for (const country of result.countries) {
+      country.armyLevies = levies.get(country.number) || 0;
+      country.armyRegulars = regulars.get(country.number) || 0;
+      country.armyMercenaries = mercs.get(country.number) || 0;
+      country.armyTotal = country.armyLevies + country.armyRegulars + country.armyMercenaries;
+    }
+    // Kept (trimmed to just what's needed) rather than deleted like the raw
+    // list used to be - js/app.js joins this against the optional, locally-
+    // generated game_data/unit_sizes.json to turn regiment counts into real
+    // troop headcounts. Absent that file, this is simply never consumed.
+    result.armySubunitDetails = (result.armySubunits || []).map((t) => ({ controller: t.controller, category: t.category, type: t.type, strength: t.strength }));
+    delete result.armySubunits;
+  }
+
   // loan_manager.database is a flat, country-agnostic list (each entry only
   // names its `borrower`), parsed independently of the `countries` section -
   // this attaches the summed total back onto each country record after both
@@ -1755,12 +2209,17 @@
     parseSave,
     extractCountryFields,
     extractLocationFields,
+    extractPopFields,
     extractDependencyFields,
     extractWarReparationsFields,
     extractEstateAssetFields,
     extractBuildingFields,
     extractNamedDefinitionFields,
     extractMarketFields,
+    extractTradePathFields,
+    extractTradeFields,
+    extractNavalSubunit,
+    extractArmySubunit,
     extractBlackDeath,
     extractWarFields,
     extractLoanFields,
@@ -1769,5 +2228,8 @@
     attachLocationBuildings,
     collapsePlayerSessions,
     attachCountryDebt,
+    attachTradeRoutes,
+    attachNavyCounts,
+    attachArmyCounts,
   };
 });

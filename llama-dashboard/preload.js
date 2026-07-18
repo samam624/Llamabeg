@@ -14,4 +14,6 @@ contextBridge.exposeInMainWorld("llamaAPI", {
   openPath: (targetPath) => ipcRenderer.invoke("shell:open-path", targetPath),
   listCampaigns: () => ipcRenderer.invoke("campaigns:list"),
   selectCampaign: (campaignKey) => ipcRenderer.invoke("campaigns:select", campaignKey),
+  hidePlayer: (name) => ipcRenderer.invoke("players:hide", name),
+  unhidePlayer: (name) => ipcRenderer.invoke("players:unhide", name),
 });

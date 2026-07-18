@@ -54,6 +54,15 @@
     "31df": "war_manager",
     "2e6b": "building_manager",
     "2ebc": "loan_manager",
+    // Derived by position-aligning the binary top-level key walk against the
+    // melted text's top-level key order (same method as war_manager - the
+    // sequence "... population, subunit_manager, unit_manager, provinces,
+    // trade_path_manager, trade_manager, mercenary_manager ..." lines up
+    // 1:1 with "... population, #31dd, #31de, provinces, trade_path_manager
+    // (resolves via string_lookup on its own), #2ec6, ..." in the binary).
+    "31dd": "subunit_manager",
+    "31de": "unit_manager",
+    "2ec6": "trade_manager",
 
     // war_manager.database entries. Derived by position-matching a
     // generically-decoded war object against the melted text of the exact
@@ -263,6 +272,7 @@
     "31d5": "biggest",
     "31dc": "pops",
     "2cf5": "population_ratio",
+    "2e90": "estate",
     "3282": "unemployed",
     "35e7": "employed_in_rgo",
     "2e51": "produced",
@@ -349,5 +359,83 @@
     "324c": "institutions",
     "2f21": "ub",
     "2d9f": "population",
+
+    // market_manager.database entries (market statistics / trade-network
+    // mapmode). Derived by decoding market #0 generically and reading each
+    // #hex placeholder off against the melted text of the exact same market
+    // (field order is identical between formats). Several of these reappear
+    // in other sections with the same meaning and were cross-confirmed
+    // there: 2e70 (price) inside each goods entry, 2ef0 (capacity) on
+    // merchant and trade entries, 2915 (power) on merchant and trade
+    // entries, 2e96 (demand) as the "demand" key of a subunit's missing-
+    // supplies block.
+    "324d": "produced_goods",
+    "2e53": "food",
+    "2d51": "food_supply",
+    "2e93": "trade",
+    "2e70": "price",
+    "37dd": "average_migration_attraction",
+    "2ef0": "capacity",
+    "35c7": "impacts",
+    "335d": "migration",
+    c53: "members",
+    "2ecd": "merchant",
+    "314e": "goods",
+    // merchant sub-entries
+    "2915": "power",
+    "31e3": "original_power",
+    "31e2": "original_capacity",
+    "2ef1": "used",
+    // per-good sub-entries
+    "3606": "supplied",
+    "3608": "demanded",
+    "3609": "taken",
+    "2f02": "impact",
+    "2e95": "supply",
+    "2e96": "demand",
+    "36f7": "total_taken",
+    "520": "possible",
+    "3b58": "allowed_export_amount",
+    "3288": "stockpile",
+    "3d12": "locations_with_this_as_raw_material",
+
+    // subunit_manager.database entries (navy-size metric). Derived by
+    // decoding the first three subunits generically and aligning against
+    // the same entries in melted text.
+    "3815": "subunit_name_2",
+    "27f7": "unit",
+    "2ef4": "box",
+    "2cc9": "home",
+    "2975": "morale",
+    "28de": "strength",
+    "373e": "attrition_losses_per_month",
+    "3289": "missing",
+    "2a0f": "levies",
+    // Army-size metric (levy/regular/mercenary split). Derived by monkey-
+    // patching extractArmySubunit to dump the raw decoded object for a
+    // subunit whose subunit_name_2 matched a known mercenary entry from the
+    // melted text of the same save, and reading off which unresolved "#hex"
+    // key held the exact same value as that entry's melted `mercenary=`
+    // field (67108884).
+    "30e1": "mercenary",
+
+    // trade_path_manager / trade_manager.database entries (trade routes for
+    // the trade-network mapmode). Same derivation as above; 37fb
+    // (trade_path) appears both as a path entry's own sub-block and as the
+    // trade entry's reference to its path id.
+    "528": "from",
+    "529": "to",
+    "174": "path",
+    "2b25": "cost",
+    "3137": "from_port",
+    "3138": "to_port",
+    "39fe": "from_location",
+    "39ff": "to_location",
+    "37fb": "trade_path",
+    "59": "effect",
+    "2c7c": "cached",
+    "3d82": "cached_profit_tc",
+    "2d64": "which",
+    "521": "happened",
   };
 });

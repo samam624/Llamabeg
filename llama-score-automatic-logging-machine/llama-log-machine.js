@@ -400,9 +400,23 @@ async function readAndParseSave(file, config) {
 // belligerents apart from vassals/subjects dragged along for the ride -
 // see excludeSubjectsOfPresentOverlords() in js/llama-score.js for why that
 // matters for PVE scoring specifically.
-function countrySummary(c, overlordOf) {
+// `includeLocations` attaches the actual owned-location-ID array (not just
+// its count) - used by sideEconomyDeltas below to tell a real land loss to
+// an enemy apart from an internal transfer to one of the player's own
+// vassals that happened to land at the same moment. Deliberately NOT
+// unconditional: buildSnapshot() only passes true for its bounded
+// `interestingCountries` set (players, war participants, and their
+// vassals - typically dozens of countries, not the full ~2000+ roster), so
+// this can't bloat the ledger the way attaching it to every country would.
+// `includeAutomation` attaches the country's automated_systems array (see
+// js/clausewitz.js's comment for the real-data finding behind this) - only
+// meaningful/needed for player-controlled countries (buildSnapshot() only
+// passes true when building playerCountries below), and cheap regardless
+// (a handful of short strings, not hundreds of numeric IDs like
+// ownedLocations - no bounding concern here).
+function countrySummary(c, overlordOf, includeLocations, includeAutomation) {
   const overlord = overlordOf ? overlordOf.get(c.number) : undefined;
-  return {
+  const summary = {
     number: c.number,
     tag: c.tag,
     players: c.players || [],
@@ -425,6 +439,9 @@ function countrySummary(c, overlordOf) {
     capital: c.capital,
     overlord: typeof overlord === "number" ? overlord : null,
   };
+  if (includeLocations) summary.ownedLocations = Array.isArray(c.ownedLocations) ? c.ownedLocations : [];
+  if (includeAutomation) summary.automatedSystems = Array.isArray(c.automatedSystems) ? c.automatedSystems : [];
+  return summary;
 }
 
 function buildOverlordLookup(result) {
@@ -491,9 +508,20 @@ function participantSummariesWithSides(war) {
   return participants;
 }
 
+// A "Declined" participant was invited/targeted (present in
+// war.participants, often even in originalAttacker/originalDefenders) but
+// never actually joined the fight - confirmed on real data: a country
+// listed as an original Target with status "Declined" had a DIFFERENT
+// country join in its place as a called-ally instead. Excluded here (not
+// just left in "Other") so it never counts as a real belligerent for
+// scoring or war.sides - real user-reported bug this closes: a declined-
+// but-listed country's tag showed up as if it were fighting in TWO
+// different wars at once (impossible in EU5), when it was never really in
+// the first one at all.
 function countriesBySide(participants) {
   const sides = { Attacker: [], Defender: [], Other: [] };
   for (const p of participants || []) {
+    if (p.status === "Declined") continue;
     const side = p.side === "Attacker" || p.side === "Defender" ? p.side : "Other";
     sides[side].push(p.country);
   }
@@ -505,6 +533,49 @@ function countriesBySide(participants) {
 
 function numDelta(after, before) {
   return typeof after === "number" && typeof before === "number" ? after - before : null;
+}
+
+// Real per-location diff when both snapshots carry the actual ID arrays
+// (`ownedLocations` - see js/clausewitz.js and countrySummary() above, only
+// populated for the bounded `interestingCountries` set) instead of just a
+// before/after COUNT. Real user-reported bug this fixes: a player internally
+// transferred land to one of their own vassals right before an autosave
+// landed, at the same moment a war concluded - the old count-only delta saw
+// the player's own locationCount drop and read it as a war loss, when none
+// of that land actually went to the enemy. Checks every "lost" location
+// (present in `before`, absent from `after`) against every vassal's OWN
+// `ownedLocations` in the same after-snapshot (`.overlord === country`) and
+// drops it from the loss tally if a vassal has it - an internal transfer,
+// not a real loss. Falls back to the plain count delta when either side
+// lacks the array (older ledger data recorded before this existed, or a
+// country outside the bounded set) - same graceful-degradation pattern as
+// every other data-availability caveat in this file.
+// Returns `{ value, gained, lost }` - `value` is the same net number this
+// always returned, `gained`/`lost` are the actual location ID arrays behind
+// it (null when falling back to the plain count, since there's nothing real
+// to list) - lets a war's real land exchange be inspected directly instead
+// of just trusting a net number, per the user's explicit request.
+function locationSetDelta(country, before, after, vanished, afterCountries) {
+  const fallback = () => ({ value: vanished ? -before.locationCount : numDelta(after && after.locationCount, before.locationCount), gained: null, lost: null });
+  const beforeIds = Array.isArray(before.ownedLocations) ? before.ownedLocations : null;
+  if (!beforeIds) return fallback();
+  // A vanished country owns nothing afterward, by definition - an empty
+  // array is exactly the right "after" state to diff against (everything it
+  // had is `lost`, nothing `gained`).
+  const afterIds = vanished ? [] : after && Array.isArray(after.ownedLocations) ? after.ownedLocations : null;
+  if (!afterIds) return fallback();
+  const afterSet = new Set(afterIds);
+  const beforeSet = new Set(beforeIds);
+  const gained = afterIds.filter((id) => !beforeSet.has(id));
+  let lost = beforeIds.filter((id) => !afterSet.has(id));
+  const vassalOwned = new Set();
+  for (const info of Object.values(afterCountries)) {
+    if (info && info.overlord === country && Array.isArray(info.ownedLocations)) {
+      for (const id of info.ownedLocations) vassalOwned.add(id);
+    }
+  }
+  lost = lost.filter((id) => !vassalOwned.has(id));
+  return { value: gained.length - lost.length, gained, lost };
 }
 
 function sideEconomyDeltas(war, beforeCountries, afterCountries) {
@@ -521,7 +592,7 @@ function sideEconomyDeltas(war, beforeCountries, afterCountries) {
     function entryFor(country) {
       let entry = entryByCountry.get(country);
       if (!entry) {
-        entry = { country, goldDelta: null, prestigeDelta: null, locationDelta: null };
+        entry = { country, goldDelta: null, prestigeDelta: null, locationDelta: null, locationsGained: null, locationsLost: null };
         entryByCountry.set(country, entry);
       }
       return entry;
@@ -557,11 +628,13 @@ function sideEconomyDeltas(war, beforeCountries, afterCountries) {
       const debtDelta = after ? numDelta(after.totalDebt, before.totalDebt) : null;
       const goldDelta = typeof rawGoldDelta === "number" ? rawGoldDelta - (typeof debtDelta === "number" ? debtDelta : 0) : null;
       const prestigeDelta = after ? numDelta(after.prestige, before.prestige) : null;
-      const locationDelta = vanished ? -before.locationCount : numDelta(after.locationCount, before.locationCount);
+      const locationResult = locationSetDelta(country, before, after, vanished, afterCountries);
       const entry = entryFor(country);
       entry.goldDelta = goldDelta;
       entry.prestigeDelta = prestigeDelta;
-      entry.locationDelta = locationDelta;
+      entry.locationDelta = locationResult.value;
+      entry.locationsGained = locationResult.gained;
+      entry.locationsLost = locationResult.lost;
     }
     // A brand-new subject (present only in `after`, absent from `before`
     // entirely - a genuinely new tag, not a pre-existing nation that merely
@@ -628,10 +701,26 @@ function sideEconomyDeltas(war, beforeCountries, afterCountries) {
 // coalition member mid-war can't swing the wrong side's "winner" call off a
 // windfall against a third party while actually losing land to the real
 // opposing player.
-function principalCountrySet(value) {
+// `war.originalAttacker`/`war.originalDefenders` record who the game
+// DECLARED as belligerents, not who actually showed up - a country invited/
+// targeted but never joining (status "Declined") still appears here. Real
+// bug found on real data: a declined defender's own (unrelated) location
+// gain got summed together with the REAL defender's real location LOSS in
+// the same principal set, netting to ~0 and masking a clean, decisive land
+// transfer as a White Peace - the declined country was never actually
+// fighting, so whatever else was happening to its territory that same month
+// has nothing to do with this war. Excluded here so a Declined "principal"
+// contributes nothing to any economic signal, the same way it's already
+// excluded from the displayed participant lists (countriesBySide above).
+function principalCountrySet(value, war) {
+  const declined = new Set();
+  if (war) for (const p of war.participants || []) if (p.status === "Declined") declined.add(p.country);
   const set = new Set();
-  if (typeof value === "number") set.add(value);
-  else if (Array.isArray(value)) for (const n of value) if (typeof n === "number") set.add(n);
+  if (typeof value === "number") {
+    if (!declined.has(value)) set.add(value);
+  } else if (Array.isArray(value)) {
+    for (const n of value) if (typeof n === "number" && !declined.has(n)) set.add(n);
+  }
   return set;
 }
 // A vassal being attacked drags its Overlord into the war automatically
@@ -657,6 +746,29 @@ function principalsWithOverlords(base, war) {
   for (const country of base) {
     const overlord = overlordFor(war, country);
     if (overlord != null) expanded.add(overlord);
+  }
+  // Downward direction too, not just upward: per the user's explicit call,
+  // taking land from someone's VASSAL is winning against THEM - a subject
+  // has no standing of its own, it's the same political entity as its
+  // overlord. `reason === "Subject"` participants (real subjects, called in
+  // specifically because they belong to a principal already in this set)
+  // get folded in, transitively - a subject can itself have its own
+  // subjects fighting too, confirmed real in an actual campaign war (a
+  // 3-level chain). Deliberately does NOT pull in "InternationalOrganization"
+  // or any other non-Subject call-in reason - those are genuinely separate
+  // political entities dragged in by an alliance/league mechanic, not part
+  // of the principal's own realm, and stay excluded per the original
+  // coalition-vs-principal design - only a REAL subject counts here.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const p of war.participants || []) {
+      if (expanded.has(p.country) || p.status === "Declined") continue;
+      if (p.reason === "Subject" && expanded.has(p.calledAlly)) {
+        expanded.add(p.country);
+        changed = true;
+      }
+    }
   }
   return expanded;
 }
@@ -690,6 +802,26 @@ function resolveSideField(sideInfo, principals, field) {
   const principalValue = principalFieldSum(sideInfo, principals, field);
   if (principalValue !== null) return { value: principalValue, usedPrincipal: true };
   return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
+}
+// Same principal-scoping as principalFieldSum, but for the actual location
+// ID lists (locationsGained/locationsLost - see locationSetDelta) instead
+// of the net number - lets a war's real land exchange be inspected directly
+// rather than just trusting a spread. Union across every principal on the
+// side. Null (not an empty array) when nothing in this side's principals
+// carries it, so the UI can tell "no exchange" apart from "no data for this
+// older war".
+function principalFieldUnion(sideInfo, principals, field) {
+  if (!sideInfo || !sideInfo.countryDeltas || !principals.size) return null;
+  const ids = new Set();
+  let any = false;
+  for (const cd of sideInfo.countryDeltas) {
+    if (!principals.has(cd.country)) continue;
+    if (Array.isArray(cd[field])) {
+      any = true;
+      for (const id of cd[field]) ids.add(id);
+    }
+  }
+  return any ? [...ids] : null;
 }
 
 // The single strongest signal available: an ENFORCED war-reparations
@@ -779,13 +911,46 @@ function goldLikeLean(aValue, dValue) {
 // independence war, not just upon winning it, which would have made a
 // before/after comparison unreliable for exactly the case this exists to
 // catch.)
-function independenceSignal(war, afterCountries) {
-  if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
+// `war.revolt` covers BOTH INDEPENDENCE_WAR_NAME (a vassal fighting to break
+// free) and CIVIL_WAR_NAME (a pretender contesting the throne) - the
+// rebel/pretender is always the ATTACKER (confirmed on real data: 7/7 revolt
+// wars in a real campaign had `revolter: true` on the Attacker side, never
+// the Defender).
+//
+// Real bug found on real data: the old version of this signal (named
+// independenceSignal, INDEPENDENCE_WAR_NAME-only) returned null the moment
+// the attacker's country was missing from `afterCountries` (`if (!info)
+// return null`) - exactly what happens when the player FULLY ANNEXES the
+// rebel back (same "vanished" pattern documented in sideEconomyDeltas'
+// comment), so a clean, decisive crush fell through to weaker signals
+// instead of being recognized as a Defender win. Worse: if the rebel's tag
+// survived a snapshot or two as an empty `locationCount: 0` stub (rather
+// than vanishing outright - also documented as real in sideEconomyDeltas'
+// comment) with `overlord` already cleared, the OLD `stillSubjugated` check
+// read that as "independence achieved" and credited the ATTACKER with a win
+// - the exact inverted-outcome bug the user reported (full annexation of a
+// rebel scored as a loss). Fixed: a rebel with no land left (vanished OR
+// `locationCount === 0`) is checked FIRST and is always a Defender win
+// (crushed), regardless of what its `overlord` field says - only a rebel
+// that's still a going concern with real land afterward falls through to
+// the subjugation check below.
+function revoltOutcomeSignal(war, afterCountries) {
+  if (!war.revolt) return null;
   const attacker = war.originalAttacker;
   const defenders = war.originalDefenders || [];
   if (typeof attacker !== "number" || !afterCountries) return null;
   const info = afterCountries[attacker];
-  if (!info) return null;
+  const crushed = !info || (typeof info.locationCount === "number" && info.locationCount === 0);
+  if (crushed) {
+    return { winnerSide: "Defender", loserSide: "Attacker", reason: "post-war-revolt-crushed", strength: Number.MAX_SAFE_INTEGER };
+  }
+  // The "still subjugated to a defender = they lost, independence not
+  // granted" check only makes sense for an actual INDEPENDENCE_WAR_NAME (a
+  // real vassal/overlord relationship to test) - a CIVIL_WAR_NAME pretender
+  // that's still around with land afterward has no equivalent relationship
+  // to check, so it falls through to land-transfer/reparations instead of
+  // guessing here.
+  if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
   const stillSubjugated = typeof info.overlord === "number" && defenders.includes(info.overlord);
   return {
     winnerSide: stillSubjugated ? "Defender" : "Attacker",
@@ -820,14 +985,14 @@ function independenceSignal(war, afterCountries) {
 function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
   const breakdown = [];
   const signals = [];
-  const independence = independenceSignal(war, afterCountries);
-  if (independence) signals.push(independence);
+  const revoltOutcome = revoltOutcomeSignal(war, afterCountries);
+  if (revoltOutcome) signals.push(revoltOutcome);
   breakdown.push({
     key: "independence",
     label: "Independence granted",
     decisive: true,
-    applies: !!independence,
-    winnerSide: independence ? independence.winnerSide : null,
+    applies: !!revoltOutcome,
+    winnerSide: revoltOutcome ? revoltOutcome.winnerSide : null,
     attackerValue: null,
     defenderValue: null,
   });
@@ -836,8 +1001,8 @@ function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
     signals.sort((a, b) => b.strength - a.strength);
     return { decisive: signals[0], contributing: signals.slice(1), breakdown };
   }
-  const attackerPrincipalsBase = principalCountrySet(war.originalAttacker);
-  const defenderPrincipalsBase = principalCountrySet(war.originalDefenders);
+  const attackerPrincipalsBase = principalCountrySet(war.originalAttacker, war);
+  const defenderPrincipalsBase = principalCountrySet(war.originalDefenders, war);
   const attackerPrincipals = principalsWithOverlords(attackerPrincipalsBase, war);
   const defenderPrincipals = principalsWithOverlords(defenderPrincipalsBase, war);
   const attackerGoldPrincipals = principalsForGold(attackerPrincipalsBase, war);
@@ -930,6 +1095,10 @@ function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
     winnerSide: landWinner,
     attackerValue: aLocations,
     defenderValue: dLocations,
+    attackerLocationsGained: principalFieldUnion(economy.Attacker, attackerPrincipals, "locationsGained"),
+    attackerLocationsLost: principalFieldUnion(economy.Attacker, attackerPrincipals, "locationsLost"),
+    defenderLocationsGained: principalFieldUnion(economy.Defender, defenderPrincipals, "locationsGained"),
+    defenderLocationsLost: principalFieldUnion(economy.Defender, defenderPrincipals, "locationsLost"),
   });
 
   const treasuryLean = goldLikeLean(aGold, dGold);
@@ -995,6 +1164,7 @@ function shiftConfidence(level, delta) {
 const CONTRIBUTING_SIGNAL_FROM_REASON = {
   "post-war-reparations-enforced": "reparations",
   "post-war-independence-granted": "independence",
+  "post-war-revolt-crushed": "independence",
   "post-war-land-transfer": "land-transfer",
   "post-war-land-transfer-coalition": "land-transfer",
 };
@@ -1214,9 +1384,9 @@ function buildSnapshot(file, hash, result, config, previousWars) {
   const countryLookup = {};
   for (const n of interestingCountries) {
     const c = countryByNumber.get(n);
-    if (c) countryLookup[n] = countrySummary(c, overlordOf);
+    if (c) countryLookup[n] = countrySummary(c, overlordOf, true);
   }
-  const playerCountries = countries.filter((c) => c.players && c.players.length).map((c) => countrySummary(c, overlordOf));
+  const playerCountries = countries.filter((c) => c.players && c.players.length).map((c) => countrySummary(c, overlordOf, true, true));
   const economyCountries = config.storeAllEconomyCountries ? allCountryLookup(countries, overlordOf) : countryLookup;
   return {
     capturedAt: new Date().toISOString(),

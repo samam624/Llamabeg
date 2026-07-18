@@ -615,7 +615,7 @@
     }
   }
 
-  function parseEstateManagerSection(dec, view, onAsset) {
+  function parseEstateManagerSection(dec, view, onAsset, onEstateIncome) {
     dec.pos += 2; // consume OPEN already peeked by caller
     while (true) {
       const peek = view.getUint16(dec.pos, true);
@@ -649,6 +649,10 @@
             // Roads dropped here too - see the matching comment in
             // js/clausewitz.js's copy of this filter.
             if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
+            // The country-per-estate-type income-summary shape - see the
+            // matching comment in js/clausewitz.js's copy of this filter.
+            if (asset && onEstateIncome && typeof asset.country === "number" && (typeof asset.tradeIncome === "number" || typeof asset.paidTaxes === "number"))
+              onEstateIncome(asset);
           }
         }
       } else {
@@ -769,6 +773,52 @@
           if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
             const entry = Clausewitz.extractMarketFields(numResolved, obj);
             if (entry) onMarket(entry);
+          }
+        }
+      } else {
+        dec.skipBareValue();
+      }
+    }
+  }
+
+  // Binary twin of js/clausewitz.js's parsePlainDatabaseSection: a generic
+  // "<section>={ database={ <n>={...} } }" walker for sections whose entries
+  // need no per-section quirks - each entry is decoded generically and
+  // handed to onEntry(number, obj). Used by the trade/subunit sections.
+  function parsePlainDatabaseSection(dec, view, sectionName, onEntry) {
+    dec.pos += 2; // consume OPEN already peeked by caller
+    while (true) {
+      const peek = view.getUint16(dec.pos, true);
+      if (peek === CLOSE) {
+        dec.pos += 2;
+        break;
+      }
+      const resolved = dec.resolveToken();
+      const key = dec.keyToPropName(resolved);
+      const eq = view.getUint16(dec.pos, true);
+      if (eq !== EQUALS) throw new Error(`${sectionName} desync at ${dec.pos}`);
+      dec.pos += 2;
+
+      if (key === "database") {
+        const openCode = view.getUint16(dec.pos, true);
+        dec.pos += 2;
+        if (openCode !== OPEN) throw new Error(`expected ${sectionName}.database to be a subobject`);
+        while (true) {
+          const p2 = view.getUint16(dec.pos, true);
+          if (p2 === CLOSE) {
+            dec.pos += 2;
+            break;
+          }
+          const numResolved = dec.resolveToken();
+          const eq2 = view.getUint16(dec.pos, true);
+          if (eq2 !== EQUALS) throw new Error(`${sectionName}.database desync at ${dec.pos}`);
+          dec.pos += 2;
+          const obj = dec.readBareValue();
+          // Tombstoned entries decode to a bare unresolved value rather
+          // than a subobject (same shape as war_manager's freed war IDs) -
+          // the extractors all return null for a non-object.
+          if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
+            onEntry(typeof numResolved === "number" ? numResolved : NaN, obj);
           }
         }
       } else {
@@ -1207,6 +1257,7 @@
       dependencies: [],
       warReparations: [],
       locationAssets: [],
+      estateTradeIncomes: [],
       buildings: [],
       cultures: [],
       religions: [],
@@ -1215,6 +1266,13 @@
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
       provinceOwnerByDefinition: {},
       countryDebt: new Map(),
+      tradePaths: [],
+      trades: [],
+      tradeRoutes: [],
+      navalSubunits: [],
+      armySubunits: [],
+      popRecords: [],
+      subunitManagerSeen: false,
     };
 
     // Normally "countries" and "played_country" are true top-level keys, but
@@ -1242,6 +1300,9 @@
     let diseaseOutbreakManagerSeen = false;
     let provincesSeen = false;
     let loanManagerSeen = false;
+    let tradePathManagerSeen = false;
+    let tradeManagerSeen = false;
+    let populationSeen = false;
     function handleSpecialKey(key) {
       if (key === "countries" && !countriesSeen) {
         const beforePos = dec.pos;
@@ -1283,6 +1344,22 @@
         });
         return true;
       }
+      if (key === "population" && includeLocations && !populationSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        populationSeen = true;
+        parsePlainDatabaseSection(dec, gsView, "population", (number, obj) => {
+          const pop = Clausewitz.extractPopFields(number, obj);
+          if (pop) result.popRecords.push(pop);
+        });
+        return true;
+      }
       // dependencies are small (hundreds of entries) - always parsed, no
       // includeLocations-style opt-in needed.
       if (key === "diplomacy_manager" && !diplomacySeen) {
@@ -1311,9 +1388,16 @@
         dec.pos = beforePos;
         if (firstKey !== "database") return false;
         estateManagerSeen = true;
-        parseEstateManagerSection(dec, gsView, (asset) => {
-          result.locationAssets.push(asset);
-        });
+        parseEstateManagerSection(
+          dec,
+          gsView,
+          (asset) => {
+            result.locationAssets.push(asset);
+          },
+          (entry) => {
+            result.estateTradeIncomes.push(entry);
+          }
+        );
         return true;
       }
       if (key === "building_manager" && includeLocations && !buildingManagerSeen) {
@@ -1359,7 +1443,18 @@
         dec.pos = afterOpen;
         const firstKey = dec.keyToPropName(dec.resolveToken());
         dec.pos = beforePos;
-        if (firstKey !== "database" && firstKey !== "#324d") return false;
+        // market_manager's own first field is `produced_goods` (0x324d), not
+        // `database` directly - this section is detected by that distinctive
+        // first-field signature (same pattern as every other ambiguous
+        // top-level key here). 0x324d used to have no name, so this checked
+        // for the literal unresolved "#324d" placeholder; now that
+        // js/eu5-fixed-ids.js resolves it to "produced_goods" (added
+        // alongside the rest of the market-statistics fields), the OLD
+        // check silently stopped matching and market_manager stopped being
+        // parsed at all (result.markets came back empty on every real save)
+        // - both spellings are accepted here so this doesn't regress again
+        // if the fixed-id table changes further.
+        if (firstKey !== "database" && firstKey !== "#324d" && firstKey !== "produced_goods") return false;
         marketManagerSeen = true;
         parseMarketManagerSection(dec, gsView, (entry) => result.markets.push(entry));
         return true;
@@ -1428,6 +1523,56 @@
         });
         return true;
       }
+      if (key === "subunit_manager" && !result.subunitManagerSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        result.subunitManagerSeen = true;
+        parsePlainDatabaseSection(dec, gsView, "subunit_manager", (number, obj) => {
+          const ship = Clausewitz.extractNavalSubunit(obj);
+          if (ship) result.navalSubunits.push(ship);
+          const troop = Clausewitz.extractArmySubunit(obj);
+          if (troop) result.armySubunits.push(troop);
+        });
+        return true;
+      }
+      if (key === "trade_path_manager" && includeLocations && !tradePathManagerSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        tradePathManagerSeen = true;
+        parsePlainDatabaseSection(dec, gsView, "trade_path_manager", (number, obj) => {
+          const path = Clausewitz.extractTradePathFields(number, obj);
+          if (path) result.tradePaths.push(path);
+        });
+        return true;
+      }
+      if (key === "trade_manager" && includeLocations && !tradeManagerSeen) {
+        const beforePos = dec.pos;
+        const peek = gsView.getUint16(dec.pos, true);
+        if (peek !== OPEN) return false;
+        const afterOpen = dec.pos + 2;
+        dec.pos = afterOpen;
+        const firstKey = dec.keyToPropName(dec.resolveToken());
+        dec.pos = beforePos;
+        if (firstKey !== "database") return false;
+        tradeManagerSeen = true;
+        parsePlainDatabaseSection(dec, gsView, "trade_manager", (number, obj) => {
+          const trade = Clausewitz.extractTradeFields(number, obj);
+          if (trade) result.trades.push(trade);
+        });
+        return true;
+      }
       if (key === "war_manager" && includeWars && !warManagerSeen) {
         const beforePos = dec.pos;
         const peek = gsView.getUint16(dec.pos, true);
@@ -1489,6 +1634,9 @@
     Clausewitz.attachLocationBuildings(result);
     Clausewitz.reconcileWarOccupation(result);
     Clausewitz.attachCountryDebt(result);
+    Clausewitz.attachTradeRoutes(result);
+    Clausewitz.attachNavyCounts(result);
+    Clausewitz.attachArmyCounts(result);
 
     onProgress(1);
     return result;

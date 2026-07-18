@@ -55,10 +55,23 @@
     return map;
   }
 
+  // A "Declined" participant was invited/targeted (present in war.participants,
+  // often even in originalAttacker/originalDefenders) but never actually
+  // joined the fight - confirmed on real data: a country listed as an
+  // original Target with status "Declined" had a DIFFERENT country join in
+  // its place as a called-ally ("calledAlly" pointing at the declined one),
+  // meaning the declined country itself was never a real belligerent. Left
+  // untouched everywhere else (still counts as "unfought" is a valid state,
+  // and "Left" - someone who genuinely joined then departed mid-war - is
+  // deliberately NOT filtered here, only "Declined" is) - excluding it from
+  // every side/enemy/ally derivation fixes a real user-reported bug where a
+  // declined-but-listed country's tag showed up as if it were fighting in
+  // TWO different wars at once (impossible in EU5) - it was never really in
+  // the first one at all.
   function sideCountryList(participants, side, excludeCountry) {
     const set = new Set();
     for (const p of participants) {
-      if (p.side === side && p.country !== excludeCountry) set.add(p.country);
+      if (p.side === side && p.country !== excludeCountry && p.status !== "Declined") set.add(p.country);
     }
     return [...set];
   }
@@ -83,15 +96,20 @@
     return 2 * (condottieri ? 1 : 0) * (2 * W - 1);
   }
 
+  // Returns null for a "Declined" participant, same as if they weren't in
+  // the war at all - see sideCountryList's comment above for why. Every
+  // caller already treats a null side as "not really in this war" (row
+  // generation skips it), so this is the single point that keeps a country
+  // that declined a call-in from ever generating a row for itself.
   function participantSide(war, country) {
     const p = (war.participants || []).find((part) => part.country === country);
-    return p ? p.side : null;
+    return p && p.status !== "Declined" ? p.side : null;
   }
 
   function sideCountries(war, side, excludeCountry) {
     const set = new Set();
     for (const p of war.participants || []) {
-      if (p.side === side && p.country !== excludeCountry) set.add(p.country);
+      if (p.side === side && p.country !== excludeCountry && p.status !== "Declined") set.add(p.country);
     }
     return set;
   }
@@ -239,6 +257,9 @@
       for (const participant of war.participants) {
         const country = participant.country;
         if (typeof country !== "number") continue;
+        // Never actually joined this war (invited/targeted, declined) - see
+        // sideCountryList's comment for the real bug this closes.
+        if (participant.status === "Declined") continue;
         const candidates = candidatesByCountry.get(country) || [];
         const currentPlayer = currentPlayerByCountry.get(country) || null;
         if (!currentPlayer && !candidates.length) continue; // never player-controlled - AI, skip
@@ -407,7 +428,6 @@
 
     const leaderboard = [];
     for (const [name, agg] of byPlayer) {
-      if (excludedPlayers.has(name)) continue;
       const player = (result.players || []).find((p) => p.name === name);
       const country = player && typeof player.countryNumber === "number" ? countryByNumber.get(player.countryNumber) : null;
       // Alpaca Points (PVE mode) are the player's raw PVE war performance
@@ -423,6 +443,13 @@
         player: name,
         countryTag: country ? country.tag : null,
         color: country ? country.color : null,
+        // Kept in the array rather than dropped (see computeFromLedger's
+        // identical treatment) - a single save has no per-war dates to
+        // recompute against, so a hidden player's row here may already be
+        // zeroed by the "player-hidden" auto-exclude above; `hidden` is
+        // still surfaced so the UI can collapse it by default without
+        // pretending the row never existed.
+        hidden: excludedPlayers.has(name),
         gpScore,
         vpTotal: agg.vpTotal,
         vpPositive: agg.vpPositive,
@@ -487,10 +514,27 @@
   // tells the caller which source it got, so a comparison built from a
   // fallback isn't trusted as fully as one built from clean principal data
   // on both sides.
-  function principalCountrySet(value) {
+  // `war.originalAttacker`/`war.originalDefenders` record who the game
+  // DECLARED as belligerents, not who actually showed up - a country invited/
+  // targeted but never joining (status "Declined", see sideCountryList's
+  // comment) still appears here. Real bug found on real data: a declined
+  // defender's own (unrelated) location gain got summed together with the
+  // REAL defender's real location LOSS in the same principal set, netting to
+  // ~0 and masking a clean, decisive land transfer as a White Peace - the
+  // declined country was never actually fighting, so whatever else was
+  // happening to its territory that same month has nothing to do with this
+  // war. Excluded here so a Declined "principal" contributes nothing to any
+  // economic signal, the same way it's already excluded from the displayed
+  // participant lists.
+  function principalCountrySet(value, war) {
+    const declined = new Set();
+    if (war) for (const p of war.participants || []) if (p.status === "Declined") declined.add(p.country);
     const set = new Set();
-    if (typeof value === "number") set.add(value);
-    else if (Array.isArray(value)) for (const n of value) if (typeof n === "number") set.add(n);
+    if (typeof value === "number") {
+      if (!declined.has(value)) set.add(value);
+    } else if (Array.isArray(value)) {
+      for (const n of value) if (typeof n === "number" && !declined.has(n)) set.add(n);
+    }
     return set;
   }
   // A vassal being attacked drags its Overlord into the war automatically
@@ -517,6 +561,31 @@
     for (const country of base) {
       const overlord = overlordFor(war, country);
       if (overlord != null) expanded.add(overlord);
+    }
+    // Downward direction too, not just upward: per the user's explicit call,
+    // taking land from someone's VASSAL is winning against THEM - a subject
+    // has no standing of its own, it's the same political entity as its
+    // overlord. `reason === "Subject"` participants (real subjects, called
+    // in specifically because they belong to a principal already in this
+    // set) get folded in, transitively - a subject can itself have its own
+    // subjects fighting too, confirmed real in an actual campaign war (a
+    // 3-level chain: a county subject of a duchy subject of the kingdom
+    // itself). Deliberately does NOT pull in "InternationalOrganization" or
+    // any other non-Subject call-in reason - those are genuinely separate
+    // political entities dragged in by an alliance/league mechanic, not
+    // part of the principal's own realm, and stay excluded per the original
+    // coalition-vs-principal design (see the land-transfer signal's own
+    // comment) - only a REAL subject counts here.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const p of war.participants || []) {
+        if (expanded.has(p.country) || p.status === "Declined") continue;
+        if (p.reason === "Subject" && expanded.has(p.calledAlly)) {
+          expanded.add(p.country);
+          changed = true;
+        }
+      }
     }
     return expanded;
   }
@@ -550,6 +619,29 @@
     const principalValue = principalFieldSum(sideInfo, principals, field);
     if (principalValue !== null) return { value: principalValue, usedPrincipal: true };
     return { value: sideInfo ? sideInfo[field] : null, usedPrincipal: false };
+  }
+  // Same principal-scoping as principalFieldSum, but for the actual location
+  // ID lists (locationsGained/locationsLost - see llama-log-machine.js's
+  // locationSetDelta) instead of the net number - lets a war's real land
+  // exchange be inspected directly rather than just trusting a spread, per
+  // the user's explicit request. Union across every principal on the side
+  // (a coalition-of-subjects can each contribute their own gained/lost
+  // provinces). Only ever populated for wars recorded after the ownedLocations
+  // data model existed - null (not an empty array) when nothing in this
+  // side's principals carries it, so the UI can tell "no exchange" apart
+  // from "no data for this older war".
+  function principalFieldUnion(sideInfo, principals, field) {
+    if (!sideInfo || !sideInfo.countryDeltas || !principals.size) return null;
+    const ids = new Set();
+    let any = false;
+    for (const cd of sideInfo.countryDeltas) {
+      if (!principals.has(cd.country)) continue;
+      if (Array.isArray(cd[field])) {
+        any = true;
+        for (const id of cd[field]) ids.add(id);
+      }
+    }
+    return any ? [...ids] : null;
   }
 
   // The single strongest signal available: an ENFORCED war-reparations
@@ -633,13 +725,46 @@
   // immediately upon DECLARING an independence war, not just upon winning
   // it, which would have made a before/after comparison unreliable for
   // exactly the case this exists to catch.)
-  function independenceSignal(war, afterCountries) {
-    if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
+  // `war.revolt` covers BOTH INDEPENDENCE_WAR_NAME (a vassal fighting to
+  // break free) and CIVIL_WAR_NAME (a pretender contesting the throne) - the
+  // rebel/pretender is always the ATTACKER (confirmed on real data: 7/7
+  // revolt wars in a real campaign had `revolter: true` on the Attacker
+  // side, never the Defender).
+  //
+  // Real bug found on real data: the old version of this signal (named
+  // independenceSignal, INDEPENDENCE_WAR_NAME-only) returned null the moment
+  // the attacker's country was missing from `afterCountries` (`if (!info)
+  // return null`) - exactly what happens when the player FULLY ANNEXES the
+  // rebel back (same "vanished" pattern documented in sideEconomyDeltas'
+  // comment), so a clean, decisive crush fell through to weaker signals
+  // instead of being recognized as a Defender win. Worse: if the rebel's tag
+  // survived a snapshot or two as an empty `locationCount: 0` stub (rather
+  // than vanishing outright - also documented as real in sideEconomyDeltas'
+  // comment) with `overlord` already cleared, the OLD `stillSubjugated`
+  // check read that as "independence achieved" and credited the ATTACKER
+  // with a win - the exact inverted-outcome bug the user reported (full
+  // annexation of a rebel scored as a loss). Fixed: a rebel with no land
+  // left (vanished OR `locationCount === 0`) is checked FIRST and is always
+  // a Defender win (crushed), regardless of what its `overlord` field says -
+  // only a rebel that's still a going concern with real land afterward falls
+  // through to the subjugation check below.
+  function revoltOutcomeSignal(war, afterCountries) {
+    if (!war.revolt) return null;
     const attacker = war.originalAttacker;
     const defenders = war.originalDefenders || [];
     if (typeof attacker !== "number" || !afterCountries) return null;
     const info = afterCountries[attacker];
-    if (!info) return null;
+    const crushed = !info || (typeof info.locationCount === "number" && info.locationCount === 0);
+    if (crushed) {
+      return { winnerSide: "Defender", reason: "post-war-revolt-crushed", strength: Number.MAX_SAFE_INTEGER };
+    }
+    // The "still subjugated to a defender = they lost, independence not
+    // granted" check only makes sense for an actual INDEPENDENCE_WAR_NAME (a
+    // real vassal/overlord relationship to test) - a CIVIL_WAR_NAME
+    // pretender that's still around with land afterward has no equivalent
+    // relationship to check, so it falls through to land-transfer/
+    // reparations instead of guessing here.
+    if (war.warName !== "INDEPENDENCE_WAR_NAME") return null;
     const stillSubjugated = typeof info.overlord === "number" && defenders.includes(info.overlord);
     return {
       winnerSide: stillSubjugated ? "Defender" : "Attacker",
@@ -673,14 +798,14 @@
   function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
     const breakdown = [];
     const signals = [];
-    const independence = independenceSignal(war, afterCountries);
-    if (independence) signals.push(independence);
+    const revoltOutcome = revoltOutcomeSignal(war, afterCountries);
+    if (revoltOutcome) signals.push(revoltOutcome);
     breakdown.push({
       key: "independence",
       label: "Independence granted",
       decisive: true,
-      applies: !!independence,
-      winnerSide: independence ? independence.winnerSide : null,
+      applies: !!revoltOutcome,
+      winnerSide: revoltOutcome ? revoltOutcome.winnerSide : null,
       attackerValue: null,
       defenderValue: null,
     });
@@ -689,8 +814,8 @@
       signals.sort((a, b) => b.strength - a.strength);
       return { decisive: signals[0], contributing: signals.slice(1), breakdown };
     }
-    const attackerPrincipalsBase = principalCountrySet(war.originalAttacker);
-    const defenderPrincipalsBase = principalCountrySet(war.originalDefenders);
+    const attackerPrincipalsBase = principalCountrySet(war.originalAttacker, war);
+    const defenderPrincipalsBase = principalCountrySet(war.originalDefenders, war);
     const attackerPrincipals = principalsWithOverlords(attackerPrincipalsBase, war);
     const defenderPrincipals = principalsWithOverlords(defenderPrincipalsBase, war);
     const attackerGoldPrincipals = principalsForGold(attackerPrincipalsBase, war);
@@ -781,6 +906,14 @@
       winnerSide: landWinner,
       attackerValue: aLocations,
       defenderValue: dLocations,
+      // The actual location IDs behind the numbers above, when available
+      // (see principalFieldUnion's comment) - null for a war recorded before
+      // this data existed, not an empty array, so the UI can tell the two
+      // apart.
+      attackerLocationsGained: principalFieldUnion(economy.Attacker, attackerPrincipals, "locationsGained"),
+      attackerLocationsLost: principalFieldUnion(economy.Attacker, attackerPrincipals, "locationsLost"),
+      defenderLocationsGained: principalFieldUnion(economy.Defender, defenderPrincipals, "locationsGained"),
+      defenderLocationsLost: principalFieldUnion(economy.Defender, defenderPrincipals, "locationsLost"),
     });
 
     const treasuryLean = goldLikeLean(aGold, dGold);
@@ -846,6 +979,7 @@
   const CONTRIBUTING_SIGNAL_FROM_REASON = {
     "post-war-reparations-enforced": "reparations",
     "post-war-independence-granted": "independence",
+    "post-war-revolt-crushed": "independence",
     "post-war-land-transfer": "land-transfer",
     "post-war-land-transfer-coalition": "land-transfer",
   };
@@ -1012,6 +1146,30 @@
     events = events || [];
     excludedPlayers = excludedPlayers || new Set();
     mode = mode === "pve" ? "pve" : "pvp";
+
+    // `excludedPlayers` accepts either a bare Set<name> (legacy/manual "hide
+    // this name, no date info" - what the web app's own localStorage list
+    // has always been) or a Map<name, departedAsOfDate> (the shared hide
+    // list - see hidden-players.json/[[player_session_handling]]) - a
+    // player marked departed as of a specific in-game date should still
+    // score normally for anything that happened before that date; only a
+    // Set entry (no date known at all) falls back to the old all-or-nothing
+    // behavior. `departedDateFor` returns undefined (never hidden), null
+    // (hidden, no date - blanket), or a date string (hidden from that point
+    // on). `isDepartedAsOf` answers "should this player be treated as gone
+    // by the time `atDate` happened" - the actual check every call site
+    // below needs, instead of the old unconditional `excludedPlayers.has()`.
+    function departedDateFor(name) {
+      if (!name) return undefined;
+      if (excludedPlayers instanceof Map) return excludedPlayers.has(name) ? excludedPlayers.get(name) || null : undefined;
+      return excludedPlayers.has(name) ? null : undefined;
+    }
+    function isDepartedAsOf(name, atDate) {
+      const d = departedDateFor(name);
+      if (d === undefined) return false;
+      if (d === null || !atDate) return true;
+      return dateKey(atDate) >= dateKey(d);
+    }
 
     // The recorder can now persist a snapshot that arrived chronologically
     // out of order (a fast-saving source can hand it content out of turn
@@ -1244,34 +1402,51 @@
         // around for the start still counts, even if they too vanish
         // before it concludes).
         //
-        // "player-hidden" (the user's manual Hide button) takes priority
-        // over all of the above - the timeline can only ever see a departure
-        // if a snapshot actually recorded the country's players list going
-        // empty, which never happens for a save-only "last known controller"
-        // (see player_session_handling memory) unless someone else takes
-        // over the seat, so a player who just stops showing up with no
-        // successor is otherwise invisible to this data and keeps scoring
-        // (and keeps counting as a live opponent for whoever's still
-        // fighting them) forever.
+        // "player-hidden" (the user's manual Hide button, or the automatic
+        // shared hidden-players list) takes priority over all of the above -
+        // the timeline can only ever see a departure if a snapshot actually
+        // recorded the country's players list going empty, which never
+        // happens for a save-only "last known controller" (see
+        // player_session_handling memory) unless someone else takes over
+        // the seat, so a player who just stops showing up with no successor
+        // is otherwise invisible to this data. `isDepartedAsOf` scopes this
+        // to the war's START date, same as the timeline-based checks below -
+        // a war that had already begun before the hide-date still counts
+        // (real fight, real score), only a LATER war fighting a phantom
+        // gets excluded. A legacy bare-Set entry (no date attached) has no
+        // such cutoff and excludes every war, same as before this existed.
         function attributedPlayerFor(c) {
           const cands = [...(playerCountries.get(c) || [])];
           return activePlayerAt(c, war.startDate) || lastControllerAt(c, war.startDate) || cands[cands.length - 1] || null;
         }
         const selfDeparted = !activePlayerAt(country, war.startDate);
-        const enemyActivePlayer = enemyEverPlayer.filter((c) => activePlayerAt(c, war.startDate) && !excludedPlayers.has(attributedPlayerFor(c)));
-        const autoExcludeReason = excludedPlayers.has(player)
+        const enemyActivePlayer = enemyEverPlayer.filter(
+          (c) => activePlayerAt(c, war.startDate) && !isDepartedAsOf(attributedPlayerFor(c), war.startDate)
+        );
+        // A revolt war (INDEPENDENCE_WAR_NAME/CIVIL_WAR_NAME, `war.revolt`)
+        // is fighting your own rebels/pretender, not a foreign AI nation -
+        // per the user's explicit call, this shouldn't move PVE/Alpaca
+        // Points either direction regardless of who won, so it's excluded
+        // outright rather than folded into "vs-ai" (which still scores
+        // normally). Checked before the mode/vs-ai split since it applies
+        // the same way in both modes (a revolt is never PvP in practice -
+        // confirmed on real data, every revolter is AI - so this is a no-op
+        // for PVP mode either way).
+        const autoExcludeReason = isDepartedAsOf(player, war.startDate)
           ? "player-hidden"
-          : isPvP && !fought(country)
-            ? "no-battle-losses"
-            : !matchesMode
-              ? mode === "pve"
-                ? "vs-player"
-                : "vs-ai"
-              : selfDeparted
-                ? "player-departed"
-                : mode === "pvp" && enemyActivePlayer.length === 0
-                  ? "opponent-departed"
-                  : null;
+          : war.revolt
+            ? "revolt"
+            : isPvP && !fought(country)
+              ? "no-battle-losses"
+              : !matchesMode
+                ? mode === "pve"
+                  ? "vs-player"
+                  : "vs-ai"
+                : selfDeparted
+                  ? "player-departed"
+                  : mode === "pvp" && enemyActivePlayer.length === 0
+                    ? "opponent-departed"
+                    : null;
         const hasOverrideExcluded = typeof override.excluded === "boolean";
         const excluded = hasOverrideExcluded ? override.excluded : autoExcludeReason !== null;
 
@@ -1380,12 +1555,19 @@
       }
     }
 
-    const leaderboard = [...byPlayer.values()]
-      .filter((p) => !excludedPlayers.has(p.player))
-      .map((p) => ({
-        ...p,
-        llamaPoints: mode === "pve" ? p.vpTotal : (p.gpScore || 0) / 100 + p.vpTotal,
-      }));
+    // A hidden/departed player's row STAYS in the leaderboard array (not
+    // dropped) - their vpTotal/gpScore above already reflects only the wars
+    // that happened before their departure date (or their real total, for a
+    // legacy blanket hide), so this is real earned/lost score, not noise.
+    // `hidden: true` is how the UI defaults them out of view (same collapse-
+    // by-default pattern as "Hide checked-off wars") without deleting the
+    // number - see [[player_session_handling]].
+    const leaderboard = [...byPlayer.values()].map((p) => ({
+      ...p,
+      hidden: departedDateFor(p.player) !== undefined,
+      hiddenSince: departedDateFor(p.player) || null,
+      llamaPoints: mode === "pve" ? p.vpTotal : (p.gpScore || 0) / 100 + p.vpTotal,
+    }));
     leaderboard.sort((a, b) => b.llamaPoints - a.llamaPoints);
     rows.sort((a, b) => dateKey(b.endDate) - dateKey(a.endDate));
 
@@ -1501,10 +1683,96 @@
     return departed;
   }
 
+  // The exact set of automation-delegation options EU5 exposes as of this
+  // writing (confirmed empirically against real save data spanning multiple
+  // campaigns, not guessed - see player_session_handling memory / the
+  // comment on `automatedSystems` in js/clausewitz.js): every genuinely
+  // AI-only country in a real, unmodified save carries ONLY
+  // "ProductionMethods", the single default, with zero exceptions across a
+  // full ~2500-country population. A human player can selectively enable
+  // any subset of the rest for convenience. The length check alongside the
+  // name check is a deliberate belt-and-suspenders: if a future game patch
+  // adds new automation options, a country with "every flag that exists in
+  // THIS save, whatever they're named" still trips the length threshold
+  // even before this constant gets updated for the new names.
+  const FULL_AUTOMATION_FLAGS = new Set([
+    "ProductionMethods",
+    "ArmyBuilder",
+    "Buildings",
+    "Cabinet",
+    "CabinetMembers",
+    "CloseBuildings",
+    "Credit",
+    "CultureAcceptance",
+    "DestroyBuildings",
+    "DestroyEstateBuildings",
+    "Estates",
+    "ExpandBuildings",
+    "ExpandRGO",
+    "Exploration",
+    "Finances",
+    "GovernmentReforms",
+    "Laws",
+    "NavyBuilder",
+    "Privateers",
+    "ReligiousDoctrines",
+    "ReplaceAdmirals",
+    "ReplaceGenerals",
+    "Research",
+    "Rgo",
+    "Rivals",
+  ]);
+  function isFullyAutomated(automatedSystems) {
+    if (!Array.isArray(automatedSystems) || automatedSystems.length < FULL_AUTOMATION_FLAGS.size) return false;
+    for (const flag of FULL_AUTOMATION_FLAGS) if (!automatedSystems.includes(flag)) return false;
+    return true;
+  }
+
+  // Per the user's explicit call: "if you see every automation flag on then
+  // they are AI [...] auto exclude from metrics maps and future scoring."
+  // Returns Map<playerName, departedAsOfDate> - the SAME shape as the
+  // shared hidden-players.json list (see [[player_session_handling]]'s
+  // 2026-07-15 update), so it merges into the exact same date-aware
+  // exclusion pipeline computeFromLedger already has for the manual Hide
+  // button, no separate code path needed. `departedAsOf` is the EARLIEST
+  // snapshot where the country has been continuously fully-automated
+  // through to the latest snapshot (walking backward from the end) - a war
+  // that concluded before automation kicked in still counts as a real fight
+  // by whoever was actually playing then, only a later one fighting a
+  // phantom gets excluded, same reasoning as every other departure signal
+  // in this file. Only ever fires on a country's CURRENT state (the last
+  // snapshot must still be fully-automated) - a player who briefly toggled
+  // everything on and then reverted is not flagged.
+  function computeAutomationDepartures(snapshots) {
+    const sorted = (snapshots || []).slice().sort((a, b) => dateKey(a.date) - dateKey(b.date));
+    const byCountry = new Map();
+    for (const snapshot of sorted) {
+      for (const c of snapshot.playerCountries || []) {
+        if (!c || typeof c.number !== "number") continue;
+        if (!byCountry.has(c.number)) byCountry.set(c.number, []);
+        byCountry.get(c.number).push({ date: snapshot.date, automatedSystems: c.automatedSystems, players: c.players || [] });
+      }
+    }
+    const result = new Map();
+    for (const history of byCountry.values()) {
+      if (!history.length) continue;
+      const last = history[history.length - 1];
+      if (!isFullyAutomated(last.automatedSystems)) continue;
+      let departedAsOf = last.date;
+      for (let i = history.length - 1; i >= 0; i--) {
+        if (!isFullyAutomated(history[i].automatedSystems)) break;
+        departedAsOf = history[i].date;
+      }
+      for (const name of last.players) if (!result.has(name)) result.set(name, departedAsOf);
+    }
+    return result;
+  }
+
   return {
     computeLlamaScores,
     computeFromLedger,
     computeDepartedPlayers,
+    computeAutomationDepartures,
     summarizeWars,
     overrideKey,
     warScoreFor,

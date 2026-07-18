@@ -125,7 +125,7 @@ counts needing the same `dateFromHours()` conversion used elsewhere.
 ## Map (`js/map.js`, `map_data/`, `tools/`)
 
 Renders a pdx.tools-style province map with toggleable mapmodes (political, players,
-development, population, trade goods, religion, culture), mouse-wheel zoom, drag-to-pan, and
+development, population, RGO, religion, culture), mouse-wheel zoom, drag-to-pan, and
 hover tooltips, using the game's own map bitmap plus per-location data pulled from the save.
 
 - **Sea vs. land.** `default.map`'s `sea_zones`/`lakes` lists mark each location as water or
@@ -138,7 +138,7 @@ hover tooltips, using the game's own map bitmap plus per-location data pulled fr
 - **"Shade vassals by overlord"** toggle colors a subject's locations as a shade of its
   overlord's color, using the same subject/overlord data as the political tooltip. Multiple
   vassals of the same overlord get different deterministic shade offsets.
-- **Trade goods** mapmode colors by each location's `raw_material` string (hashed to a color,
+- **RGO** mapmode colors by each location's `raw_material` string (hashed to a color,
   since goods aren't numeric IDs).
 
 Since (unlike EU4's `definition.csv`) EU5 ships no color→ID table for `locations.png`, that
@@ -252,6 +252,60 @@ players and every series is right-aligned to it, since each array's *last* entry
 `last_month_gold_income` field is absent (confirmed missing on some pre-1.1 saves, not a
 parsing bug) — cross-checked on a newer save where both exist and track within ~1-2% of
 each other.
+
+**Trade Income and Tax Income** (Economy tab) both come from `estate_manager.database`, which
+mixes two record shapes under one numbering: real location assets (RGOs/buildings/roads) and,
+separately, one summary entry per country per estate type (nobles/clergy/burghers/…) carrying a
+`last_month` breakdown. Both columns sum a field of that summary across a country's estates, but
+they're *not* equally trustworthy: `paid_taxes` (→ Tax Income) is the real gold the estate sent
+the crown and lines up with the government ledger's per-estate "Tax at X% from &lt;estate&gt;"
+lines, whereas `trade_income` (→ Trade Income) is each estate's own *private* trade wealth (it
+feeds the estate's separate `gold`/`balance` pool) and is only a best-effort proxy for the
+ledger's own "Trade Income" — summing it alongside Tax Income for one test country already
+exceeded that country's entire Gross Income, so the two can't both be simple additive
+components. Trade Income's column/tooltip say so; Tax Income was sanity-checked at or under Gross
+Income for 1,705 of 1,707 countries on a real save.
+
+**Base Tax and Economic Base** (Economy tab, Base Tax also on Key) read the *last* entry of
+`historical_tax_base` / `historical_economical_base` respectively (always "now"), not a
+dedicated current-value field: `current_tax_base` exists only on pre-1.3 saves (dropped by
+1.3.x) and `current_economical_base` never existed, so the historical arrays are the only
+version-stable source. `historical_economical_base` is itself newer (absent pre-1.3), so
+Economic Base is blank rather than wrong on an older save. A country's **"Wealth"** (the
+line the in-game Economic Base breakdown shows contributing at ~0.5×) is *not* stored
+anywhere — the game derives it live from population/estates/subjects at render time (the only
+`wealth`-named fields in a save are per-estate `wealth_impact`, which sums to ~7 per country,
+and per-estate `gold` treasuries, which sum ~9× too high) — so it's deliberately not offered;
+Economic Base is the stored aggregate it feeds.
+
+### Troop headcounts vs. regiment counts (`subunit_manager`)
+
+The Military tab's Navy Size and the "Active Regiments / Levy Regiments / …" columns are
+*counts* of `subunit_manager` entries (see "war_manager"-adjacent notes above for how army
+subunits are told apart: army types carry an `a_` prefix, naval `n_`, and the same section
+mixes in unrelated estate/religion/union entries filtered out by that prefix). The **"Active
+Army (k) / Levies (k) / Regulars (k) / Mercenaries (k)"** columns show real troop headcounts
+instead, and the save already carries them: a regiment's own **`strength` field IS its
+current troop count**, in the same "thousands" unit the app uses for population/manpower
+(`strength=0.40` = 400 men) — *not* a 0-1 fill fraction. Proven two ways against a real save:
+a Byzantine cataphract at `strength=0.40` shows as exactly 400 men in the in-game unit panel,
+and across 2,003 regiments `strength*1000` never exceeds that unit type's own max capacity,
+landing exactly at it for the full ones. So the "(k)" columns are just the per-country sum of
+`strength` — no unit-size table, no game-install files, works on the deployed site directly.
+
+Two encoding subtleties, both learned the hard way:
+- `strength` is *not* a fill fraction to multiply by a separately-derived max unit size. That
+  approach double-counted and read ~2.5× low, and briefly required a whole tool that read
+  `max_strength` out of the game's own `unit_types` defines (walking `copy_from` chains, with
+  the +size bonuses that accumulate *additively* up the chain — e.g. a Varangian Guard inherits
+  500 and adds its own 100 to reach 600). That tool is deleted; none of it is needed once
+  `strength` is understood as the count itself.
+- An **absent** `strength` field marks an **unraised levy** (0 mustered troops), not a full
+  regiment. Confirmed: all 179 of 1939 strength-less subunits in one save were levies (never
+  built regulars, which always carry an explicit strength) — each an allocated-but-not-gathered
+  levy that has its `levies={…}` pop list but no `experience` and no strength yet. It
+  contributes 0 to the current-troop sum. (`extractArmySubunit` defaults absent strength to 0
+  for exactly this reason.)
 
 ## Black Death analyzer
 

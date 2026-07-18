@@ -167,6 +167,9 @@ tbody tr:hover td { background: color-mix(in srgb, var(--row-hover) 55%, transpa
 .side-list { list-style: none; margin: 0; padding: 0; }
 .side-list li { margin-bottom: 2px; }
 
+.location-exchange-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.location-exchange-list li { margin-bottom: 2px; font-family: var(--font-mono); font-size: 11.5px; }
+
 .score-positive { color: var(--green); font-weight: 600; }
 .score-negative { color: var(--red); font-weight: 600; }
 .score-neutral { color: var(--muted); }
@@ -182,6 +185,21 @@ tbody tr:hover td { background: color-mix(in srgb, var(--row-hover) 55%, transpa
 
 tr.row-verified { opacity: 0.55; }
 tr.row-verified td { text-decoration: line-through; text-decoration-color: var(--panel-border); }
+
+tr.row-departed { opacity: 0.6; }
+.departed-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--row-hover);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-left: 4px;
+}
+.btn-small { padding: 3px 9px; font-size: 12px; }
 
 .breakdown-toggle {
   background: none;

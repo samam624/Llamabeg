@@ -161,5 +161,25 @@
     return { snapshots: snapshots.records, events: events.records, lastModified: Math.max(snapshots.lastModified, events.lastModified) };
   }
 
-  root.LedgerConnect = { supported, saveHandle, loadHandle, clearHandle, verifyPermission, findLatestCampaign, findCampaignByKey, readCampaignLedger };
+  // hidden-players.json is written by the Llamabeg desktop dashboard's Hide
+  // button (name -> in-game date they were marked departed as of, see
+  // llama-dashboard/main.js) directly into this same campaign folder, so the
+  // web app can pick up the SAME hide without the user re-doing it here -
+  // read-only on this side (only "read" permission is ever requested for
+  // this folder, see verifyPermission above), the desktop app is the only
+  // writer. Missing file (nobody's hidden anyone yet, or an older ledger
+  // predating this feature) is not an error - just means nobody's hidden.
+  async function readHiddenPlayers(campaignDirHandle) {
+    const fileHandle = await campaignDirHandle.getFileHandle("hidden-players.json").catch(() => null);
+    if (!fileHandle) return new Map();
+    try {
+      const file = await fileHandle.getFile();
+      const raw = JSON.parse(await file.text());
+      return new Map(Object.entries(raw));
+    } catch (err) {
+      return new Map();
+    }
+  }
+
+  root.LedgerConnect = { supported, saveHandle, loadHandle, clearHandle, verifyPermission, findLatestCampaign, findCampaignByKey, readCampaignLedger, readHiddenPlayers };
 })(typeof self !== "undefined" ? self : this);
