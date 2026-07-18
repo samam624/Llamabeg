@@ -574,8 +574,19 @@ that save file rather than silently resetting to the blank uploader.
   source files (`locations.png`, `definitions.txt`, `named_locations/`) still never ship. If
   this call ever needs reversing, `scripts/build-netlify-site.js`'s `MAP_DATA_FILES` list is
   the one place gating what actually goes out.
-- **Cross-device save sharing**: the current save-history/shareable-link system covers
-  reopening a bookmark/link on the *same* browser, not handing a save's data to someone who's
-  never uploaded it themselves. Real cross-device sharing would need a backend to actually
-  store/serve parsed saves (see `supabase/` for early, currently-unused groundwork toward
-  this).
+- **Cross-device save sharing (mostly solved 2026-07-18)**: clicking "Share link" now uploads
+  both the parsed save (`ShareStore.upload`, Supabase Storage) and, if a campaign ledger is
+  currently loaded, the ledger itself (`ShareStore.uploadCampaignLedger` → the
+  `eu5_upsert_campaign`/`_snapshots`/`_events` RPCs) — a recipient who's never run the recorder
+  themselves now gets the real Llama Score, not just the save's own numbers. See
+  `js/app.js`'s `tryRemoteCampaignLedger`/`uploadCurrentLlamaLedger` and
+  `supabase/migrations/20260718*`. **Not yet carried over: `hidden-players.json`.** That file
+  (written by the desktop Dashboard's Hide button, read by
+  `LedgerConnect.readHiddenPlayers`) only ever gets read from a *local* recorder folder — the
+  Supabase ledger tables/RPCs have no column for it at all, so a player manually marked
+  departed on one machine won't show as hidden for anyone viewing a shared link on another.
+  Untested as of this writing (the auto-remove/departed-player detection this would combine
+  with hadn't been exercised yet either) — worth fixing alongside whenever that gets tested for
+  real, by adding a `hidden_players` jsonb column to `eu5_campaigns` (or a sibling table) and
+  wiring it through both the upload and fetch RPCs the same way `snapshots`/`events` already
+  are.
