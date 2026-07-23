@@ -48,6 +48,11 @@ function vendorPath(...parts) {
 
 const Recorder = require(vendorPath("llama-score-automatic-logging-machine", "llama-log-machine.js"));
 const LlamaScore = require(vendorPath("js", "llama-score.js"));
+const ModifierFinder = require(vendorPath("js", "modifier-finder.js"));
+const ModifierScanner = require(vendorPath("tools", "scan-modifier-sources.js"));
+const modifierScanCache = new Map();
+const societalAxesCache = new Map();
+const modifierCatalogCache = new Map();
 
 // --- settings (save dir / data dir overrides), persisted per-user ---
 
@@ -436,6 +441,38 @@ function pushUpdate() {
       capturedAt: latestSnapshot && latestSnapshot.capturedAt,
       snapshotCount: snapshots.length,
       eventCount: events.length,
+      modifierContext: latestSnapshot
+        ? {
+            date: latestSnapshot.date,
+            gameVersion: latestSnapshot.gameVersion,
+            playerCountries: (latestSnapshot.playerCountries || []).map((country) => ({
+              number: country.number,
+              tag: country.tag,
+              players: country.players || [],
+              hasModifierState: !!country.modifierState,
+              hasEligibilityFacts:
+                !!country.modifierState &&
+                Array.isArray(country.modifierState.estateTypes) &&
+                Array.isArray(country.modifierState.variableKeys) &&
+                Array.isArray(country.modifierState.internationalOrganizations) &&
+                typeof country.modifierState.primaryCulture === "string",
+              hasSocietalValues:
+                !!country.modifierState &&
+                !!country.modifierState.societalValues &&
+                typeof country.modifierState.societalValues === "object",
+              hasSocietalDynamics:
+                !!country.modifierState &&
+                !!country.modifierState.societalDynamics &&
+                typeof country.modifierState.societalDynamics.averageOwnedLocationDevelopment === "number" &&
+                typeof country.modifierState.societalDynamics.averageOwnedLocationControl === "number" &&
+                !!country.modifierState.societalDynamics.subjectTypeCounts,
+              societalValues:
+                country.modifierState && country.modifierState.societalValues && typeof country.modifierState.societalValues === "object"
+                  ? country.modifierState.societalValues
+                  : null,
+            })),
+          }
+        : null,
       pvp,
       pve,
     });
@@ -483,8 +520,10 @@ ipcMain.handle("settings:get", () => {
   return {
     saveDir: settings.saveDir || "",
     dataDir: settings.dataDir || "",
+    gameDir: settings.gameDir || "",
     defaultSaveDir: Recorder.DEFAULT_CONFIG.saveDir,
     defaultDataDir: defaultDataDir(),
+    defaultGameDir: ModifierScanner.DEFAULT_GAME_ROOT,
   };
 });
 
@@ -495,7 +534,7 @@ ipcMain.handle("settings:save", async (_event, incoming) => {
   // install (and any future one) keeps following its own fresh
   // defaultDataDir() rather than getting pinned to whatever happened to be
   // on screen when Save was clicked.
-  for (const key of ["saveDir", "dataDir"]) {
+  for (const key of ["saveDir", "dataDir", "gameDir"]) {
     const value = typeof incoming[key] === "string" ? incoming[key].trim() : "";
     if (value) settings[key] = value;
     else delete settings[key];
@@ -515,6 +554,85 @@ ipcMain.handle("dialog:pick-folder", async (_event, defaultPath) => {
 });
 
 ipcMain.handle("shell:open-path", (_event, targetPath) => shell.openPath(targetPath));
+
+function modifierGameDir() {
+  const settings = loadSettings();
+  return settings.gameDir || ModifierScanner.DEFAULT_GAME_ROOT;
+}
+
+function cachedSocietalAxes(gameDir) {
+  let axes = societalAxesCache.get(gameDir);
+  if (!axes) {
+    axes = ModifierScanner.scanSocietalValueAxes(gameDir);
+    societalAxesCache.set(gameDir, axes);
+  }
+  return axes;
+}
+
+function cachedModifierScan(gameDir, modifierKey) {
+  const cacheKey = `${gameDir}\n${modifierKey}`;
+  let scanResult = modifierScanCache.get(cacheKey);
+  if (!scanResult) {
+    scanResult = ModifierScanner.scanModifierSources(modifierKey, gameDir);
+    modifierScanCache.set(cacheKey, scanResult);
+  }
+  return scanResult;
+}
+
+function cachedModifierCatalog(gameDir) {
+  let catalog = modifierCatalogCache.get(gameDir);
+  if (!catalog) {
+    catalog = ModifierScanner.scanModifierCatalog(gameDir);
+    modifierCatalogCache.set(gameDir, catalog);
+  }
+  return catalog;
+}
+
+function latestModifierCountry(countryNumber) {
+  const campaignKey = currentCampaignKey();
+  if (!campaignKey) return null;
+  const { snapshots } = readCampaignLedger(campaignKey);
+  const latest = snapshots[snapshots.length - 1];
+  const found = latest && (latest.playerCountries || []).find((candidate) => candidate.number === Number(countryNumber));
+  return found ? Object.assign({}, found, { currentDate: latest.date }) : null;
+}
+
+ipcMain.handle("societal-values:list", () => {
+  const gameDir = modifierGameDir();
+  return cachedSocietalAxes(gameDir);
+});
+
+ipcMain.handle("modifiers:catalog", () => cachedModifierCatalog(modifierGameDir()));
+
+ipcMain.handle("modifiers:analyze", (_event, incoming) => {
+  incoming = incoming || {};
+  const modifierKey = typeof incoming.modifierKey === "string" ? incoming.modifierKey.trim().toLowerCase() : "";
+  if (!/^[a-z0-9_]+$/.test(modifierKey)) throw new Error("Enter a modifier key using only letters, numbers, and underscores.");
+
+  const gameDir = modifierGameDir();
+  const scanResult = cachedModifierScan(gameDir, modifierKey);
+  const country = latestModifierCountry(incoming.countryNumber);
+  return ModifierFinder.buildModifierReport(scanResult, country);
+});
+
+ipcMain.handle("societal-values:analyze", (_event, incoming) => {
+  incoming = incoming || {};
+  const axisKey = typeof incoming.axisKey === "string" ? incoming.axisKey : "";
+  const direction = incoming.direction === "left" || incoming.direction === "right" ? incoming.direction : null;
+  const gameDir = modifierGameDir();
+  const axis = cachedSocietalAxes(gameDir).find((candidate) => candidate.axisKey === axisKey);
+  if (!axis || !direction) throw new Error("Choose a valid societal-value axis and direction.");
+
+  const opposingDirection = direction === "left" ? "right" : "left";
+  const country = latestModifierCountry(incoming.countryNumber);
+  const report = ModifierFinder.buildModifierReport(cachedModifierScan(gameDir, axis[`${direction}ModifierKey`]), country);
+  const opposingReport = ModifierFinder.buildModifierReport(cachedModifierScan(gameDir, axis[`${opposingDirection}ModifierKey`]), country);
+  return {
+    report,
+    opposingReport,
+    equilibrium: ModifierFinder.buildSocietalEquilibrium(report, opposingReport, axis[`${direction}Id`], axis[`${opposingDirection}Id`]),
+  };
+});
 
 // Marks `name` departed as of the CURRENT campaign's latest known in-game
 // date (state.lastDateByCampaign, already tracked by the recorder for other

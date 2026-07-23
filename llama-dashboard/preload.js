@@ -16,4 +16,8 @@ contextBridge.exposeInMainWorld("llamaAPI", {
   selectCampaign: (campaignKey) => ipcRenderer.invoke("campaigns:select", campaignKey),
   hidePlayer: (name) => ipcRenderer.invoke("players:hide", name),
   unhidePlayer: (name) => ipcRenderer.invoke("players:unhide", name),
+  analyzeModifier: (request) => ipcRenderer.invoke("modifiers:analyze", request),
+  listModifierCatalog: () => ipcRenderer.invoke("modifiers:catalog"),
+  listSocietalValueAxes: () => ipcRenderer.invoke("societal-values:list"),
+  analyzeSocietalValue: (request) => ipcRenderer.invoke("societal-values:analyze", request),
 });

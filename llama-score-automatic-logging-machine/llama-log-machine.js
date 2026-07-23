@@ -10,6 +10,7 @@ const { Worker } = require("worker_threads");
 
 const Clausewitz = require("../js/clausewitz.js");
 const ClausewitzBinary = require("../js/clausewitz-binary.js");
+const MODIFIER_STATE_SCHEMA_VERSION = 5;
 
 const DEFAULT_CONFIG = {
   saveDir: path.join(os.homedir(), "Documents", "Paradox Interactive", "Europa Universalis V", "save games"),
@@ -31,6 +32,17 @@ const DEFAULT_CONFIG = {
   campaignKey: null,
   playerWarsOnly: true,
   storeAllEconomyCountries: false,
+  // A snapshot arriving this many YEARS ahead of the last one tracked for
+  // its campaign is quarantined instead of trusted - see the anomaly guard
+  // in processParsedFile(). Real observed autosave cadence never exceeds
+  // ~1-1.5 years between consecutive snapshots even at high game speed, so
+  // this stays generous (never false-positives on genuine continuous play)
+  // while still well below a jump big enough to corrupt war tracking (a
+  // real 48-year jump - reloading an old save to test something in
+  // singleplayer, which reuses the same autosave filename/campaign key -
+  // produced 3 bogus war-start events and 1 false war-disappeared event
+  // before this guard existed).
+  maxForwardYearGap: 5,
 };
 
 function usage() {
@@ -110,6 +122,18 @@ function campaignSnapshotsFile(config, campaignKey) {
 
 function campaignEventsFile(config, campaignKey) {
   return path.join(campaignDir(config, campaignKey), "war-events.jsonl");
+}
+
+// Where a snapshot goes when the forward-jump anomaly guard (see
+// processParsedFile) quarantines it instead of trusting it - same JSONL
+// format as snapshots.jsonl (each line is a full snapshot object, plus an
+// `anomalyReason` field), just kept out of the file every other consumer
+// (js/llama-score.js, the web app's ledger-connect.js, the desktop
+// dashboard) already reads. Nothing is ever silently discarded - see
+// tools/campaign-ledger-doctor.js's `promote` command to pull an entry back
+// into the real ledger if a flagged jump turns out to have been intentional.
+function campaignAnomaliesFile(config, campaignKey) {
+  return path.join(campaignDir(config, campaignKey), "anomalies.jsonl");
 }
 
 function campaignArchiveDir(config, campaignKey) {
@@ -383,12 +407,28 @@ async function readAndParseSave(file, config) {
   // runs once per new autosave.
   if (formatCode === "00") {
     const text = bytes.toString("utf8");
-    return { hash, result: Clausewitz.parseSave(text, { includeWars: true, includeLocations: true, playerWarsOnly: !!config.playerWarsOnly }) };
+    return {
+      hash,
+      result: Clausewitz.parseSave(text, {
+        includeWars: true,
+        includeLocations: true,
+        includeModifierState: true,
+        playerWarsOnly: !!config.playerWarsOnly,
+      }),
+    };
   }
 
   if (formatCode === "03") {
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    return { hash, result: await ClausewitzBinary.parseCompressedSave(buffer, { includeWars: true, includeLocations: true, playerWarsOnly: !!config.playerWarsOnly }) };
+    return {
+      hash,
+      result: await ClausewitzBinary.parseCompressedSave(buffer, {
+        includeWars: true,
+        includeLocations: true,
+        includeModifierState: true,
+        playerWarsOnly: !!config.playerWarsOnly,
+      }),
+    };
   }
 
   throw new Error(`Unsupported save format code ${formatCode}`);
@@ -441,6 +481,7 @@ function countrySummary(c, overlordOf, includeLocations, includeAutomation) {
   };
   if (includeLocations) summary.ownedLocations = Array.isArray(c.ownedLocations) ? c.ownedLocations : [];
   if (includeAutomation) summary.automatedSystems = Array.isArray(c.automatedSystems) ? c.automatedSystems : [];
+  if (includeAutomation && c.modifierState) summary.modifierState = c.modifierState;
   return summary;
 }
 
@@ -450,6 +491,87 @@ function buildOverlordLookup(result) {
     if (typeof dep.overlord === "number" && typeof dep.subject === "number") map.set(dep.subject, dep.overlord);
   }
   return map;
+}
+
+// Compact country-state facts used by the societal-value equilibrium
+// report. The game's centralization pressure treats missing per-location
+// control as zero and averages across every owned location; this exact
+// denominator reproduces HUN's in-game 26.53 equilibrium on 1337.6.1.
+function societalDynamicFacts(country, result) {
+  const owned = Array.isArray(country.ownedLocations) ? country.ownedLocations : [];
+  const ownedSet = new Set(owned);
+  let developmentTotal = 0;
+  let controlTotal = 0;
+  let ownedPopulation = 0;
+  let weightedLiteracy = 0;
+  let stateReligionClergy = 0;
+  let primaryReligionPopulation = 0;
+  let acceptedCultureNobles = 0;
+  let primaryCultureNobles = 0;
+  const populationByType = {};
+  const acceptedCultures = new Set([country.primaryCulture].concat(
+    country.modifierState && Array.isArray(country.modifierState.acceptedCultures)
+      ? country.modifierState.acceptedCultures
+      : []
+  ));
+  const ownedPopIds = new Set();
+  for (const location of result.locations || []) {
+    if (!ownedSet.has(location.number)) continue;
+    if (typeof location.development === "number") developmentTotal += location.development;
+    if (typeof location.control === "number") controlTotal += location.control;
+    for (const popId of location.popIds || []) ownedPopIds.add(popId);
+  }
+  for (const pop of result.popRecords || []) {
+    if (!ownedPopIds.has(pop.number) || typeof pop.size !== "number") continue;
+    ownedPopulation += pop.size;
+    populationByType[pop.type] = (populationByType[pop.type] || 0) + pop.size;
+    if (typeof pop.literacy === "number") weightedLiteracy += pop.size * pop.literacy;
+    if (pop.religion === country.primaryReligion) primaryReligionPopulation += pop.size;
+    if (pop.type === "clergy" && pop.religion === country.primaryReligion) stateReligionClergy += pop.size;
+    if (pop.type === "nobles" && acceptedCultures.has(pop.culture)) acceptedCultureNobles += pop.size;
+    if (pop.type === "nobles" && pop.culture === country.primaryCulture) primaryCultureNobles += pop.size;
+  }
+  const subjectTypeCounts = {};
+  for (const dependency of result.dependencies || []) {
+    if (dependency.overlord !== country.number || typeof dependency.subjectType !== "string") continue;
+    subjectTypeCounts[dependency.subjectType] = (subjectTypeCounts[dependency.subjectType] || 0) + 1;
+  }
+  let atWar = false;
+  for (const war of result.wars || []) {
+    const status = String(war.status || "").toLowerCase();
+    if (status === "ended" || status === "concluded" || status === "inactive") continue;
+    if ((war.participants || []).some((participant) => participant.country === country.number && !participant.leaveDate)) {
+      atWar = true;
+      break;
+    }
+  }
+  const state = country.modifierState || {};
+  let estateTradeIncome = 0;
+  for (const entry of result.estateTradeIncomes || []) {
+    if (entry.country === country.number && typeof entry.tradeIncome === "number") estateTradeIncome += entry.tradeIncome;
+  }
+  return {
+    averageOwnedLocationDevelopment: owned.length ? developmentTotal / owned.length : 0,
+    averageOwnedLocationControl: owned.length ? controlTotal / owned.length : 0,
+    ownedPopulation,
+    averageLiteracy: ownedPopulation ? weightedLiteracy / ownedPopulation : 0,
+    stateReligionClergyShare: ownedPopulation ? stateReligionClergy / ownedPopulation : 0,
+    primaryReligionShare: ownedPopulation ? primaryReligionPopulation / ownedPopulation : 0,
+    acceptedCultureNoblesShare: ownedPopulation ? acceptedCultureNobles / ownedPopulation : 0,
+    primaryCultureNoblesShare: ownedPopulation ? primaryCultureNobles / ownedPopulation : 0,
+    populationShares: Object.fromEntries(Object.entries(populationByType).map(([type, size]) => [type, ownedPopulation ? size / ownedPopulation : 0])),
+    armyTradition: typeof country.armyTradition === "number" ? country.armyTradition : 0,
+    atWar,
+    maintenances: state.maintenances || {},
+    characterTraits: state.characterTraits || {},
+    employmentSystem: state.employmentSystem || "first_come_first_serve",
+    countryArtShare: typeof state.countryArtShare === "number" ? state.countryArtShare : 0,
+    countryArtQualityShare: typeof state.countryArtQualityShare === "number" ? state.countryArtQualityShare : 0,
+    historicalTaxBase: Array.isArray(country.historicalTaxBase) && typeof country.historicalTaxBase.at(-1) === "number" ? country.historicalTaxBase.at(-1) : null,
+    historicalEconomicBase: Array.isArray(country.historicalEconomicalBase) && typeof country.historicalEconomicalBase.at(-1) === "number" ? country.historicalEconomicalBase.at(-1) : null,
+    estateTradeIncome,
+    subjectTypeCounts,
+  };
 }
 
 function allCountryLookup(countries, overlordOf) {
@@ -1386,9 +1508,38 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     const c = countryByNumber.get(n);
     if (c) countryLookup[n] = countrySummary(c, overlordOf, true);
   }
-  const playerCountries = countries.filter((c) => c.players && c.players.length).map((c) => countrySummary(c, overlordOf, true, true));
+  const culturesByNumber = new Map((result.cultures || []).map((entry) => [entry.number, entry]));
+  const religionsByNumber = new Map((result.religions || []).map((entry) => [entry.number, entry]));
+  const playerCountries = countries
+    .filter((c) => c.players && c.players.length)
+    .map((c) => {
+      const summary = countrySummary(c, overlordOf, true, true);
+      if (summary.modifierState) {
+        const culture = culturesByNumber.get(c.primaryCulture);
+        const religion = religionsByNumber.get(c.primaryReligion);
+        summary.modifierState = Object.assign({}, summary.modifierState, {
+          currentTag: c.tag,
+          originalTag: c.originalTag,
+          governmentType: c.governmentType,
+          primaryCulture: culture && (culture.definition || culture.name),
+          primaryReligion: religion && (religion.definition || religion.key || religion.name),
+          religionGroup: religion && religion.group,
+          societalDynamics: societalDynamicFacts(c, result),
+          internationalOrganizations: (result.internationalOrganizations || [])
+            .filter((organization) => organization.members.includes(c.number))
+            .map((organization) => ({
+              type: organization.type,
+              leader: organization.leader === c.number,
+              laws: organization.laws,
+              lawHistory: organization.lawHistory,
+            })),
+        });
+      }
+      return summary;
+    });
   const economyCountries = config.storeAllEconomyCountries ? allCountryLookup(countries, overlordOf) : countryLookup;
   return {
+    modifierStateSchemaVersion: MODIFIER_STATE_SCHEMA_VERSION,
     capturedAt: new Date().toISOString(),
     sourceFile: path.basename(file),
     campaignKey: campaignKeyFromFile(file),
@@ -1410,6 +1561,17 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     // this is the most durable win/loss signal available (see
     // economicOutcomeSignal's reparationsSignal, which reads this directly).
     warReparations: result.warReparations || [],
+    // Set by the parser when it had to bail out of the gamestate scan early
+    // (see js/clausewitz-binary.js's parseCompressedSave) - null on a clean
+    // parse. A non-null value means this snapshot's playerCountries/
+    // countries/wars may be silently incomplete (possibly all empty)
+    // despite looking like a normal recording - exactly what happened for
+    // real across 25 straight autosaves in one campaign before this field
+    // existed (see CHANGELOG). Kept on the snapshot itself, not just
+    // console-logged, so a suspect snapshot can be found/filtered later
+    // instead of only being visible in a terminal no one was watching at
+    // 1am.
+    parseWarning: result.parseWarning || null,
   };
 }
 
@@ -1538,9 +1700,11 @@ function hydrateStateFromSnapshots(config, state) {
   state.activeWarsByCampaign = state.activeWarsByCampaign || {};
   state.lastDateByCampaign = state.lastDateByCampaign || {};
   for (const [campaignKey, snapshot] of latestByCampaign.entries()) {
-    if (!state.lastDateByCampaign[campaignKey] || compareDates(snapshot.date, state.lastDateByCampaign[campaignKey]) > 0) {
-      state.lastDateByCampaign[campaignKey] = snapshot.date;
-    }
+    // snapshots.jsonl is the durable source of truth. This assignment must
+    // also be allowed to move BACKWARD after an intentional ledger rollback;
+    // keeping a newer cache date would make every genuine resumed save look
+    // out of order and suppress war-event tracking until that stale date.
+    state.lastDateByCampaign[campaignKey] = snapshot.date;
     const countries = snapshot.economyCountries || snapshot.countries || {};
     const wars = {};
     for (const war of snapshot.wars || []) {
@@ -1606,10 +1770,10 @@ function pruneStaleCampaignState(state, config, keepCampaignKey) {
   }
 }
 
-async function processParsedFile(file, stat, hash, result, config, state) {
+async function processParsedFile(file, stat, hash, result, config, state, forceModifierStateRefresh) {
   const known = state.files[file];
-  if (known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) return false;
-  if (state.hashes[hash]) {
+  if (!forceModifierStateRefresh && known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) return false;
+  if (!forceModifierStateRefresh && state.hashes[hash]) {
     state.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, hash };
     return false;
   }
@@ -1626,6 +1790,43 @@ async function processParsedFile(file, stat, hash, result, config, state) {
   // call site, which only ever compacts campaigns NOT being processed this
   // tick).
   decompactCampaignLedger(config, snapshot.campaignKey);
+
+  // A snapshot arriving many YEARS ahead of the last one this campaign
+  // tracked is far more likely to be an exploratory/test continuation
+  // (reloading an old singleplayer save to try something, which autosaves
+  // under the exact same filename/campaign key - campaignKeyFromFile has no
+  // way to tell that apart from genuine uninterrupted play) than a real
+  // multi-decade time skip. Diffing classifyEvents() against a previousWars
+  // baseline this stale produces nonsense events - wars that "start" but
+  // actually started AND ended somewhere in the unobserved gap, wars that
+  // "disappear" but are still genuinely ongoing. Confirmed on real data: a
+  // 48-year jump (1455->1503) produced 3 bogus war-start events and 1 false
+  // war-disappeared event, only caught and hand-fixed after the fact.
+  //
+  // Same philosophy as the out-of-order branch below - never silently drop
+  // real data. The snapshot is preserved in a sibling anomalies.jsonl
+  // instead of snapshots.jsonl, and lastDateByCampaign/activeWarsByCampaign
+  // are left untouched, so a LATER snapshot that actually resumes the real
+  // campaign near where it left off keeps diffing against genuine history
+  // instead of this gap. See tools/campaign-ledger-doctor.js to inspect or
+  // "promote" a quarantined entry if a jump like this turns out to have
+  // been intentional after all.
+  const yearGap = lastDate ? dateParts(snapshot.date).year - dateParts(lastDate).year : null;
+  if (lastDate && Number.isFinite(yearGap) && yearGap > config.maxForwardYearGap && compareDates(snapshot.date, lastDate) > 0) {
+    appendJsonl(
+      campaignAnomaliesFile(config, snapshot.campaignKey),
+      Object.assign({}, snapshot, { anomalyReason: `${yearGap} year jump ahead of the last tracked date (${lastDate})` })
+    );
+    state.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, hash };
+    state.hashes[hash] = { file: path.basename(file), date: snapshot.date, capturedAt: snapshot.capturedAt, quarantinedAsAnomaly: true };
+    saveJson(path.join(config.dataDir, "state.json"), state);
+    console.warn(
+      `[${snapshot.date || "unknown"}] ${snapshot.campaignKey}: ${path.basename(file)} is ${yearGap} years ahead of the last tracked date (${lastDate}) - ` +
+        `quarantined to anomalies.jsonl instead of the real ledger (looks like a reloaded/test autosave, not continuous play). ` +
+        `Run tools/campaign-ledger-doctor.js list to review it, or its promote command if this jump was actually intentional.`
+    );
+    return true;
+  }
 
   // A snapshot chronologically at-or-behind what's already tracked can
   // still happen even with parallel parsing (a source saving fast enough
@@ -1729,11 +1930,11 @@ async function parseFilesInParallel(candidates, config) {
   let nextIndex = 0;
   async function runSlot() {
     while (nextIndex < candidates.length) {
-      const { file, stat } = candidates[nextIndex++];
+      const { file, stat, forceModifierStateRefresh } = candidates[nextIndex++];
       try {
         const { hash, result } = await parseSaveInWorker(file, config);
         const date = result.metadata && result.metadata.date;
-        results.push({ file, stat, hash, result, date });
+        results.push({ file, stat, hash, result, date, forceModifierStateRefresh });
       } catch (err) {
         if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
           console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
@@ -1749,28 +1950,85 @@ async function parseFilesInParallel(candidates, config) {
 async function scan(config, state) {
   ensureDir(config.dataDir);
   const saves = listAutosaves(config).sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
+
+  // On a modifierState schema bump, refresh EVERY currently-recorded
+  // campaign's own most-recent save once - not just whichever save happens
+  // to be globally newest right now. `listAutosaves` scopes to the active
+  // campaignMode (in the common "latest" mode, that's only the single
+  // currently-latest campaign's files), so picking just one global file here
+  // left every OTHER already-recorded campaign's ledger permanently stuck on
+  // whatever modifierState shape existed the last time ITS save actually
+  // changed - confirmed real on a real multi-campaign install (a campaign not
+  // currently being played never got its lawHistory/societalValues/character
+  // traits backfilled, even though the parser already produces them
+  // correctly on a fresh parse). `campaignMode: "all"` here is scoped to just
+  // this one-time file selection, not a persistent config change.
+  const refreshFiles = new Set();
+  if (state.modifierStateSchemaVersion !== MODIFIER_STATE_SCHEMA_VERSION) {
+    const newestPerCampaign = new Map();
+    for (const entry of listAutosaves(Object.assign({}, config, { campaignMode: "all" }))) {
+      const key = campaignKeyFromFile(entry.file);
+      // Only backfill campaigns this recorder has already recorded at least
+      // one snapshot for - a schema bump refreshing already-known data is
+      // very different from silently starting to track dozens of old,
+      // never-before-seen campaigns just because their save files happen to
+      // still sit in the save folder.
+      if (!state.lastDateByCampaign || !state.lastDateByCampaign[key]) continue;
+      const existing = newestPerCampaign.get(key);
+      if (!existing || entry.stat.mtimeMs > existing.stat.mtimeMs) newestPerCampaign.set(key, entry);
+    }
+    for (const entry of newestPerCampaign.values()) refreshFiles.add(entry.file);
+  }
+
+  const savesByFile = new Map(saves.map((entry) => [entry.file, entry]));
+  for (const file of refreshFiles) {
+    if (!savesByFile.has(file)) {
+      const stat = tryStat(file);
+      if (stat) savesByFile.set(file, { file, stat });
+    }
+  }
+
   const candidates = [];
-  for (const entry of saves) {
+  for (const entry of savesByFile.values()) {
     const file = entry.file;
-    const stat = tryStat(file);
+    const stat = tryStat(file) || entry.stat;
     if (!stat) continue;
     const age = Date.now() - stat.mtimeMs;
     if (age < config.stableMs || stat.size <= 0) continue;
+    const forceModifierStateRefresh = refreshFiles.has(file);
     const known = state.files[file];
-    if (known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) continue;
-    candidates.push({ file, stat });
+    if (!forceModifierStateRefresh && known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) continue;
+    candidates.push({ file, stat, forceModifierStateRefresh });
   }
 
   const parsed = await parseFilesInParallel(candidates, config);
   parsed.sort((a, b) => compareDates(a.date, b.date) || a.stat.mtimeMs - b.stat.mtimeMs);
 
   let processed = 0;
+  const refreshFilesRemaining = new Set(refreshFiles);
   for (const item of parsed) {
     try {
-      if (await processParsedFile(item.file, item.stat, item.hash, item.result, config, state)) processed++;
+      if (await processParsedFile(item.file, item.stat, item.hash, item.result, config, state, item.forceModifierStateRefresh)) {
+        processed++;
+        if (item.forceModifierStateRefresh) refreshFilesRemaining.delete(item.file);
+      }
     } catch (err) {
       console.warn(`Could not process ${path.basename(item.file)}: ${err.message}`);
     }
+  }
+  // Only mark the schema backfill "done" once every campaign refreshFiles
+  // identified this tick actually succeeded - previously this flipped as
+  // soon as the FIRST file in the whole batch (refresh or not) processed
+  // successfully, so one campaign throwing mid-batch (a parse exception
+  // specific to that older save, or any other per-file failure) got silently
+  // skipped by console.warn above and then never retried on any later tick,
+  // since this guard would already read as satisfied. A campaign with
+  // nothing left to backfill (refreshFilesRemaining empty, including the
+  // trivial case where refreshFiles was empty to begin with) is the only
+  // condition that should stop scan() from re-attempting it.
+  if (state.modifierStateSchemaVersion !== MODIFIER_STATE_SCHEMA_VERSION && refreshFilesRemaining.size === 0) {
+    state.modifierStateSchemaVersion = MODIFIER_STATE_SCHEMA_VERSION;
+    saveJson(path.join(config.dataDir, "state.json"), state);
   }
 
   // Compact every OTHER campaign's ledger to .gz - `saves` (computed above,
@@ -1848,10 +2106,16 @@ module.exports = {
   campaignDir,
   campaignSnapshotsFile,
   campaignEventsFile,
+  campaignAnomaliesFile,
   readLedgerText,
   statLedgerFile,
   compactCampaignLedger,
   decompactCampaignLedger,
+  classifyEvents,
+  dateKey,
+  compareDates,
+  buildSnapshot,
+  processParsedFile,
 };
 
 // Guarded so this file can be require()'d (e.g. from a test script) without

@@ -9,6 +9,27 @@ function fmtNum(n, digits) {
   return n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+function prettifyId(value) {
+  return String(value || "-")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function fmtModifierValue(value) {
+  if (typeof value !== "number") return "unresolved";
+  const percent = value * 100;
+  return `${percent > 0 ? "+" : ""}${percent.toLocaleString(undefined, { maximumFractionDigits: 3 })}%`;
+}
+
+function fmtMonthlyValue(value) {
+  if (typeof value !== "number") return "unresolved";
+  return `${value > 0 ? "+" : ""}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 3 })}/month`;
+}
+
+function fmtSourceValue(source) {
+  return source && source.valueFormat === "monthly_points" ? fmtMonthlyValue(source.resolvedValue) : fmtModifierValue(source && source.resolvedValue);
+}
+
 // Maps js/llama-score.js's/llama-log-machine.js's internal `reason` codes
 // (see inferOutcome() in either file) to plain-English labels, so the
 // dashboard can show HOW a winner was decided, not just the verdict - the
@@ -502,12 +523,486 @@ function applyUpdate(payload) {
 
   if (payload.pvp) applyModeSection("pvp", payload.pvp);
   if (payload.pve) applyModeSection("pve", payload.pve);
+  if (Object.prototype.hasOwnProperty.call(payload, "modifierContext")) applyModifierContext(payload.modifierContext);
 
   const logPane = document.getElementById("logPane");
   const wasScrolledToEnd = logPane.scrollTop + logPane.clientHeight >= logPane.scrollHeight - 4;
   logPane.textContent = (payload.log || []).map((l) => `[${l.at.slice(11, 19)}] ${l.line}`).join("\n");
   if (wasScrolledToEnd) logPane.scrollTop = logPane.scrollHeight;
 }
+
+let latestModifierContext = null;
+let latestSocietalAxes = [];
+let societalAxesError = null;
+let latestModifierCatalog = [];
+
+// The Value Optimizer and Modifier Optimizer are now separate tabs, but both
+// read the same recorder ledger snapshot - each has its own "Player country"
+// select (so choosing a country in one doesn't affect the other), keyed by
+// select element id.
+function selectedCountry(selectId) {
+  const countries = latestModifierContext && Array.isArray(latestModifierContext.playerCountries) ? latestModifierContext.playerCountries : [];
+  const selected = document.getElementById(selectId).value;
+  return countries.find((country) => String(country.number) === selected) || countries[0] || null;
+}
+
+function selectedSocietalAxis() {
+  const key = document.getElementById("societalValueAxis").value;
+  return latestSocietalAxes.find((axis) => axis.axisKey === key) || null;
+}
+
+function fmtImpactValue(value) {
+  if (typeof value !== "number") return "unresolved";
+  if (Math.abs(value) <= 2) return fmtModifierValue(value);
+  return `${value > 0 ? "+" : ""}${value.toLocaleString(undefined, { maximumFractionDigits: 3 })}`;
+}
+
+function renderSocietalCurrent(country, axis) {
+  const el = document.getElementById("societalValueCurrent");
+  if (!country || !country.hasSocietalValues) {
+    el.innerHTML = "Societal-value positions are not present in this ledger snapshot. Let the recorder capture one new autosave.";
+    return;
+  }
+  if (!axis || typeof country.societalValues[axis.axisKey] !== "number") {
+    el.innerHTML = societalAxesError
+      ? escapeHtml(societalAxesError)
+      : "This is a later-age societal value, so the current position is not active yet. Its game-file sources can still be inspected and planned for.";
+    return;
+  }
+
+  const value = country.societalValues[axis.axisKey];
+  const clamped = Math.max(-100, Math.min(100, value));
+  const side = value < 0 ? "left" : value > 0 ? "right" : null;
+  const sideId = side ? axis[`${side}Id`] : null;
+  const strength = Math.abs(value) / 100;
+  const impactRows = side
+    ? (axis[`${side}Impact`] || [])
+        .filter((impact) => typeof impact.resolvedValue === "number")
+        .map((impact) => `<li><span>${escapeHtml(prettifyId(impact.modifier))}</span><strong>${escapeHtml(fmtImpactValue(impact.resolvedValue * strength))}</strong></li>`)
+        .join("")
+    : "";
+  const positionText = side ? `${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 2 })} toward ${prettifyId(sideId)}` : "Balanced at 0";
+  el.innerHTML = `
+    <div class="societal-axis-labels"><strong>${escapeHtml(prettifyId(axis.leftId))}</strong><span>${escapeHtml(positionText)}</span><strong>${escapeHtml(prettifyId(axis.rightId))}</strong></div>
+    <div class="societal-axis-track"><span class="societal-axis-center"></span><span class="societal-axis-marker" style="left:${(clamped + 100) / 2}%"></span></div>
+    <div class="societal-impact"><strong>Current impact</strong>${impactRows ? `<ul>${impactRows}</ul>` : '<span class="note"> No directional bonuses at the center.</span>'}</div>`;
+}
+
+function updateSocietalDirection(preferCurrentSide) {
+  const axis = selectedSocietalAxis();
+  const country = selectedCountry("valueOptimizerCountry");
+  const select = document.getElementById("societalValueDirection");
+  const previous = select.value;
+  if (!axis) {
+    select.innerHTML = '<option value="">No direction available</option>';
+    return;
+  }
+  select.innerHTML = `<option value="left">${escapeHtml(prettifyId(axis.leftId))}</option><option value="right">${escapeHtml(prettifyId(axis.rightId))}</option>`;
+  const value = country && country.societalValues && country.societalValues[axis.axisKey];
+  const currentSide = typeof value === "number" && value < 0 ? "left" : "right";
+  select.value = preferCurrentSide ? currentSide : previous === "left" || previous === "right" ? previous : currentSide;
+  renderSocietalCurrent(country, axis);
+}
+
+function updateSocietalAxes(country, forceDirection) {
+  const select = document.getElementById("societalValueAxis");
+  const previous = select.value;
+  const values = country && country.societalValues && typeof country.societalValues === "object" ? country.societalValues : {};
+  const applicable = latestSocietalAxes.filter((axis) => Object.prototype.hasOwnProperty.call(values, axis.axisKey));
+  const future = latestSocietalAxes.filter((axis) => !Object.prototype.hasOwnProperty.call(values, axis.axisKey));
+  select.innerHTML = latestSocietalAxes.length
+    ? `${applicable.length ? `<optgroup label="Active now">${applicable.map((axis) => `<option value="${escapeHtml(axis.axisKey)}">${escapeHtml(prettifyId(axis.leftId))} vs ${escapeHtml(prettifyId(axis.rightId))}</option>`).join("")}</optgroup>` : ""}${future.length ? `<optgroup label="Later ages / not active yet">${future.map((axis) => `<option value="${escapeHtml(axis.axisKey)}">${escapeHtml(prettifyId(axis.leftId))} vs ${escapeHtml(prettifyId(axis.rightId))}</option>`).join("")}</optgroup>` : ""}`
+    : `<option value="">${societalAxesError ? "Could not read game definitions" : latestSocietalAxes.length ? "No applicable axes recorded" : "Loading societal values..."}</option>`;
+  const axisStillValid = latestSocietalAxes.some((axis) => axis.axisKey === previous);
+  if (axisStillValid) select.value = previous;
+  // Only snap "Push toward" back to the axis's current-leaning side on a
+  // genuine user action (country/axis change) or when the previous axis
+  // selection no longer exists. A routine background poll tick (~every
+  // 5s, see main.js's tick()/pushUpdate()) must not silently discard a
+  // direction the user deliberately chose - it used to call this with an
+  // implicit "always force" and reset the dropdown out from under the user
+  // mid-session even when nothing they picked had actually changed.
+  updateSocietalDirection(forceDirection || !axisStillValid);
+  document.getElementById("societalValueAnalyze").disabled = !country || !country.hasSocietalDynamics || !latestSocietalAxes.length;
+}
+
+function modifierStateNoteText(selected, context) {
+  if (!selected) return "Waiting for the recorder to capture a player-controlled country.";
+  if (!selected.hasModifierState) return "This ledger snapshot predates modifier-state tracking. Let the recorder capture one new autosave, then try again.";
+  if (!selected.hasEligibilityFacts) return "Choice state is available, but eligibility facts were added later. Let the recorder capture one new autosave for the most accurate result.";
+  if (!selected.hasSocietalValues) return "Eligibility facts are available, but societal-value positions need one newly captured autosave.";
+  if (!selected.hasSocietalDynamics) return "Societal positions are available, but equilibrium inputs are being refreshed from the latest autosave.";
+  return `Eligibility and societal-value facts captured on ${context.date || "the latest autosave"}.`;
+}
+
+function populateCountrySelect(selectId, noteId, context) {
+  const select = document.getElementById(selectId);
+  const previous = select.value;
+  const countries = context && Array.isArray(context.playerCountries) ? context.playerCountries : [];
+  select.innerHTML = countries.length
+    ? countries
+        .map((country) => {
+          const players = country.players && country.players.length ? ` - ${country.players.join(", ")}` : "";
+          return `<option value="${country.number}">${escapeHtml(country.tag || "?")}${escapeHtml(players)}</option>`;
+        })
+        .join("")
+    : '<option value="">No player country recorded</option>';
+  if (countries.some((country) => String(country.number) === previous)) select.value = previous;
+
+  const selected = countries.find((country) => String(country.number) === select.value) || countries[0];
+  document.getElementById(noteId).textContent = modifierStateNoteText(selected, context);
+  return selected;
+}
+
+function applyModifierContext(context) {
+  latestModifierContext = context;
+  const valueCountry = populateCountrySelect("valueOptimizerCountry", "valueOptimizerStateNote", context);
+  updateSocietalAxes(valueCountry);
+  populateCountrySelect("modifierOptimizerCountry", "modifierOptimizerStateNote", context);
+}
+
+function modifierSourceName(source) {
+  if (source.displayName) return source.displayName;
+  if ((source.folder === "laws" || source.folder === "gods") && source.choice) return prettifyId(source.choice);
+  if (source.folder === "subject_types") return `${prettifyId(source.entity)} Subjects${source.sourceCount > 1 ? ` x${source.sourceCount}` : ""}`;
+  return prettifyId(source.entity || source.bundleId);
+}
+
+function modifierSourcePath(source) {
+  if (source.formulaDetail) return source.formulaDetail;
+  if (source.automaticFormula) {
+    const scale = source.automaticFormula.scalesWith;
+    return scale ? `Automatic game formula - scales with ${JSON.stringify(scale)}` : "Automatic game formula";
+  }
+  if (source.folder === "estate_privileges" && source.estate) return `${source.estateLabel || prettifyId(source.estate)} privilege`;
+  // Unlike a law swap, we can't yet tell which omen (if any) is already
+  // active for this god - see classifyDynamicSource()'s comment in
+  // js/modifier-finder.js - so this is flagged as unverified rather than
+  // claimed as a clean "replace X" recommendation.
+  if (source.folder === "gods" && source.choice) return `${prettifyId(source.entity)} omen - current selection not tracked, may already be active`;
+  if (source.folder !== "laws" || !source.choice) return "";
+  const category = source.eligibility && source.eligibility.lawCategory;
+  const parts = [];
+  if (category) parts.push(`${prettifyId(category)} Laws`);
+  parts.push(prettifyId(source.entity), prettifyId(source.choice));
+  return parts.join(" → ");
+}
+
+const modifierCategoryOrder = ["advances", "laws", "government_reforms", "estate_privileges", "gods", "character_traits", "societal_values", "subject_types", "dynamic_country_state", "events", "missions", "decisions", "actions", "situations", "scripted", "other"];
+
+function modifierDurationLabel(duration) {
+  if (!duration || typeof duration.value !== "number") return "duration controlled by script";
+  if (duration.value < 0) return "until removed by game script";
+  const unit = duration.value === 1 ? String(duration.unit || "day").replace(/s$/, "") : duration.unit || "days";
+  return `${duration.value} ${unit}`;
+}
+
+function modifierGrantorSummary(source) {
+  const grantors = Array.isArray(source.grantors) ? source.grantors : [];
+  if (!grantors.length) return "No direct grant was found in the currently installed game scripts.";
+  return grantors
+    .map((grantor) => `${prettifyId(grantor.entity || "scripted grant")}${grantor.file ? ` [${grantor.file}]` : ""} (${modifierDurationLabel(grantor.duration)})`)
+    .join("; ");
+}
+
+function renderModifierRows(rows, includeStatus) {
+  if (!rows.length) return '<p class="note">None found.</p>';
+  const estatePrivileges = rows.every((source) => source.folder === "estate_privileges");
+  const body = rows
+    .map((source, index) => {
+      let status = "";
+      if (includeStatus) {
+        const reason = source.eligibilityReasons && source.eligibilityReasons[0];
+        if (source.category === "events") status = `Informational only - event-granted; ${modifierGrantorSummary(source)}`;
+        else if (source.informationalOnly) status = `Informational only - excluded from optimizer; ${modifierGrantorSummary(source)}`;
+        else if (source.eligibilityState === "eligible") {
+          status = source.folder === "laws" && source.currentChoice ? `Eligible now - replace ${prettifyId(source.currentChoice)}` : "Eligible now";
+        } else if (source.eligibilityState === "blocked") status = `Blocked${reason ? ` - ${reason}` : ""}`;
+        else status = `Unknown${reason ? ` - ${reason}` : ""}`;
+      }
+      const sourcePath = modifierSourcePath(source);
+      return `<tr>
+        <td>${escapeHtml(source.categoryLabel || prettifyId(source.folder || "indirect bundle"))}</td>
+        <td>${estatePrivileges ? `<span class="source-rank">#${index + 1}</span>` : ""}<strong>${escapeHtml(modifierSourceName(source))}</strong>${sourcePath ? `<div class="source-path">${escapeHtml(sourcePath)}</div>` : ""}<div class="source-id">${escapeHtml(source.choice || source.entity || source.bundleId || "")}</div></td>
+        <td class="modifier-value">${escapeHtml(fmtSourceValue(source))}</td>
+        ${estatePrivileges ? `<td class="estate-power-cost">${escapeHtml(typeof source.estatePowerCost === "number" ? fmtModifierValue(source.estatePowerCost) : "Unknown")}</td>` : ""}
+        ${includeStatus ? `<td>${escapeHtml(status)}</td>` : ""}
+      </tr>`;
+    })
+    .join("");
+  return `<div class="table-wrap"><table><thead><tr><th>System</th><th>Source</th><th>Effect</th>${estatePrivileges ? "<th>Estate power cost</th>" : ""}${includeStatus ? "<th>Status</th>" : ""}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderEstatePrivilegeGroups(rows, includeStatus) {
+  const estates = new Map();
+  for (const source of rows) {
+    const key = source.estate || "unknown_estate";
+    if (!estates.has(key)) estates.set(key, []);
+    estates.get(key).push(source);
+  }
+  return [...estates.entries()]
+    .sort((a, b) => String(a[1][0].estateLabel || a[0]).localeCompare(String(b[1][0].estateLabel || b[0])))
+    .map(([estate, sources]) => {
+      sources.sort((a, b) => {
+        const aCost = typeof a.estatePowerCost === "number" ? a.estatePowerCost : Infinity;
+        const bCost = typeof b.estatePowerCost === "number" ? b.estatePowerCost : Infinity;
+        return aCost - bCost || (b.resolvedValue || 0) - (a.resolvedValue || 0) || modifierSourceName(a).localeCompare(modifierSourceName(b));
+      });
+      const label = sources[0].estateLabel || prettifyId(estate);
+      return `<h5 class="estate-heading">${escapeHtml(label)} (${sources.length})</h5>${renderModifierRows(sources, includeStatus)}`;
+    })
+    .join("");
+}
+
+function renderModifierGroups(rows, includeStatus) {
+  if (!rows.length) return '<p class="note">None found.</p>';
+  const groups = new Map();
+  for (const source of rows) {
+    const key = source.category || source.folder || "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(source);
+  }
+  const ordered = [...groups.entries()].sort((a, b) => {
+    const ai = modifierCategoryOrder.indexOf(a[0]);
+    const bi = modifierCategoryOrder.indexOf(b[0]);
+    return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a[0].localeCompare(b[0]);
+  });
+  return ordered
+    .map(([category, sources]) => `<h4>${escapeHtml(sources[0].categoryLabel || prettifyId(sources[0].folder || "other"))} (${sources.length})</h4>${category === "estate_privileges" ? `<p class="note estate-ranking-note">Grouped by estate and ranked by lowest estate-power cost.</p>${renderEstatePrivilegeGroups(sources, includeStatus)}` : renderModifierRows(sources, includeStatus)}`)
+    .join("");
+}
+
+function renderModifierReport(report, societal) {
+  const results = document.getElementById(societal ? "valueOptimizerResults" : "modifierResults");
+  const countryLabel = report.country ? `${report.country.tag || "?"}${report.country.players.length ? ` - ${report.country.players.join(", ")}` : ""}` : "No country state";
+  const title = societal ? `Push toward ${prettifyId(societal.directionId)}` : prettifyId(report.modifierKey);
+  const contribution = report.valueFormat === "monthly_points" ? fmtMonthlyValue(report.knownActiveContribution) : fmtModifierValue(report.knownActiveContribution);
+  const activeEstateNote =
+    report.country && Array.isArray(report.country.activeEstates)
+      ? `Active estates: <strong>${escapeHtml(report.country.activeEstates.map((estate) => estate.label || prettifyId(estate.id)).join(", ") || "None")}</strong>. Estate privileges for inactive estates are excluded from Eligible actions now.`
+      : "Active estates could not be verified from this snapshot, so estate privileges are withheld from Eligible actions now until a fresh autosave is captured.";
+  let contributionNote;
+  if (societal) {
+    const equilibrium = societal.equilibrium;
+    const equilibriumText = equilibrium.position < 0.000001 ? "centered at 0" : `${equilibrium.position.toLocaleString(undefined, { maximumFractionDigits: 2 })} toward ${prettifyId(equilibrium.directionId)}`;
+    contributionNote =
+      `Confirmed active push: <strong>${escapeHtml(fmtMonthlyValue(equilibrium.selectedRate))}</strong> toward ${escapeHtml(prettifyId(societal.directionId))} ` +
+      `minus <strong>${escapeHtml(fmtMonthlyValue(equilibrium.opposingRate))}</strong> toward ${escapeHtml(prettifyId(societal.opposingDirectionId))}. ` +
+      `The net is <strong>${escapeHtml(fmtMonthlyValue(Math.abs(equilibrium.netRate)))}</strong> toward ${escapeHtml(prettifyId(equilibrium.directionId))}, ` +
+      `giving an equilibrium of <strong>${escapeHtml(equilibriumText)}</strong>. Active sources come from the snapshot; automatic engine scalars that EU5 does not serialize exactly are explicitly labeled as save-backed estimates, and temporary sources are excluded.`;
+  } else {
+    contributionNote = `Confirmed active contribution from modeled sources: <strong>${escapeHtml(contribution)}</strong>. Event-granted modifiers are temporary/informational and are excluded from this optimizer total.`;
+  }
+  results.innerHTML = `
+    <div class="panel-header"><h2>${escapeHtml(title)}</h2><span class="tag-badge">${escapeHtml(countryLabel)}</span></div>
+    <p class="note">${contributionNote}</p>
+    <p class="note">${activeEstateNote}</p>
+    <h3>Eligible actions now</h3>
+    <p class="note">Ranked positive actions whose captured game requirements pass for this country. This checks eligibility, not whether you currently have enough points or currency to pay the action cost.</p>
+    ${renderModifierGroups(report.recommendations, true)}
+    <details><summary>Blocked actions (${report.blockedSources.length})</summary>${renderModifierGroups(report.blockedSources, true)}</details>
+    <details><summary>Needs more data or trigger support (${report.unknownSources.length})</summary><p class="note">These stay out of the eligible list because at least one requirement could not be proven from the current snapshot and supported trigger set.</p>${renderModifierGroups(report.unknownSources, true)}</details>
+    <h3>${societal ? "What's currently pushing it" : "Confirmed active sources"}</h3>
+    ${renderModifierGroups(report.activeSources, false)}
+    ${societal ? `<h3>What's pushing the other way - toward ${escapeHtml(prettifyId(societal.opposingDirectionId))}</h3>${renderModifierGroups(societal.opposingReport.activeSources, false)}` : ""}
+    <details><summary>Other direct sources (${report.otherSources.length})</summary><p class="note">These affect the value but are not one of the four player-choice systems currently optimized.</p>${renderModifierGroups(report.otherSources, false)}</details>
+    <details><summary>Temporary event bonuses (${report.eventSources.length})</summary><p class="note">These modifier bundles are granted by events. They are shown for context only and never enter the eligible-action list or optimizer total.</p>${renderModifierGroups(report.eventSources, true)}</details>
+    <details><summary>Other informational/scripted sources (${report.otherIndirectSources.length})</summary><p class="note">Mission rewards, decisions, situations, and other scripted grants are categorized here but remain outside the optimizer until their action and eligibility rules are modeled.</p>${renderModifierGroups(report.otherIndirectSources, true)}</details>`;
+  results.classList.remove("hidden");
+}
+
+// --- modifier key autocomplete (search by plain-English name like "selling
+// efficiency" instead of requiring the raw key "selling_efficiency" up
+// front - matches against both the localized label and the raw key, so
+// typing either still works) ---
+
+function normalizeModifierSearchText(value) {
+  return String(value || "").toLowerCase().replace(/[_\s]+/g, " ").trim();
+}
+
+function matchModifierCatalog(query) {
+  const q = normalizeModifierSearchText(query);
+  if (!q) return [];
+  const terms = q.split(" ").filter(Boolean);
+  const scored = [];
+  for (const entry of latestModifierCatalog) {
+    const label = normalizeModifierSearchText(entry.label);
+    const key = normalizeModifierSearchText(entry.key);
+    if (!terms.every((term) => label.includes(term) || key.includes(term))) continue;
+    let score = 3;
+    if (label === q || key === q) score = 0;
+    else if (label.startsWith(q)) score = 1;
+    else if (key.startsWith(q)) score = 2;
+    scored.push({ entry, score });
+  }
+  scored.sort((a, b) => a.score - b.score || a.entry.label.localeCompare(b.entry.label));
+  return scored.slice(0, 20).map((s) => s.entry);
+}
+
+let modifierSuggestionIndex = -1;
+
+function renderModifierSuggestions(matches) {
+  const box = document.getElementById("modifierKeySuggestions");
+  modifierSuggestionIndex = -1;
+  if (!matches.length) {
+    box.innerHTML = "";
+    box.classList.add("hidden");
+    return;
+  }
+  box.innerHTML = matches
+    .map((entry) => `<div class="modifier-key-option" data-key="${escapeHtml(entry.key)}"><strong>${escapeHtml(entry.label)}</strong><span>${escapeHtml(entry.key)}</span></div>`)
+    .join("");
+  box.classList.remove("hidden");
+}
+
+function chooseModifierSuggestion(key) {
+  const input = document.getElementById("modifierKey");
+  input.value = key;
+  renderModifierSuggestions([]);
+  input.focus();
+}
+
+const modifierKeyInput = document.getElementById("modifierKey");
+const modifierKeyBox = document.getElementById("modifierKeySuggestions");
+
+modifierKeyInput.addEventListener("input", () => renderModifierSuggestions(matchModifierCatalog(modifierKeyInput.value)));
+modifierKeyInput.addEventListener("focus", () => {
+  if (modifierKeyInput.value) renderModifierSuggestions(matchModifierCatalog(modifierKeyInput.value));
+});
+modifierKeyInput.addEventListener("keydown", (event) => {
+  const options = [...modifierKeyBox.querySelectorAll(".modifier-key-option")];
+  if (!options.length) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    modifierSuggestionIndex = Math.min(modifierSuggestionIndex + 1, options.length - 1);
+    options.forEach((opt, i) => opt.classList.toggle("active", i === modifierSuggestionIndex));
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    modifierSuggestionIndex = Math.max(modifierSuggestionIndex - 1, 0);
+    options.forEach((opt, i) => opt.classList.toggle("active", i === modifierSuggestionIndex));
+  } else if (event.key === "Enter" && modifierSuggestionIndex >= 0) {
+    event.preventDefault();
+    chooseModifierSuggestion(options[modifierSuggestionIndex].dataset.key);
+  } else if (event.key === "Escape") {
+    renderModifierSuggestions([]);
+  }
+});
+modifierKeyBox.addEventListener("click", (event) => {
+  const option = event.target.closest(".modifier-key-option");
+  if (option) chooseModifierSuggestion(option.dataset.key);
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".modifier-key-autocomplete")) renderModifierSuggestions([]);
+});
+
+// Lets Enter/submit work even when the user never clicked a suggestion.
+// Almost every real modifier key contains an underscore (2453 of 2457 in a
+// checked install; the 4 exceptions - adm/dip/mil/discipline - are exact
+// catalog keys anyway), so a single bare word with no underscore (e.g.
+// "sell") is far more likely to be a fragment the user meant to pick a
+// suggestion for than the literal key itself - resolve it via the catalog
+// instead of passing it through unchanged.
+function resolveModifierKeyInput(value) {
+  const trimmed = String(value || "").trim();
+  const lower = trimmed.toLowerCase();
+  if (latestModifierCatalog.some((entry) => entry.key === lower)) return lower;
+  if (/^[a-z0-9]+_[a-z0-9_]*$/i.test(trimmed)) return lower;
+  const matches = matchModifierCatalog(trimmed);
+  return matches.length ? matches[0].key : lower;
+}
+
+async function loadModifierCatalog() {
+  try {
+    latestModifierCatalog = await window.llamaAPI.listModifierCatalog();
+  } catch {
+    latestModifierCatalog = [];
+  }
+}
+
+loadModifierCatalog();
+
+document.getElementById("modifierForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("modifierAnalyze");
+  const results = document.getElementById("modifierResults");
+  button.disabled = true;
+  button.textContent = "Scanning game files...";
+  results.classList.remove("hidden");
+  results.innerHTML = '<p class="note">Scanning the local EU5 install...</p>';
+  try {
+    const modifierKey = resolveModifierKeyInput(modifierKeyInput.value);
+    modifierKeyInput.value = modifierKey;
+    const report = await window.llamaAPI.analyzeModifier({
+      modifierKey,
+      countryNumber: document.getElementById("modifierOptimizerCountry").value,
+    });
+    renderModifierReport(report);
+  } catch (err) {
+    results.innerHTML = `<h2>Could not analyze modifier</h2><p class="note error-text">${escapeHtml(err && err.message ? err.message : String(err))}</p>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Find sources";
+  }
+});
+
+document.getElementById("societalValueForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("societalValueAnalyze");
+  const results = document.getElementById("valueOptimizerResults");
+  const country = selectedCountry("valueOptimizerCountry");
+  const axis = selectedSocietalAxis();
+  const direction = document.getElementById("societalValueDirection").value;
+  if (!country || !axis || (direction !== "left" && direction !== "right")) return;
+  const directionId = axis[`${direction}Id`];
+  const opposingDirection = direction === "left" ? "right" : "left";
+  const opposingDirectionId = axis[`${opposingDirection}Id`];
+  button.disabled = true;
+  button.textContent = "Scanning game files...";
+  results.classList.remove("hidden");
+  results.innerHTML = `<p class="note">Finding ways to push toward ${escapeHtml(prettifyId(directionId))}...</p>`;
+  try {
+    const analysis = await window.llamaAPI.analyzeSocietalValue({ axisKey: axis.axisKey, direction, countryNumber: country.number });
+    renderModifierReport(analysis.report, {
+      axisKey: axis.axisKey,
+      direction,
+      directionId,
+      opposingDirectionId,
+      currentValue: country.societalValues ? country.societalValues[axis.axisKey] : undefined,
+      opposingReport: analysis.opposingReport,
+      equilibrium: analysis.equilibrium,
+    });
+  } catch (err) {
+    results.innerHTML = `<h2>Could not analyze societal value</h2><p class="note error-text">${escapeHtml(err && err.message ? err.message : String(err))}</p>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Find ways to push";
+  }
+});
+
+document.getElementById("societalValueAxis").addEventListener("change", () => updateSocietalDirection(true));
+document.getElementById("societalValueDirection").addEventListener("change", () => renderSocietalCurrent(selectedCountry("valueOptimizerCountry"), selectedSocietalAxis()));
+
+document.getElementById("valueOptimizerCountry").addEventListener("change", () => {
+  const country = selectedCountry("valueOptimizerCountry");
+  document.getElementById("valueOptimizerStateNote").textContent = modifierStateNoteText(country, latestModifierContext);
+  updateSocietalAxes(country, true);
+});
+document.getElementById("modifierOptimizerCountry").addEventListener("change", () => {
+  document.getElementById("modifierOptimizerStateNote").textContent = modifierStateNoteText(selectedCountry("modifierOptimizerCountry"), latestModifierContext);
+});
+
+async function loadSocietalValueAxes() {
+  try {
+    latestSocietalAxes = await window.llamaAPI.listSocietalValueAxes();
+    societalAxesError = null;
+  } catch (err) {
+    latestSocietalAxes = [];
+    societalAxesError = err && err.message ? err.message : String(err);
+  }
+  applyModifierContext(latestModifierContext);
+}
+
+loadSocietalValueAxes();
 
 // --- tab switching + per-mode section setup (both sections are cloned from
 // one <template>, so the ongoing/concluded/leaderboard markup only needs to
@@ -525,8 +1020,9 @@ document.querySelectorAll(".mode-tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".mode-tab").forEach((b) => b.classList.toggle("active", b === btn));
     const mode = btn.dataset.mode;
-    document.getElementById("pvpSection").classList.toggle("hidden", mode !== "pvp");
-    document.getElementById("pveSection").classList.toggle("hidden", mode !== "pve");
+    for (const sectionMode of ["pvp", "pve", "valueOptimizer", "modifierOptimizer"]) {
+      document.getElementById(`${sectionMode}Section`).classList.toggle("hidden", mode !== sectionMode);
+    }
   });
 });
 
@@ -598,10 +1094,13 @@ document.getElementById("settingsBtn").addEventListener("click", async () => {
   // settings:get/settings:save comments for the bug this used to cause).
   const saveDirInput = document.getElementById("saveDirInput");
   const dataDirInput = document.getElementById("dataDirInput");
+  const gameDirInput = document.getElementById("gameDirInput");
   saveDirInput.value = settings.saveDir || "";
   saveDirInput.placeholder = settings.defaultSaveDir || "";
   dataDirInput.value = settings.dataDir || "";
   dataDirInput.placeholder = settings.defaultDataDir || "";
+  gameDirInput.value = settings.gameDir || "";
+  gameDirInput.placeholder = settings.defaultGameDir || "";
   settingsDialog.showModal();
 });
 document.getElementById("settingsCancel").addEventListener("click", () => settingsDialog.close());
@@ -615,11 +1114,17 @@ document.getElementById("pickDataDir").addEventListener("click", async () => {
   const picked = await window.llamaAPI.pickFolder(input.value || input.placeholder);
   if (picked) input.value = picked;
 });
+document.getElementById("pickGameDir").addEventListener("click", async () => {
+  const input = document.getElementById("gameDirInput");
+  const picked = await window.llamaAPI.pickFolder(input.value || input.placeholder);
+  if (picked) input.value = picked;
+});
 document.getElementById("settingsForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   await window.llamaAPI.saveSettings({
     saveDir: document.getElementById("saveDirInput").value.trim(),
     dataDir: document.getElementById("dataDirInput").value.trim(),
+    gameDir: document.getElementById("gameDirInput").value.trim(),
   });
   settingsDialog.close();
 });

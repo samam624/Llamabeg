@@ -260,7 +260,92 @@
   // we don't need for summary stats, and are discarded immediately after
   // extraction so peak memory stays roughly proportional to one country
   // block at a time, not the whole (multi-GB parsed) countries section.
-  function extractCountryFields(number, obj) {
+  function enabledObjectKeys(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    return Object.entries(value)
+      .filter(([key, enabled]) => key !== "__items" && (enabled === true || enabled === "yes" || enabled === 1))
+      .map(([key]) => key);
+  }
+
+  function historyObjectIds(value) {
+    const entries = Array.isArray(value) ? value : value && Array.isArray(value.__items) ? value.__items : [];
+    return entries.map((entry) => entry && entry.object).filter((id) => typeof id === "string");
+  }
+
+  function implementedLawChoices(value) {
+    const out = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+    for (const [law, history] of Object.entries(value)) {
+      if (law === "__items") continue;
+      const entries = Array.isArray(history) ? history : [history];
+      const latest = entries[entries.length - 1];
+      if (latest && typeof latest.object === "string") out[law] = latest.object;
+    }
+    return out;
+  }
+
+  const EU5_MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+  function normalizeEu5Date(value) {
+    if (typeof value === "string") return value;
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+    const hourOfDay = value % 24;
+    const totalDays = (value - hourOfDay) / 24;
+    const yearPlus5000 = Math.floor(totalDays / 365);
+    let day = totalDays - yearPlus5000 * 365;
+    const year = yearPlus5000 - 5000;
+    let month = 0;
+    while (month < EU5_MONTH_LENGTHS.length - 1 && day >= EU5_MONTH_LENGTHS[month]) day -= EU5_MONTH_LENGTHS[month++];
+    const base = `${year}.${month + 1}.${day + 1}`;
+    return hourOfDay === 0 ? base : `${base}.${hourOfDay}`;
+  }
+
+  function implementedLawHistory(value) {
+    const out = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+    for (const [law, history] of Object.entries(value)) {
+      if (law === "__items") continue;
+      const entries = Array.isArray(history) ? history : [history];
+      const latest = entries[entries.length - 1];
+      if (!latest || typeof latest.object !== "string") continue;
+      out[law] = {
+        choice: latest.object,
+        date: normalizeEu5Date(latest.date),
+        days: typeof latest.days === "number" ? latest.days : null,
+      };
+    }
+    return out;
+  }
+
+  function variableKeys(value) {
+    const data = value && value.data;
+    const entries = Array.isArray(data) ? data : data && Array.isArray(data.__items) ? data.__items : [];
+    return entries.map((entry) => entry && entry.flag).filter((flag) => typeof flag === "string");
+  }
+
+  function societalValuePositions(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const out = {};
+    for (const [axis, position] of Object.entries(value)) {
+      if (axis === "__items" || typeof position !== "number" || !Number.isFinite(position) || position <= -999) continue;
+      out[axis] = position;
+    }
+    return out;
+  }
+
+  function extractInternationalOrganizationFields(number, obj) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj) || typeof obj.type !== "string") return null;
+    return {
+      number,
+      type: obj.type,
+      leader: typeof obj.leader === "number" ? obj.leader : null,
+      members: Array.isArray(obj.all_members) ? obj.all_members.filter((member) => typeof member === "number") : [],
+      laws: implementedLawChoices(obj.implemented_laws),
+      lawHistory: implementedLawHistory(obj.implemented_laws),
+    };
+  }
+
+  function extractCountryFields(number, obj, includeModifierState) {
     const score = obj.score || {};
     const rating = score.score_rating || {};
     const rank = score.score_rank || {};
@@ -269,9 +354,10 @@
     const economy = obj.economy || {};
     const color = obj.color && Array.isArray(obj.color.values) ? obj.color.values : null;
 
-    return {
+    const country = {
       number,
       tag: typeof obj.country_name === "string" ? obj.country_name : String(obj.flag || ""),
+      originalTag: typeof obj.original_tag === "string" ? obj.original_tag : null,
       countryType: obj.country_type,
       level: obj.level,
       capital: obj.capital,
@@ -368,6 +454,29 @@
       historicalEconomicalBase: Array.isArray(obj.historical_economical_base) ? obj.historical_economical_base : null,
       players: [],
     };
+    if (includeModifierState) {
+      country.modifierState = {
+        researchedAdvances: enabledObjectKeys(obj.researched_advances),
+        laws: implementedLawChoices(government.implemented_laws),
+        lawHistory: implementedLawHistory(government.implemented_laws),
+        estatePrivileges: historyObjectIds(government.implemented_privileges),
+        governmentReforms: historyObjectIds(government.implemented_reforms),
+        // government.estates lists every possible slot for the country,
+        // including inactive estates. The authoritative active list is
+        // attached after estate_manager is parsed (existence=true).
+        estateTypes: null,
+        variableKeys: variableKeys(obj.variables),
+        societalValues: societalValuePositions(government.societal_values),
+        acceptedCultures: Array.isArray(obj.accepted_cultures) ? obj.accepted_cultures : [],
+        ruler: typeof government.ruler === "number" ? government.ruler : null,
+        heir: typeof government.heir === "number" ? government.heir : null,
+        consort: typeof government.consort === "number" ? government.consort : null,
+        regent: typeof government.regent === "number" ? government.regent : null,
+        maintenances: economy.maintenances && typeof economy.maintenances === "object" ? economy.maintenances : {},
+        employmentSystem: typeof obj.employment_system === "string" ? obj.employment_system : "first_come_first_serve",
+      };
+    }
+    return country;
   }
 
   // Real bug found on real data: this used to prefer `population_ratio` as
@@ -485,7 +594,32 @@
       estate: obj.estate || obj["#2e90"],
       culture: obj.culture,
       religion: obj.religion,
+      literacy: typeof obj.literacy === "number" ? obj.literacy : null,
       size,
+    };
+  }
+
+  function extractCharacterSocietalFields(number, obj) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+    const traits = Array.isArray(obj.traits)
+      ? obj.traits.filter((trait) => typeof trait === "string")
+      : obj.traits && Array.isArray(obj.traits.__items)
+        ? obj.traits.__items.filter((trait) => typeof trait === "string")
+        : enabledObjectKeys(obj.traits);
+    return traits.length ? { number, traits } : null;
+  }
+
+  function extractWorkOfArtSocietalFields(number, obj) {
+    // A destroyed work of art keeps its database entry (with a
+    // destroyed_date) rather than being removed - excluded here so it
+    // doesn't inflate/misattribute a country's current artwork-quality
+    // share (real save data: ~16% of work_of_art_manager entries carry a
+    // destroyed_date).
+    if (!obj || typeof obj !== "object" || Array.isArray(obj) || typeof obj.location !== "number" || obj.destroyed_date != null) return null;
+    return {
+      number,
+      location: obj.location,
+      quality: typeof obj.quality === "number" && Number.isFinite(obj.quality) ? obj.quality : 1,
     };
   }
 
@@ -860,7 +994,7 @@
     }
   }
 
-  function parseEstateManagerSection(scanner, onAsset, onEstateIncome) {
+  function parseEstateManagerSection(scanner, onAsset, onEstateIncome, onEstateMembership) {
     while (true) {
       scanner.skipWs();
       if (scanner.text[scanner.pos] === "}") {
@@ -885,6 +1019,15 @@
             scanner.consumeIfPresent("=");
             const assetObj = scanner.parseValue();
             const asset = extractEstateAssetFields(parseInt(numTok.raw, 10), assetObj);
+            if (
+              asset &&
+              onEstateMembership &&
+              asset.existence === true &&
+              typeof asset.country === "number" &&
+              typeof asset.estateType === "string"
+            ) {
+              onEstateMembership({ country: asset.country, estateType: asset.estateType });
+            }
             // Road assets are deliberately dropped here rather than kept
             // and just hidden in the UI - the user confirmed the map's
             // "Roads" panel isn't reliable/useful enough to be worth the
@@ -1059,7 +1202,7 @@
 
   // Parses the "countries={ tags={...} database={...} }" section. `scanner`
   // must be positioned right after the opening '{' of the countries block.
-  function parseCountriesSection(scanner, onCountry) {
+  function parseCountriesSection(scanner, onCountry, includeModifierState) {
     const tags = {};
     while (true) {
       scanner.skipWs();
@@ -1089,7 +1232,7 @@
             const countryObj = scanner.parseValue();
             if (countryObj && typeof countryObj === "object") {
               const number = parseInt(numTok.raw, 10);
-              onCountry(extractCountryFields(number, countryObj));
+              onCountry(extractCountryFields(number, countryObj, includeModifierState));
             }
           }
         } else {
@@ -1734,6 +1877,9 @@
     "situation_manager",
     "disease_outbreak_manager",
     "loan_manager",
+    "international_organization_manager",
+    "character_db",
+    "work_of_art_manager",
     // Always parsed (not gated behind includeLocations): the Metrics tab's
     // "Navy Size" column counts real ships from here, and the walk only
     // materializes naval subunits (a small fraction of the section).
@@ -1751,6 +1897,7 @@
     // opt-in for the same reason, independent of includeLocations (the
     // Llama score view needs wars but not the location map, and vice versa).
     const includeWars = !!options.includeWars;
+    const includeModifierState = !!options.includeModifierState;
     const HANDLED_TOP_LEVEL_KEYS = new Set(
       BASE_TOP_LEVEL_KEYS.concat(
         includeLocations ? ["locations", "population", "estate_manager", "building_manager", "culture_manager", "religion_manager", "market_manager", "provinces", "trade_path_manager", "trade_manager"] : [],
@@ -1778,9 +1925,14 @@
       warReparations: [],
       locationAssets: [],
       estateTradeIncomes: [],
+      activeEstateMemberships: [],
+      estateManagerSeen: false,
       buildings: [],
       cultures: [],
       religions: [],
+      internationalOrganizations: [],
+      societalCharacters: [],
+      societalWorksOfArt: [],
       markets: [],
       wars: [],
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
@@ -1833,7 +1985,7 @@
           result.metadata.tags = parseCountriesSection(scanner, (country) => {
             result.countries.push(country);
             result.countriesByNumber.set(country.number, country);
-          });
+          }, includeModifierState);
         } else {
           scanner.skipValue();
         }
@@ -1879,6 +2031,38 @@
         } else {
           scanner.skipValue();
         }
+      } else if (key === "international_organization_manager") {
+        if (!includeModifierState) {
+          scanner.skipValue();
+        } else {
+          scanner.skipWs();
+          if (scanner.text[scanner.pos] === "{") {
+            scanner.pos++;
+            parsePlainDatabaseSection(scanner, (number, obj) => {
+              const organization = extractInternationalOrganizationFields(number, obj);
+              if (organization) result.internationalOrganizations.push(organization);
+            });
+          } else {
+            scanner.skipValue();
+          }
+        }
+      } else if (key === "character_db" || key === "work_of_art_manager") {
+        if (!includeModifierState) {
+          scanner.skipValue();
+        } else {
+          scanner.skipWs();
+          if (scanner.text[scanner.pos] === "{") {
+            scanner.pos++;
+            parsePlainDatabaseSection(scanner, (number, obj) => {
+              const entry = key === "character_db"
+                ? extractCharacterSocietalFields(number, obj)
+                : extractWorkOfArtSocietalFields(number, obj);
+              if (entry) (key === "character_db" ? result.societalCharacters : result.societalWorksOfArt).push(entry);
+            });
+          } else {
+            scanner.skipValue();
+          }
+        }
       } else if (key === "situation_manager") {
         const obj = scanner.parseValue();
         if (obj && typeof obj === "object") {
@@ -1906,6 +2090,7 @@
         scanner.skipWs();
         if (scanner.text[scanner.pos] === "{") {
           scanner.pos++;
+          result.estateManagerSeen = true;
           parseEstateManagerSection(
             scanner,
             (asset) => {
@@ -1913,6 +2098,9 @@
             },
             (entry) => {
               result.estateTradeIncomes.push(entry);
+            },
+            (entry) => {
+              result.activeEstateMemberships.push(entry);
             }
           );
         } else {
@@ -2032,6 +2220,8 @@
     attachTradeRoutes(result);
     attachNavyCounts(result);
     attachArmyCounts(result);
+    attachActiveEstateTypes(result);
+    attachSocietalSourceFacts(result);
 
     onProgress(1);
     return result;
@@ -2203,6 +2393,63 @@
     }
   }
 
+  // government.estates is only a map of every estate identity the country
+  // could use. estate_manager.database is authoritative about which ones
+  // currently exist; attach that compact active list after both sections are
+  // parsed so ordering in the save cannot matter.
+  function attachActiveEstateTypes(result) {
+    if (!result.estateManagerSeen) {
+      delete result.activeEstateMemberships;
+      return;
+    }
+    const byCountry = new Map();
+    for (const entry of result.activeEstateMemberships || []) {
+      if (!byCountry.has(entry.country)) byCountry.set(entry.country, new Set());
+      byCountry.get(entry.country).add(entry.estateType);
+    }
+    for (const country of result.countries || []) {
+      if (!country.modifierState) continue;
+      country.modifierState.estateTypes = [...(byCountry.get(country.number) || [])].sort();
+    }
+    delete result.activeEstateMemberships;
+  }
+
+  // Collapse the large character/art databases to the few country facts the
+  // optimizer needs before the worker result is cloned or cached. This keeps
+  // the recorder payload compact while preserving definitions that can feed
+  // both current and later-age societal axes.
+  function attachSocietalSourceFacts(result) {
+    const traitsByCharacter = new Map((result.societalCharacters || []).map((entry) => [entry.number, entry.traits]));
+    const ownerByLocation = new Map((result.locations || []).map((location) => [location.number, location.owner]));
+    const artCountByCountry = new Map();
+    const artQualityByCountry = new Map();
+    let worldArtCount = 0;
+    let worldArtQuality = 0;
+    for (const art of result.societalWorksOfArt || []) {
+      const owner = ownerByLocation.get(art.location);
+      if (typeof owner !== "number") continue;
+      const quality = typeof art.quality === "number" ? art.quality : 1;
+      worldArtCount += 1;
+      worldArtQuality += quality;
+      artCountByCountry.set(owner, (artCountByCountry.get(owner) || 0) + 1);
+      artQualityByCountry.set(owner, (artQualityByCountry.get(owner) || 0) + quality);
+    }
+    for (const country of result.countries || []) {
+      const state = country.modifierState;
+      if (!state) continue;
+      state.characterTraits = {
+        ruler: traitsByCharacter.get(state.ruler) || [],
+        heir: traitsByCharacter.get(state.heir) || [],
+        consort: traitsByCharacter.get(state.consort) || [],
+        regent: traitsByCharacter.get(state.regent) || [],
+      };
+      state.countryArtShare = worldArtCount ? (artCountByCountry.get(country.number) || 0) / worldArtCount : 0;
+      state.countryArtQualityShare = worldArtQuality ? (artQualityByCountry.get(country.number) || 0) / worldArtQuality : 0;
+    }
+    delete result.societalCharacters;
+    delete result.societalWorksOfArt;
+  }
+
   return {
     Scanner,
     coerceScalar,
@@ -2215,6 +2462,9 @@
     extractEstateAssetFields,
     extractBuildingFields,
     extractNamedDefinitionFields,
+    extractInternationalOrganizationFields,
+    extractCharacterSocietalFields,
+    extractWorkOfArtSocietalFields,
     extractMarketFields,
     extractTradePathFields,
     extractTradeFields,
@@ -2231,5 +2481,8 @@
     attachTradeRoutes,
     attachNavyCounts,
     attachArmyCounts,
+    attachActiveEstateTypes,
+    attachSocietalSourceFacts,
+    normalizeEu5Date,
   };
 });

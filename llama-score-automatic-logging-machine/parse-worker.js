@@ -26,11 +26,27 @@ async function parseOne(file, playerWarsOnly) {
   // needed even though this recorder has no direct use for map data).
   if (formatCode === "00") {
     const text = bytes.toString("utf8");
-    return { hash, result: Clausewitz.parseSave(text, { includeWars: true, includeLocations: true, playerWarsOnly: !!playerWarsOnly }) };
+    return {
+      hash,
+      result: Clausewitz.parseSave(text, {
+        includeWars: true,
+        includeLocations: true,
+        includeModifierState: true,
+        playerWarsOnly: !!playerWarsOnly,
+      }),
+    };
   }
   if (formatCode === "03") {
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    return { hash, result: await ClausewitzBinary.parseCompressedSave(buffer, { includeWars: true, includeLocations: true, playerWarsOnly: !!playerWarsOnly }) };
+    return {
+      hash,
+      result: await ClausewitzBinary.parseCompressedSave(buffer, {
+        includeWars: true,
+        includeLocations: true,
+        includeModifierState: true,
+        playerWarsOnly: !!playerWarsOnly,
+      }),
+    };
   }
   throw new Error(`Unsupported save format code ${formatCode}`);
 }

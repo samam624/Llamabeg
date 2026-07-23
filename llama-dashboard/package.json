@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "prepare-vendor": "node scripts/prepare-vendor.js",
-    "dist": "npm run prepare-vendor && electron-packager . \"Llama Score Dashboard\" --platform=win32 --arch=x64 --out=release --overwrite --icon=assets/llama-logo.ico --ignore=\"^/release\" --ignore=\"^/(?!main.js|preload.js|renderer|package.json|vendor|assets)\"",
+    "dist": "npm run prepare-vendor && node scripts/package-dashboard.js",
     "package-zip": "node scripts/package-release-zip.js",
     "release": "npm run dist && npm run package-zip"
   },
@@ -36,7 +36,15 @@
           "llama-score.js",
           "clausewitz.js",
           "clausewitz-binary.js",
-          "eu5-fixed-ids.js"
+          "eu5-fixed-ids.js",
+          "modifier-finder.js"
+        ]
+      },
+      {
+        "from": "../tools",
+        "to": "vendor/tools",
+        "filter": [
+          "scan-modifier-sources.js"
         ]
       },
       {

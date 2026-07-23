@@ -24,6 +24,8 @@
   <nav class="mode-tabs">
     <button class="mode-tab active" data-mode="pvp">PVP</button>
     <button class="mode-tab" data-mode="pve">PVE</button>
+    <button class="mode-tab" data-mode="valueOptimizer">Value Optimizer</button>
+    <button class="mode-tab" data-mode="modifierOptimizer">Modifier Optimizer</button>
   </nav>
 
   <main>
@@ -74,6 +76,56 @@
 
     <div id="pvpSection" class="mode-section"></div>
     <div id="pveSection" class="mode-section hidden"></div>
+    <div id="valueOptimizerSection" class="mode-section hidden">
+      <section class="panel optimizer-intro">
+        <h2>Value Optimizer</h2>
+        <p class="note">Pick a country, choose one of its active societal-value axes and the direction you want to push. Recommendations include the exact law-menu path when the game defines one.</p>
+        <div class="optimizer-controls">
+          <label class="field optimizer-field">
+            <span>Player country</span>
+            <select id="valueOptimizerCountry"></select>
+          </label>
+        </div>
+        <form id="societalValueForm" class="optimizer-controls">
+          <label class="field optimizer-field optimizer-key-field">
+            <span>Value axis</span>
+            <select id="societalValueAxis"></select>
+          </label>
+          <label class="field optimizer-field">
+            <span>Push toward</span>
+            <select id="societalValueDirection"></select>
+          </label>
+          <button type="submit" id="societalValueAnalyze" class="btn-primary">Find ways to push</button>
+        </form>
+        <div id="societalValueCurrent" class="societal-current note"></div>
+        <p id="valueOptimizerStateNote" class="note"></p>
+      </section>
+      <section id="valueOptimizerResults" class="panel hidden"></section>
+    </div>
+    <div id="modifierOptimizerSection" class="mode-section hidden">
+      <section class="panel optimizer-intro">
+        <h2>Modifier Optimizer</h2>
+        <p class="note">Pick a country, then enter any raw EU5 modifier key. Type a plain-English name (e.g. "selling efficiency") or the raw key - matching suggestions appear as you type.</p>
+        <div class="optimizer-controls">
+          <label class="field optimizer-field">
+            <span>Player country</span>
+            <select id="modifierOptimizerCountry"></select>
+          </label>
+        </div>
+        <form id="modifierForm" class="optimizer-controls">
+          <label class="field optimizer-field optimizer-key-field">
+            <span>Modifier key</span>
+            <div class="modifier-key-autocomplete">
+              <input id="modifierKey" value="selling_efficiency" spellcheck="false" autocomplete="off" />
+              <div id="modifierKeySuggestions" class="modifier-key-suggestions hidden"></div>
+            </div>
+          </label>
+          <button type="submit" id="modifierAnalyze" class="btn-primary">Find sources</button>
+        </form>
+        <p id="modifierOptimizerStateNote" class="note"></p>
+      </section>
+      <section id="modifierResults" class="panel hidden"></section>
+    </div>
 
     <section class="panel panel-collapsible">
       <div class="panel-header" id="logToggle">
@@ -114,6 +166,13 @@
         <div class="field-row">
           <input type="text" id="dataDirInput" />
           <button type="button" id="pickDataDir" class="btn-secondary">Browse...</button>
+        </div>
+      </label>
+      <label class="field">
+        <span>Europa Universalis V install folder (used by the Value/Modifier Optimizer tabs)</span>
+        <div class="field-row">
+          <input type="text" id="gameDirInput" />
+          <button type="button" id="pickGameDir" class="btn-secondary">Browse...</button>
         </div>
       </label>
       <p class="note">Leave either field blank to use the automatic default shown as a hint (the ledger folder next to wherever this app is currently running from) - only fill one in if you specifically want it somewhere else. Blank always follows THIS copy of the app, even if you move/redownload it later.</p>

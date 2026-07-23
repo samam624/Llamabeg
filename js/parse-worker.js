@@ -1,7 +1,7 @@
 // Runs the (potentially multi-second) save parse off the main thread so the
 // page stays responsive on large files. Handles both melted (plaintext) and
 // compressed (binary-tokenized) EU5 saves.
-const WORKER_ASSET_VERSION = "v1.2.16";
+const WORKER_ASSET_VERSION = "v1.3.3";
 importScripts(
   `clausewitz.js?v=${WORKER_ASSET_VERSION}`,
   `eu5-fixed-ids.js?v=${WORKER_ASSET_VERSION}`,
@@ -59,6 +59,13 @@ self.onmessage = async (event) => {
         wars: result.wars,
         blackDeath: result.blackDeath,
         provinceOwnerByDefinition: result.provinceOwnerByDefinition,
+        // Non-null means the binary parser had to bail out of the gamestate
+        // scan early (see parseCompressedSave's catch block) - the result
+        // above may be silently missing players/wars/locations despite
+        // looking otherwise normal. Not surfaced in the UI yet; at minimum
+        // it's no longer only visible in a browser console no one is
+        // watching.
+        parseWarning: result.parseWarning || null,
       },
     });
   } catch (err) {

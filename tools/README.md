@@ -1,7 +1,6 @@
 # tools/
 
-One-off/offline data-prep scripts - not part of the runtime app, not run by
-end users. Two categories:
+Data-prep and local game-install scanning scripts. Two categories:
 
 - **Map data prep** (`build-location-data.js`, `bake-location-id-map.py`,
   `bake-home-hero.js`) - documented in the root README's "Map setup".
@@ -45,13 +44,35 @@ followed by a non-`=` operator falls through as a stray positional item
 instead, so trigger-only mentions of a modifier key never produce a
 false-positive "source" here.
 
-**Not yet built:** resolving *who* grants each indirect bundle (which
-event/mission/decision/situation applies it), and cross-referencing the
-direct-source list against a loaded save to show which sources a specific
-country actually has vs. is missing - see the project's actual
-save-parsing code (`js/clausewitz.js`) for what's already extracted
-per-country (advances researched, government reforms, laws, estate
-privileges) if extending this.
+The desktop dashboard's **Modifier Optimizer** now consumes this scanner
+directly and cross-references advances, laws, government reforms, and estate
+privileges against newly recorded player-country snapshots. It deliberately
+calls inactive matches *candidates*, not *available actions*: evaluating the
+game definitions' `potential`/`allow`/scripted-trigger trees is a later phase.
+Resolving who grants each indirect bundle (event/mission/decision/situation)
+is also not built yet. See `docs/MODIFIER_OPTIMIZER_ROADMAP.md`.
+
+## campaign-ledger-doctor.js
+
+Inspects and safely repairs a recorder campaign ledger. Mutating commands are
+dry runs unless `--yes` is supplied, and every real change first backs up the
+campaign ledger and `state.json`. Stop the dashboard/recorder before applying
+a change.
+
+```
+node tools/campaign-ledger-doctor.js list <campaign-key> --data-dir <data-dir>
+node tools/campaign-ledger-doctor.js remove <campaign-key> --after <date> --data-dir <data-dir>
+node tools/campaign-ledger-doctor.js remove <campaign-key> --hash <hash-prefix> --data-dir <data-dir>
+node tools/campaign-ledger-doctor.js repair-state <campaign-key> --data-dir <data-dir>
+node tools/campaign-ledger-doctor.js promote <campaign-key> --hash <hash-prefix> --data-dir <data-dir>
+```
+
+`remove` also rewinds the campaign's last tracked date, active-war baseline,
+last-snapshot pointer, and affected archive checkpoints in `state.json`. The
+discarded save remains in the recorder's seen-file/hash cache so restarting the
+dashboard cannot immediately import it again. `repair-state` rebuilds those
+live baseline fields from the newest valid ledger snapshot without changing
+the snapshot or event history.
 
 ## game_data/ (gitignored)
 

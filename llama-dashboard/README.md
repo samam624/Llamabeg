@@ -9,6 +9,21 @@ A desktop window version of the Llama Score recorder
   lands,
 - shows a live view: ongoing player wars, concluded wars with the score
   exchanged on each side, and the Llama Points leaderboard.
+- includes an early **Modifier Optimizer** tab that cross-references the
+  latest player-country advances/laws/reforms/privileges with modifier grants
+  in the local EU5 install, separates actions proven eligible now from blocked
+  and not-yet-supported requirements, and provides a Societal Values picker
+  with current position/impact, monthly contributors, directional ceiling,
+  and exact category -> law group -> choice navigation paths. Societal-value
+  estate-privilege recommendations use their localized in-game names, are
+  grouped by owning estate, and rank the lowest estate-power cost first. The
+  active-estate list comes from each estate manager entry's real
+  `existence=true` state; privileges for inactive estates are blocked rather
+  than presented as available.
+  The equilibrium includes live average-development, average-control, and subject
+  relationship pressure as well as active player choices in both directions.
+  When new compact modifier facts are added, the recorder refreshes them once
+  from the newest autosave even if that autosave itself has not changed.
 
 It reads/writes the **same ledger** the web app's "Connect campaign
 folder..." button already points at - a `data` folder it creates right next
@@ -62,6 +77,16 @@ Re-run `npm run dist` after changing `main.js`/`preload.js`/`renderer/` or
 after `js/llama-score.js`/the recorder itself changes upstream - the vendored
 copy is a snapshot, not a live link.
 
+`release/Llama Score Dashboard-win32-x64/` is the single canonical local
+build. Re-run `npm run dist` to update that folder in place; do not create
+separate version-named test-build folders. Close any older copy of the app
+before launching the canonical executable, because the single-instance lock
+will otherwise focus the already-running older build.
+
+The build wrapper preserves and restores the canonical folder's existing
+`data/` ledger while Electron replaces the app runtime. It creates an empty
+`data/` folder for a first build.
+
 ## Cutting a distributable .zip (for other people to download)
 
 ```powershell
@@ -73,6 +98,10 @@ This runs `dist` and then zips the packaged output into
 `llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip` - the exact file
 the website's download link points at (see the root `index.html`'s hardcoded
 GitHub Releases URL). Upload that file as the release asset.
+
+The ZIP is staged separately and always contains an empty `data/` folder.
+Local `state.json`, campaign snapshots, war events, and other recorder data
+are explicitly excluded even if the canonical local app contains them.
 
 **Always use `npm run release` for this - never rename/zip the
 `release/Llama Score Dashboard-win32-x64/` folder by hand.** A previous
@@ -102,6 +131,8 @@ this repo). Defaults, no configuration needed for a typical single-PC
 install:
 
 - **EU5 save folder** - `Documents\Paradox Interactive\Europa Universalis V\save games`
+- **EU5 install folder** - used only by Modifier Optimizer to read game
+  definitions; defaults to the standard Steam install path.
   under the current Windows user, same default the CLI recorder uses.
 - **Ledger data folder** - a `data` folder created next to
   `Llama Score Dashboard.exe` (in a packaged build) - the same folder the web

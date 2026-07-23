@@ -102,7 +102,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.2.8";
+  const ASSET_VERSION = "v1.3.3";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this

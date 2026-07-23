@@ -2,41 +2,68 @@
 // same result shape as js/clausewitz.js's parseSave() for melted text saves,
 // so the rest of the app doesn't need to care which format was uploaded.
 //
-// Format (reverse-engineered against a real save, cross-checked field by
-// field against that same save's melted plaintext - see test/run-binary.js,
-// which validates this module's output against js/clausewitz.js's text
-// parser on the same save):
+// Two-phase "tape" architecture (matching github.com/rakaly/jomini, the
+// Rust parser PDX Tools is built on, which officially supports EU5):
+//   Phase 1 (tokenize): one mechanical forward pass over the raw bytes,
+//   turning them into a flat array of typed tokens. Width is ALWAYS
+//   determined purely by a token's own 2-byte type tag - never by "what
+//   section/key is this", so this phase can never lose byte alignment from
+//   a shape assumption being wrong. That was the actual root cause of two
+//   real bugs found in one real save tonight (a bare/unkeyed top-level
+//   array the old single-pass walker didn't expect, and two real value-type
+//   codes - I64 0x0317, F32 0x000d - that had no width handling at all and
+//   silently under-consumed their payload). See CHANGELOG.
+//   Phase 2 (walk): the section-specific extractors (parseCountriesSection
+//   etc.) walk the tape by INDEX, not by byte offset. Every tape index is
+//   guaranteed to land on a real token boundary by construction, so a
+//   mistaken shape assumption in phase 2 can at worst misread ONE section's
+//   meaning - it can never again corrupt byte alignment for everything
+//   downstream.
+//
+// Format (reverse-engineered against real saves, cross-checked field by
+// field against melted plaintext - see test/run-binary.js, which validates
+// this module's output against js/clausewitz.js's text parser):
 //   "SAV02" + "00"(text) | "03"(binary) + ... + "\n"
 //   [binary metadata block, same encoding as gamestate]
 //   [zip: "gamestate" entry (deflate), "string_lookup" entry (deflate)]
 //
-// Token grammar inside metadata/gamestate (all integers little-endian):
+// Token grammar inside metadata/gamestate (all integers little-endian) -
+// cross-checked complete against jomini's binary token catalog:
 //   0x0003 / 0x0004        object/array open / close
 //   0x0001                 "=" (only appears between a key and its value)
 //   0x000e                 bool, 1 byte (00/01)
 //   0x000c/0x0014           int32, 4 bytes
-//   0x029c                  int (up to 2^53), 8 bytes - a wider sibling of
-//                           0x000c/0x0014, not the same width despite the
-//                           surface resemblance; used for values that can
-//                           exceed int32 range (e.g. situation_manager's
-//                           gag_total_tax.identity counter)
+//   0x029c                  u64, 8 bytes
+//   0x0317                  i64, 8 bytes
+//   0x000d                  f32, 4 bytes
 //   0x000f/0x0017          Hollerith string (2-byte length + utf8 bytes)
 //   0x0167                 fixed-point, 8 bytes / 100000
 //   0x0d40 / 0x0d43        string_lookup ref, 1-byte index (0x0d43 seen on
 //                          pre-1.3 saves only, e.g. top-level manager keys)
 //   0x0d3e / 0x0d44        string_lookup ref, 2-byte index (value / name use)
+//   0x0d41 / 0x0d3f        string_lookup ref, 3-byte / 4-byte index (needed
+//                          once string_lookup exceeds 65536 entries - a
+//                          long multiplayer campaign's easily does)
+//   0x0d42                 empty string, 0 bytes
 //   0x0d48-0x0d4e          fixed-point, 1-7 bytes / 100000 (positive)
 //   0x0d4f-0x0d56          fixed-point, 1-7 bytes / 100000 (negated)
-//   0x0243                 RGB color tag, followed by a 0x0003 triple
+//   0x0243                 RGB color tag - zero payload of its own; the
+//                          OPEN+3 numbers+CLOSE that follow are just more
+//                          ordinary tokens, composed into a color by phase 2
 //   anything else          a fixed ID: either a well-known key (see
 //                          eu5-fixed-ids.js) or, in value position, an
-//                          opaque enum-like identifier we don't resolve.
+//                          opaque enum-like identifier we don't resolve -
+//                          zero payload bytes of its own, by construction
+//                          (every real value-type code above already
+//                          claimed its own width first).
 // A key can ALSO be an int32-coded token (used for numeric map keys like
 // countries.database's country numbers) or a string_lookup ref (used for
 // keys that aren't common enough to deserve a fixed ID, e.g. top-level
 // manager names). Every "key candidate" is resolved the same way regardless
 // of position, then whatever follows determines whether it's a key (EQUALS
-// follows) or a bare array element (it doesn't).
+// follows) or a bare array element (it doesn't) - true at every nesting
+// depth, INCLUDING the true top level of gamestate (a real save was found
+// with a long run of bare top-level records; see the top-level loop below).
 (function (root, factory) {
   if (typeof module === "object" && module.exports) {
     module.exports = factory(require("./eu5-fixed-ids.js"), require("./clausewitz.js"));
@@ -47,232 +74,244 @@
   "use strict";
 
   const STRREF8 = 0x0d40;
-  // A second 1-byte-index string_lookup ref code, distinct from STRREF8 -
-  // seen on pre-1.3 saves (e.g. the "resolution_manager" top-level key).
-  // Byte-verified: 0x0d43 followed by a 1-byte index that resolves to
-  // "resolution_manager" in string_lookup, immediately followed by EQUALS
-  // at the exact expected offset - not a coincidence at that specificity.
   const STRREF8_ALT = 0x0d43;
   const STRREF16 = 0x0d3e;
   const STRREF16_NAME = 0x0d44;
-  // A dedicated zero-payload "the value is exactly 0" code, immediately
-  // before the positive fixed-point range - byte-verified: every sampled
-  // occurrence is directly followed by a valid next token (CLOSE, a fresh
-  // STRREF16 key, ...) with no gap, and melted text confirms the
-  // corresponding field is 0 (e.g. expected_army_size=0). Worth a dedicated
-  // code since 0 is an extremely common value.
+  const STRREF24 = 0x0d41;
+  const STRREF32 = 0x0d3f;
+  const EMPTY_STRING = 0x0d42;
   const FIXED_POINT_ZERO = 0x0d47;
   const OPEN = 0x0003;
   const CLOSE = 0x0004;
   const EQUALS = 0x0001;
 
-  function makeDecoder(buf, strings, opts) {
-    let pos = 0;
-    // Called with a resolved key name whenever skipBody identifies a key at
-    // ANY nesting depth (not just true top level). Returns true if it
-    // handled (and fully consumed) the value itself, false to skip normally.
-    // Exists because some saves nest sections we care about (countries,
-    // played_country) one level deeper than expected - see the note on
-    // parseCompressedSave for why we can't just trust a fixed depth.
-    const onSpecialKey = opts && opts.onSpecialKey;
-    const debugRing = opts && opts.debug ? [] : null;
-    const debugAnomalies = opts && opts.debug ? [] : null;
-    // Debug-only: throws StopAtPos once pos reaches this, so callers can
-    // inspect the ring buffer's context leading up to an arbitrary position
-    // in a huge section without walking (and ring-evicting past) millions
-    // of tokens first. See test/debug-desync*.js.
-    const stopAtPos = opts && opts.stopAtPos;
-    const DEBUG_RING_SIZE = 80;
-    function debugRecord(entry) {
-      if (!debugRing) return;
-      if (entry.type && entry.type.indexOf("UNKNOWN") === 0) {
-        debugAnomalies.push(entry); // never evicted, for anomaly scans
-      }
-      debugRing.push(entry);
-      if (debugRing.length > DEBUG_RING_SIZE) debugRing.shift();
+  // --- Phase 1: tokenize raw bytes into a flat tape --------------------
+
+  const TAPE_OPEN = 1;
+  const TAPE_CLOSE = 2;
+  const TAPE_EQUALS = 3;
+  const TAPE_NUMBER = 4;
+  const TAPE_BOOL = 5;
+  const TAPE_STRING = 6;
+  const TAPE_TOKEN = 7; // opaque fixed-ID, no payload of its own
+  const TAPE_RGB_TAG = 8;
+
+  function utf8Decode(dataView, offset, len) {
+    const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset + offset, len);
+    if (typeof TextDecoder !== "undefined") {
+      return new TextDecoder("utf-8").decode(bytes);
     }
+    return Buffer.from(bytes).toString("utf8"); // Node fallback
+  }
+
+  // One mechanical forward pass, self-describing width only - see the
+  // module comment. Resilient to a truncated/corrupted tail the same way
+  // the old single-pass walker was: stops at the point a read would run
+  // past the buffer, keeping every token successfully tokenized before it
+  // (tape.truncated flags this for the caller).
+  function tokenize(view, strings, onProgress) {
+    const total = view.byteLength;
+    const kinds = [];
+    const values = [];
+    const offsets = [];
+    const matches = []; // matching bracket's tape index, for OPEN/CLOSE only
+    const openStack = [];
+    let pos = 0;
+    let truncated = false;
+    const progressStep = Math.max(1, Math.floor(total / 50));
+    let lastProgressPos = 0;
 
     function lookupStr(idx) {
       return strings && strings[idx] !== undefined ? strings[idx] : `#strref:${idx}`;
     }
-
-    // Resolves a key-or-value-position token to a string (string_lookup
-    // ref, or an inline Hollerith string - 1.0.x saves spell out keys like
-    // "resolution_manager" in full instead of using a string_lookup ref),
-    // a number/bool/fixed-point (scalar payload types - not known to be
-    // used as real keys by the schema, but decoding them fully here rather
-    // than assuming zero payload keeps the key-vs-bare-value ambiguity
-    // check below always looking at a true token boundary), or a fixed-ID
-    // key name / "#hex" placeholder object. Advances `pos` past the whole
-    // token+payload either way.
-    function resolveToken() {
-      const code = buf.getUint16(pos, true);
-      pos += 2;
-      if (code === STRREF8 || code === STRREF8_ALT) {
-        const idx = buf.getUint8(pos);
-        pos += 1;
-        return lookupStr(idx);
-      }
-      if (code === STRREF16 || code === STRREF16_NAME) {
-        const idx = buf.getUint16(pos, true);
-        pos += 2;
-        return lookupStr(idx);
-      }
-      if (code === 0x000c || code === 0x0014) {
-        const v = buf.getInt32(pos, true);
-        pos += 4;
-        return v;
-      }
-      return readScalarValue(code);
+    function push(kind, value, start) {
+      kinds.push(kind);
+      values.push(value);
+      offsets.push(start);
+      matches.push(-1);
     }
 
-    function readScalarValue(code) {
-      if (code === 0x000e) {
-        const v = buf.getUint8(pos);
-        pos += 1;
-        return v === 1;
-      }
-      if (code === 0x000c || code === 0x0014) {
-        const v = buf.getInt32(pos, true);
-        pos += 4;
-        return v;
-      }
-      // 0x029c: an 8-byte (not 4-byte) integer - despite looking like a
-      // sibling of 0x000c/0x0014 at a glance, it's a distinct, wider code.
-      // Byte-verified: situation_manager's gag_total_tax.identity field (a
-      // monotonically-growing counter that exceeds int32 range - observed
-      // values in the tens of billions across real saves) decodes to
-      // exactly its expected melted-text value only when this code's
-      // payload is read as 8 bytes; reading 4 left 4 real payload bytes
-      // unconsumed, which then got misread as a bogus extra token,
-      // silently eating the section's real CLOSE and desyncing everything
-      // after it (the root cause of a save going to 0 countries once
-      // includeLocations/includeWars added enough scan surface to reach
-      // this section instead of skipping it wholesale).
-      if (code === 0x029c) {
-        const lo = buf.getUint32(pos, true);
-        const hi = buf.getInt32(pos + 4, true);
-        pos += 8;
-        return hi * 4294967296 + lo;
-      }
-      if (code === 0x000f || code === 0x0017) {
-        const len = buf.getUint16(pos, true);
+    try {
+      while (pos < total) {
+        const start = pos;
+        const code = view.getUint16(pos, true);
         pos += 2;
-        const s = utf8Decode(buf, pos, len);
-        pos += len;
-        return s;
+
+        if (code === OPEN) {
+          openStack.push(kinds.length);
+          push(TAPE_OPEN, null, start);
+        } else if (code === CLOSE) {
+          const idx = kinds.length;
+          push(TAPE_CLOSE, null, start);
+          const openIdx = openStack.pop();
+          if (openIdx !== undefined) {
+            matches[openIdx] = idx;
+            matches[idx] = openIdx;
+          }
+        } else if (code === EQUALS) {
+          push(TAPE_EQUALS, null, start);
+        } else if (code === STRREF8 || code === STRREF8_ALT) {
+          const idx = view.getUint8(pos);
+          pos += 1;
+          push(TAPE_STRING, lookupStr(idx), start);
+        } else if (code === STRREF16 || code === STRREF16_NAME) {
+          const idx = view.getUint16(pos, true);
+          pos += 2;
+          push(TAPE_STRING, lookupStr(idx), start);
+        } else if (code === STRREF24) {
+          const idx = view.getUint8(pos) + (view.getUint8(pos + 1) << 8) + (view.getUint8(pos + 2) << 16);
+          pos += 3;
+          push(TAPE_STRING, lookupStr(idx), start);
+        } else if (code === STRREF32) {
+          const idx = view.getUint32(pos, true);
+          pos += 4;
+          push(TAPE_STRING, lookupStr(idx), start);
+        } else if (code === EMPTY_STRING) {
+          push(TAPE_STRING, "", start);
+        } else if (code === 0x000e) {
+          const v = view.getUint8(pos);
+          pos += 1;
+          push(TAPE_BOOL, v === 1, start);
+        } else if (code === 0x000c || code === 0x0014) {
+          const v = view.getInt32(pos, true);
+          pos += 4;
+          push(TAPE_NUMBER, v, start);
+        } else if (code === 0x029c || code === 0x0317) {
+          // U64 / I64 - both real 8-byte codes (jomini's catalog,
+          // github.com/rakaly/jomini). 0x0317 had zero handling at all
+          // before tonight and silently under-consumed its payload -
+          // exactly the bug class this whole architecture exists to
+          // structurally rule out.
+          const lo = view.getUint32(pos, true);
+          const hi = view.getInt32(pos + 4, true);
+          pos += 8;
+          push(TAPE_NUMBER, hi * 4294967296 + lo, start);
+        } else if (code === 0x000d) {
+          const v = view.getFloat32(pos, true);
+          pos += 4;
+          push(TAPE_NUMBER, v, start);
+        } else if (code === 0x000f || code === 0x0017) {
+          const len = view.getUint16(pos, true);
+          pos += 2;
+          const s = utf8Decode(view, pos, len);
+          pos += len;
+          push(TAPE_STRING, s, start);
+        } else if (code === 0x0167) {
+          const lo = view.getUint32(pos, true);
+          const hi = view.getInt32(pos + 4, true);
+          pos += 8;
+          push(TAPE_NUMBER, (hi * 4294967296 + lo) / 100000.0, start);
+        } else if (code === FIXED_POINT_ZERO) {
+          push(TAPE_NUMBER, 0, start);
+        } else if (code >= 0x0d48 && code <= 0x0d4e) {
+          const n = code - 0x0d48 + 1;
+          let v = 0;
+          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(pos + i);
+          pos += n;
+          push(TAPE_NUMBER, v / 100000.0, start);
+        } else if (code >= 0x0d4f && code <= 0x0d56) {
+          const n = code - 0x0d4f + 1;
+          let v = 0;
+          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(pos + i);
+          pos += n;
+          push(TAPE_NUMBER, -v / 100000.0, start);
+        } else if (code === 0x0243) {
+          // Zero payload of its own - the OPEN+3 numbers+CLOSE that follow
+          // tokenize completely normally as the next iterations of this
+          // same loop; phase 2 composes them into a color.
+          push(TAPE_RGB_TAG, null, start);
+        } else {
+          // Opaque fixed-ID: a well-known key (resolved later via
+          // EU5FixedIds) or an enum-like value we don't further decode.
+          // Reached only once every real value-type code above has already
+          // claimed its own width - not a guess.
+          push(TAPE_TOKEN, code, start);
+        }
+
+        if (onProgress && pos - lastProgressPos > progressStep) {
+          lastProgressPos = pos;
+          onProgress(pos / total);
+        }
       }
-      if (code === 0x0167) {
-        const lo = buf.getUint32(pos, true);
-        const hi = buf.getInt32(pos + 4, true);
-        pos += 8;
-        return (hi * 4294967296 + lo) / 100000.0;
-      }
-      if (code === FIXED_POINT_ZERO) return 0;
-      if (code >= 0x0d48 && code <= 0x0d4e) {
-        const n = code - 0x0d48 + 1;
-        let v = 0;
-        for (let i = n - 1; i >= 0; i--) v = v * 256 + buf.getUint8(pos + i);
-        pos += n;
-        return v / 100000.0;
-      }
-      if (code >= 0x0d4f && code <= 0x0d56) {
-        const n = code - 0x0d4f + 1;
-        let v = 0;
-        for (let i = n - 1; i >= 0; i--) v = v * 256 + buf.getUint8(pos + i);
-        pos += n;
-        return -v / 100000.0;
-      }
-      if (code === 0x0243) {
-        const nextCode = buf.getUint16(pos, true);
-        pos += 2;
-        if (nextCode !== OPEN) throw new Error(`expected OPEN after COLOR_RGB at ${pos - 2}`);
+    } catch (err) {
+      truncated = true;
+    }
+
+    return { kinds, values, offsets, matches, length: kinds.length, truncated };
+  }
+
+  // --- Phase 2: walk the tape by index -----------------------------------
+
+  function makeTapeCursor(tape, opts) {
+    let idx = 0;
+    const onSpecialKey = opts && opts.onSpecialKey;
+    const debugRing = opts && opts.debug ? [] : null;
+    const DEBUG_RING_SIZE = 80;
+    function debugRecord(entry) {
+      if (!debugRing) return;
+      debugRing.push(entry);
+      if (debugRing.length > DEBUG_RING_SIZE) debugRing.shift();
+    }
+
+    function peekKind() {
+      return idx < tape.length ? tape.kinds[idx] : undefined;
+    }
+
+    function currentByteOffset() {
+      if (idx < tape.length) return tape.offsets[idx];
+      return tape.length ? tape.offsets[tape.length - 1] : 0;
+    }
+
+    // Resolves the token at the cursor to a string/number/bool (already
+    // decoded in phase 1), an RGB object, or a fixed-ID key name / "#hex"
+    // placeholder. Advances past the whole token (and, for RGB, the
+    // container that follows it) either way.
+    function resolveToken() {
+      const kind = tape.kinds[idx];
+      const val = tape.values[idx];
+      idx++;
+      if (kind === TAPE_STRING || kind === TAPE_NUMBER || kind === TAPE_BOOL) return val;
+      if (kind === TAPE_RGB_TAG) {
+        if (tape.kinds[idx] !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at tape index ${idx}`);
+        idx++;
         return { colorSpace: "rgb", values: decodeBody() };
       }
-      // Most fixed-ID tokens only ever appear in key position (resolved via
-      // keyToPropName), but a few double as enum-tag VALUES too - e.g.
-      // situation_manager's black_death.variables.data[].data.type=
-      // disease_outbreak resolves here, not through keyToPropName, since
-      // it's a value. Same global token table either way (one token per
-      // string, regardless of position) - fall back to the sentinel object
-      // only for codes truly not in the table yet.
-      const knownName = EU5FixedIds[code.toString(16)];
-      if (knownName) return knownName;
-      debugRecord({ pos: pos - 2, type: "UNKNOWN_SCALAR_VALUE", code });
-      return { fixedNum: code };
+      if (kind === TAPE_TOKEN) {
+        const knownName = EU5FixedIds[val.toString(16)];
+        if (knownName) return knownName;
+        return { fixedNum: val };
+      }
+      // 0x0001/0x0003/0x0004 (EQUALS/OPEN/CLOSE) are heavily overloaded:
+      // they're structural control codes ONLY when a caller explicitly
+      // checks for them (peekKind() === TAPE_EQUALS right after a resolved
+      // key; peekKind() === TAPE_OPEN/TAPE_CLOSE before ever calling
+      // resolveToken() at all) - every such call site does exactly that,
+      // never reaching here for it. But the raw format also reuses those
+      // same 2-byte codes as bare opaque values in their own right.
+      // Byte-verified on two different real saves: population.database's
+      // per-pop "pop_demand" field decodes to a bare array whose middle
+      // element is a literal EQUALS-coded token with no key before it, and
+      // a played_country-adjacent field elsewhere decodes to a literal
+      // CLOSE-coded token the same way - neither is a syntax error, just
+      // an ordinary unmapped fixed-ID that happens to numerically collide
+      // with a control code, reached only via readBareValue()/decodeBody()'s
+      // bare-item fallback, which no key=value or container check applies
+      // to. Matches the exact fallback every other unmapped code already
+      // gets - the old (pre-tape) architecture never special-cased ANY of
+      // these three when reached this way either.
+      if (kind === TAPE_EQUALS) return { fixedNum: 1 };
+      if (kind === TAPE_OPEN) return { fixedNum: 3 };
+      if (kind === TAPE_CLOSE) return { fixedNum: 4 };
+      throw new Error(`unexpected tape kind ${kind} in value position at tape index ${idx - 1}`);
     }
 
-    function skipScalarValue(code) {
-      if (code === 0x000e) {
-        pos += 1;
-        return;
+    function keyToPropName(resolved) {
+      if (typeof resolved === "string" || typeof resolved === "number") return resolved;
+      if (typeof resolved !== "object" || resolved === null || typeof resolved.fixedNum !== "number") {
+        return "#unexpected:" + JSON.stringify(resolved);
       }
-      if (code === 0x000c || code === 0x0014) {
-        pos += 4;
-        return;
-      }
-      if (code === 0x029c) {
-        pos += 8;
-        return;
-      }
-      if (code === 0x000f || code === 0x0017) {
-        pos += 2 + buf.getUint16(pos, true);
-        return;
-      }
-      if (code === 0x0167) {
-        pos += 8;
-        return;
-      }
-      if (code === FIXED_POINT_ZERO) return;
-      if (code >= 0x0d48 && code <= 0x0d4e) {
-        pos += code - 0x0d48 + 1;
-        return;
-      }
-      if (code >= 0x0d4f && code <= 0x0d56) {
-        pos += code - 0x0d4f + 1;
-        return;
-      }
-      if (code === 0x0243) {
-        const nextCode = buf.getUint16(pos, true);
-        pos += 2;
-        if (nextCode !== OPEN) throw new Error(`expected OPEN after COLOR_RGB at ${pos - 2}`);
-        skipBody();
-        return;
-      }
-      debugRecord({ pos: pos - 2, type: "UNKNOWN_SKIP", code });
-      // unresolved fixed ID, zero extra bytes
-    }
-
-    function readBareValue() {
-      const code = buf.getUint16(pos, true);
-      if (code === OPEN) {
-        pos += 2;
-        return decodeBody();
-      }
-      if (code === STRREF8 || code === STRREF8_ALT || code === STRREF16 || code === STRREF16_NAME) {
-        return resolveToken();
-      }
-      pos += 2;
-      return readScalarValue(code);
-    }
-
-    function skipBareValue() {
-      const code = buf.getUint16(pos, true);
-      if (code === OPEN) {
-        pos += 2;
-        skipBody();
-        return;
-      }
-      if (code === STRREF8 || code === STRREF8_ALT) {
-        pos += 3;
-        return;
-      }
-      if (code === STRREF16 || code === STRREF16_NAME) {
-        pos += 4;
-        return;
-      }
-      pos += 2;
-      skipScalarValue(code);
+      const hex = resolved.fixedNum.toString(16);
+      return EU5FixedIds[hex] || "#" + hex;
     }
 
     function addEntry(obj, key, val) {
@@ -284,17 +323,29 @@
       }
     }
 
-    function keyToPropName(resolved) {
-      if (typeof resolved === "string" || typeof resolved === "number") return resolved;
-      if (typeof resolved !== "object" || resolved === null || typeof resolved.fixedNum !== "number") {
-        // A bool or a decoded COLOR_RGB object landed in key position -
-        // never seen in practice, but resolveToken() now fully decodes
-        // every scalar type, so it's reachable in principle. Fall back to
-        // a stable string rather than crashing on a missing .fixedNum.
-        return "#unexpected:" + JSON.stringify(resolved);
+    function readBareValue() {
+      if (tape.kinds[idx] === TAPE_OPEN) {
+        idx++;
+        return decodeBody();
       }
-      const hex = resolved.fixedNum.toString(16);
-      return EU5FixedIds[hex] || "#" + hex;
+      return resolveToken();
+    }
+
+    function skipBareValue() {
+      const kind = tape.kinds[idx];
+      if (kind === TAPE_OPEN) {
+        idx++;
+        skipBody();
+        return;
+      }
+      if (kind === TAPE_RGB_TAG) {
+        idx++;
+        if (tape.kinds[idx] !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at tape index ${idx}`);
+        idx++;
+        skipBody();
+        return;
+      }
+      idx++;
     }
 
     function decodeBody() {
@@ -302,28 +353,27 @@
       const named = {};
       let hasNamed = false;
       while (true) {
-        const peek = buf.getUint16(pos, true);
-        if (peek === CLOSE) {
-          pos += 2;
+        const kind = tape.kinds[idx];
+        if (kind === TAPE_CLOSE) {
+          idx++;
           break;
         }
-        if (peek === OPEN) {
-          pos += 2;
+        if (kind === TAPE_OPEN) {
+          idx++;
           items.push(decodeBody());
           continue;
         }
-        const savedPos = pos;
+        const savedIdx = idx;
         const resolved = resolveToken();
-        const maybeEquals = buf.getUint16(pos, true);
-        if (maybeEquals === EQUALS) {
-          pos += 2;
+        if (tape.kinds[idx] === TAPE_EQUALS) {
+          idx++;
           const value = readBareValue();
           addEntry(named, keyToPropName(resolved), value);
           hasNamed = true;
         } else if (typeof resolved !== "object") {
           items.push(resolved);
         } else {
-          pos = savedPos;
+          idx = savedIdx;
           items.push(readBareValue());
         }
       }
@@ -336,25 +386,23 @@
     function skipBody(depth) {
       depth = depth || 1;
       while (true) {
-        if (stopAtPos && pos >= stopAtPos) throw new Error("StopAtPos");
-        const tokenStart = pos;
-        const peek = buf.getUint16(pos, true);
-        if (peek === CLOSE) {
-          pos += 2;
+        const tokenStart = idx;
+        const kind = tape.kinds[idx];
+        if (kind === TAPE_CLOSE) {
+          idx++;
           debugRecord({ pos: tokenStart, depth, type: "CLOSE" });
           return;
         }
-        if (peek === OPEN) {
-          pos += 2;
+        if (kind === TAPE_OPEN) {
+          idx++;
           debugRecord({ pos: tokenStart, depth, type: "OPEN" });
           skipBody(depth + 1);
           continue;
         }
-        const savedPos = pos;
+        const savedIdx = idx;
         const resolved = resolveToken();
-        const maybeEquals = buf.getUint16(pos, true);
-        if (maybeEquals === EQUALS) {
-          pos += 2;
+        if (tape.kinds[idx] === TAPE_EQUALS) {
+          idx++;
           const keyName = keyToPropName(resolved);
           debugRecord({ pos: tokenStart, depth, type: "KEY", key: keyName });
           if (!onSpecialKey || !onSpecialKey(keyName)) {
@@ -362,9 +410,8 @@
           }
         } else if (typeof resolved !== "object") {
           debugRecord({ pos: tokenStart, depth, type: "BAREVALUE", value: resolved });
-          // already consumed
         } else {
-          pos = savedPos;
+          idx = savedIdx;
           debugRecord({ pos: tokenStart, depth, type: "BAREVALUE_FIXEDID", fixedNum: resolved.fixedNum });
           skipBareValue();
         }
@@ -372,17 +419,25 @@
     }
 
     return {
+      tape,
       get pos() {
-        return pos;
+        return idx;
       },
+      set pos(v) {
+        idx = v;
+      },
+      get byteOffset() {
+        return currentByteOffset();
+      },
+      get length() {
+        return tape.length;
+      },
+      peekKind,
       getDebugRing() {
         return debugRing ? debugRing.slice() : [];
       },
       getDebugAnomalies() {
-        return debugAnomalies ? debugAnomalies.slice() : [];
-      },
-      set pos(v) {
-        pos = v;
+        return []; // structurally obsolete - see module comment
       },
       resolveToken,
       readBareValue,
@@ -393,12 +448,16 @@
     };
   }
 
-  function utf8Decode(dataView, offset, len) {
-    const bytes = new Uint8Array(dataView.buffer, dataView.byteOffset + offset, len);
-    if (typeof TextDecoder !== "undefined") {
-      return new TextDecoder("utf-8").decode(bytes);
-    }
-    return Buffer.from(bytes).toString("utf8"); // Node fallback
+  // Compatibility shim: same (view, strings, opts) call signature the old
+  // single-pass decoder had, so parseMetadataBlock/parseCompressedSave (and
+  // any external test/debug script) don't need to change how they
+  // construct one - internally it now tokenizes eagerly, then wraps a tape
+  // cursor. NOTE: `.pos` is now a TAPE INDEX, not a byte offset (use
+  // `.byteOffset` for diagnostics) - the one externally-visible contract
+  // change from the old byte-walking decoder.
+  function makeDecoder(view, strings, opts) {
+    const tape = tokenize(view, strings, opts && opts.onTokenizeProgress);
+    return makeTapeCursor(tape, opts);
   }
 
   function parseStringLookup(bytes) {
@@ -474,132 +533,117 @@
   function parseMetadataBlock(bytes, strings) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const dec = makeDecoder(view, strings);
-    dec.pos = 4; // skip [id][equals] preamble
-    const valCode = view.getUint16(dec.pos, true);
-    dec.pos += 2;
-    if (valCode !== OPEN) throw new Error("expected metadata value to be a subobject");
+    dec.resolveToken(); // "id" token - unused, matches the original's blind skip
+    if (dec.peekKind() !== TAPE_EQUALS) throw new Error("expected EQUALS after metadata id");
+    dec.pos += 1;
+    if (dec.peekKind() !== TAPE_OPEN) throw new Error("expected metadata value to be a subobject");
+    dec.pos += 1;
     const metadata = dec.decodeBody();
     if (typeof metadata.date === "number") metadata.date = dateFromHours(metadata.date);
     return metadata;
   }
 
-  function parseCountriesSection(dec, view, onCountry) {
-    dec.pos += 2; // consume OPEN already peeked by caller
+  // Generic walker for "<section>={ key=value key=value ... }". The caller
+  // has already peeked TAPE_OPEN; this consumes it, then calls onKey(key)
+  // for each entry - true if onKey fully handled (and consumed) the value
+  // itself, false to skip it generically. Used directly by
+  // parseDiplomacyManagerSection (two named keys of interest at this level)
+  // and as the outer loop for every "...database={n={...}}" shaped section.
+  function walkSection(dec, onKey) {
+    dec.pos += 1; // consume OPEN already peeked by caller
     while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
+      if (dec.peekKind() === TAPE_CLOSE) {
+        dec.pos += 1;
         break;
       }
       const resolved = dec.resolveToken();
       const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`countries section desync at ${dec.pos}`);
-      dec.pos += 2;
+      if (dec.peekKind() !== TAPE_EQUALS) throw new Error(`section desync at tape index ${dec.pos} (byte ${dec.byteOffset})`);
+      dec.pos += 1;
+      if (!onKey(key)) dec.skipBareValue();
+    }
+  }
 
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`countries.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const countryObj = dec.readBareValue();
-          // Some database entries aren't full country objects - e.g. a
-          // tombstone/redirect for a merged-away country, encoded as a bare
-          // unresolved fixed-ID enum value rather than a subobject. That
-          // decodes to the same {fixedNum} sentinel readScalarValue()
-          // returns for any unmapped value-position code, which is never a
-          // real decoded key (keyToPropName never produces it), so it's a
-          // safe way to distinguish a placeholder from an actual country.
-          if (countryObj && typeof countryObj === "object" && !Array.isArray(countryObj) && !("fixedNum" in countryObj)) {
-            onCountry(Clausewitz.extractCountryFields(numResolved, countryObj));
-          }
-        }
-      } else {
-        dec.skipBareValue();
+  // Generic walker for the "database={ <n>={...} <n>={...} ... }" numbered-
+  // entry shape shared by countries/locations/estate_manager/building_
+  // manager/market_manager/provinces/war_manager/loan_manager/culture_
+  // manager/religion_manager/international_organization_manager/character_
+  // db/work_of_art_manager/population/subunit_manager/trade_path_manager/
+  // trade_manager. Caller has already consumed the "database=" key and
+  // peeked its value is TAPE_OPEN. Filters out tombstone/placeholder
+  // entries (a merged-away country, a freed war ID, a cleared loan - all
+  // encoded as a bare unresolved token rather than a real object) before
+  // calling onEntry(number, obj) - the identical filter every section had.
+  function walkDatabase(dec, onEntry) {
+    dec.pos += 1; // consume OPEN already peeked/verified by caller
+    while (true) {
+      if (dec.peekKind() === TAPE_CLOSE) {
+        dec.pos += 1;
+        break;
+      }
+      const numResolved = dec.resolveToken();
+      if (dec.peekKind() !== TAPE_EQUALS) throw new Error(`database desync at tape index ${dec.pos} (byte ${dec.byteOffset})`);
+      dec.pos += 1;
+      const obj = dec.readBareValue();
+      if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
+        onEntry(numResolved, obj);
       }
     }
+  }
+
+  // Peeks the first key of the object at dec.pos WITHOUT consuming
+  // anything - used throughout handleSpecialKey to confirm an ambiguous
+  // top-level key (fixed IDs aren't guaranteed globally unique) really is
+  // the section it looks like before committing to a specialized parser.
+  // Returns null if dec.pos isn't positioned at an object at all.
+  function peekFirstKeyOfObject(dec) {
+    const before = dec.pos;
+    if (dec.peekKind() !== TAPE_OPEN) return null;
+    dec.pos += 1;
+    const firstKey = dec.keyToPropName(dec.resolveToken());
+    dec.pos = before;
+    return firstKey;
+  }
+
+  function parseCountriesSection(dec, onCountry, includeModifierState) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, obj) => {
+        onCountry(Clausewitz.extractCountryFields(number, obj, includeModifierState));
+      });
+      return true;
+    });
   }
 
   // Mirrors parseCountriesSection, but for "locations={ locations={...} }" -
   // a flat map of ~28,573 entries in a large save, keyed by the same
-  // 1-based location numbering used by the game's map files (see
-  // js/clausewitz.js's parseLocationsSection for the text-format twin and
-  // tools/build-location-data.js for how that numbering was confirmed).
-  function parseLocationsSection(dec, view, onLocation) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`locations section desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "locations") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected locations.locations to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`locations.locations desync at ${dec.pos}`);
-          dec.pos += 2;
-          const locObj = dec.readBareValue();
-          if (locObj && typeof locObj === "object" && !Array.isArray(locObj) && !("fixedNum" in locObj)) {
-            onLocation(Clausewitz.extractLocationFields(numResolved, locObj));
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  // 1-based location numbering used by the game's map files.
+  function parseLocationsSection(dec, onLocation) {
+    walkSection(dec, (key) => {
+      if (key !== "locations") return false;
+      walkDatabase(dec, (number, obj) => {
+        onLocation(Clausewitz.extractLocationFields(number, obj));
+      });
+      return true;
+    });
   }
 
   // Mirrors parseLocationsSection, but for "diplomacy_manager={ 0={...}
-  // dependency={...} war_reparations={...} ... }" - most entries are keyed by
-  // country number (a large per-pair trust/rivalry section we don't need and
-  // skip), with subject/overlord and enforced-reparations relationships
-  // appearing as repeated keys mixed in among them. See js/clausewitz.js's
-  // parseDiplomacyManagerSection for the text-format twin.
-  function parseDiplomacyManagerSection(dec, view, onDependency, onWarReparations) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`diplomacy_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
+  // dependency={...} war_reparations={...} ... }" - most entries are keyed
+  // by country number (a large per-pair trust/rivalry section we don't need
+  // and skip), with subject/overlord and enforced-reparations relationships
+  // appearing as repeated keys mixed in among them.
+  function parseDiplomacyManagerSection(dec, onDependency, onWarReparations) {
+    walkSection(dec, (key) => {
       if (key === "dependency") {
         const obj = dec.readBareValue();
         if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
           const dep = Clausewitz.extractDependencyFields(obj);
           if (typeof dep.overlord === "number" && typeof dep.subject === "number") onDependency(dep);
         }
-      } else if (key === "war_reparations") {
+        return true;
+      }
+      if (key === "war_reparations") {
         const obj = dec.readBareValue();
         if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
           const rep = Clausewitz.extractWarReparationsFields(obj);
@@ -609,222 +653,131 @@
             onWarReparations(rep);
           }
         }
-      } else {
-        dec.skipBareValue();
+        return true;
       }
-    }
+      return false;
+    });
   }
 
-  function parseEstateManagerSection(dec, view, onAsset, onEstateIncome) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`estate_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected estate_manager.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`estate_manager.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const assetObj = dec.readBareValue();
-          if (assetObj && typeof assetObj === "object" && !Array.isArray(assetObj) && !("fixedNum" in assetObj)) {
-            const asset = Clausewitz.extractEstateAssetFields(numResolved, assetObj);
-            // Roads dropped here too - see the matching comment in
-            // js/clausewitz.js's copy of this filter.
-            if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
-            // The country-per-estate-type income-summary shape - see the
-            // matching comment in js/clausewitz.js's copy of this filter.
-            if (asset && onEstateIncome && typeof asset.country === "number" && (typeof asset.tradeIncome === "number" || typeof asset.paidTaxes === "number"))
-              onEstateIncome(asset);
-          }
+  function parseEstateManagerSection(dec, onAsset, onEstateIncome, onEstateMembership) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, assetObj) => {
+        const asset = Clausewitz.extractEstateAssetFields(number, assetObj);
+        if (
+          asset &&
+          onEstateMembership &&
+          asset.existence === true &&
+          typeof asset.country === "number" &&
+          typeof asset.estateType === "string"
+        ) {
+          onEstateMembership({ country: asset.country, estateType: asset.estateType });
         }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+        // Roads dropped here too - see the matching comment in
+        // js/clausewitz.js's copy of this filter.
+        if (asset && (asset.building || typeof asset.rgo === "number")) onAsset(asset);
+        // The country-per-estate-type income-summary shape - see the
+        // matching comment in js/clausewitz.js's copy of this filter.
+        if (asset && onEstateIncome && typeof asset.country === "number" && (typeof asset.tradeIncome === "number" || typeof asset.paidTaxes === "number"))
+          onEstateIncome(asset);
+      });
+      return true;
+    });
   }
 
-  function parseBuildingManagerSection(dec, view, onBuilding) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`building_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected building_manager.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`building_manager.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const buildingObj = dec.readBareValue();
-          if (buildingObj && typeof buildingObj === "object" && !Array.isArray(buildingObj) && !("fixedNum" in buildingObj)) {
-            const building = Clausewitz.extractBuildingFields(numResolved, buildingObj);
-            if (building && building.type && typeof building.location === "number") onBuilding(building);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  function parseBuildingManagerSection(dec, onBuilding) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, buildingObj) => {
+        const building = Clausewitz.extractBuildingFields(number, buildingObj);
+        if (building && building.type && typeof building.location === "number") onBuilding(building);
+      });
+      return true;
+    });
   }
 
-  function parseNamedDatabaseSection(dec, view, sectionName, onEntry) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`${sectionName} desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error(`expected ${sectionName}.database to be a subobject`);
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`${sectionName}.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const obj = dec.readBareValue();
-          if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
-            const entry = Clausewitz.extractNamedDefinitionFields(numResolved, obj);
-            if (entry) onEntry(entry);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  function parseNamedDatabaseSection(dec, onEntry) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, obj) => {
+        const entry = Clausewitz.extractNamedDefinitionFields(number, obj);
+        if (entry) onEntry(entry);
+      });
+      return true;
+    });
   }
 
-  function parseMarketManagerSection(dec, view, onMarket) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`market_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected market_manager.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`market_manager.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const obj = dec.readBareValue();
-          if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
-            const entry = Clausewitz.extractMarketFields(numResolved, obj);
-            if (entry) onMarket(entry);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  function parseMarketManagerSection(dec, onMarket) {
+    walkSection(dec, (key) => {
+      // market_manager's own first field is `produced_goods` (0x324d), not
+      // `database` directly - accepted alongside "database" the same way
+      // handleSpecialKey's own shape-check already did before this section
+      // parser is ever invoked, so any of the historically-seen shapes
+      // reaching here is fine to just treat generically.
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, obj) => {
+        const entry = Clausewitz.extractMarketFields(number, obj);
+        if (entry) onMarket(entry);
+      });
+      return true;
+    });
   }
 
   // Binary twin of js/clausewitz.js's parsePlainDatabaseSection: a generic
-  // "<section>={ database={ <n>={...} } }" walker for sections whose entries
-  // need no per-section quirks - each entry is decoded generically and
-  // handed to onEntry(number, obj). Used by the trade/subunit sections.
-  function parsePlainDatabaseSection(dec, view, sectionName, onEntry) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`${sectionName} desync at ${dec.pos}`);
-      dec.pos += 2;
+  // "<section>={ database={ <n>={...} } }" walker for sections whose
+  // entries need no per-section quirks - each entry is decoded generically
+  // and handed to onEntry(number, obj). Used by the trade/subunit sections.
+  function parsePlainDatabaseSection(dec, onEntry) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, obj) => {
+        onEntry(typeof number === "number" ? number : NaN, obj);
+      });
+      return true;
+    });
+  }
 
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error(`expected ${sectionName}.database to be a subobject`);
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`${sectionName}.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const obj = dec.readBareValue();
-          // Tombstoned entries decode to a bare unresolved value rather
-          // than a subobject (same shape as war_manager's freed war IDs) -
-          // the extractors all return null for a non-object.
-          if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
-            onEntry(typeof numResolved === "number" ? numResolved : NaN, obj);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  function parseProvincesSection(dec, onProvince) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, obj) => {
+        const definition = typeof obj.province_definition === "string" ? obj.province_definition : null;
+        const owner = typeof obj.owner === "number" ? obj.owner : null;
+        if (definition) onProvince({ definition, owner });
+      });
+      return true;
+    });
+  }
+
+  function parseSituationManagerSection(dec, onBlackDeath) {
+    walkSection(dec, (key) => {
+      if (key !== "black_death") return false;
+      const obj = dec.readBareValue();
+      if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) onBlackDeath(obj);
+      return true;
+    });
+  }
+
+  function parseWarManagerSection(dec, onWar) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, warObj) => {
+        const war = Clausewitz.extractWarFields(number, convertWarDatesBinary(warObj));
+        if (war) onWar(war);
+      });
+      return true;
+    });
+  }
+
+  function parseLoanManagerSection(dec, onLoan) {
+    walkSection(dec, (key) => {
+      if (key !== "database") return false;
+      walkDatabase(dec, (number, loanObj) => {
+        const loan = Clausewitz.extractLoanFields(loanObj);
+        if (loan) onLoan(loan);
+      });
+      return true;
+    });
   }
 
   // Mirrors js/clausewitz.js's extractBlackDeath, but start/end arrive as
@@ -851,27 +804,24 @@
   }
 
   // Mirrors js/clausewitz.js's parseDiseaseOutbreakManagerSection: walks
-  // disease_outbreak_manager.data (skipping the huge per-location resistance/
-  // immunity "locations" sub-object each entry also carries - can be 100k+
-  // lines melted, the reason this section isn't decoded generically) and
+  // disease_outbreak_manager.data (skipping the huge per-location
+  // resistance/immunity "locations" sub-object each entry also carries) and
   // sums each entry's "countries" (per-country death tallies) for the
-  // outbreak matching targetIdentity, the same selective-then-discard
-  // treatment war_manager.database entries get.
-  function parseDiseaseOutbreakManagerSection(dec, view, targetIdentity) {
+  // outbreak matching targetIdentity.
+  function parseDiseaseOutbreakManagerSection(dec, targetIdentity) {
     const deathsByCountry = {};
 
     function parseDeathEntry() {
       let diseaseOutbreak = null;
       let amount = null;
       while (true) {
-        const peek = view.getUint16(dec.pos, true);
-        if (peek === CLOSE) {
-          dec.pos += 2;
+        if (dec.peekKind() === TAPE_CLOSE) {
+          dec.pos += 1;
           break;
         }
         const resolved = dec.resolveToken();
         const k = dec.keyToPropName(resolved);
-        dec.pos += 2; // EQUALS
+        dec.pos += 1; // EQUALS
         if (k === "disease_outbreak") {
           const v = dec.readBareValue();
           diseaseOutbreak = typeof v === "number" ? v : null;
@@ -889,36 +839,30 @@
       let county = null;
       let total = 0;
       while (true) {
-        const peek = view.getUint16(dec.pos, true);
-        if (peek === CLOSE) {
-          dec.pos += 2;
+        if (dec.peekKind() === TAPE_CLOSE) {
+          dec.pos += 1;
           break;
         }
         const resolved = dec.resolveToken();
         const k = dec.keyToPropName(resolved);
-        dec.pos += 2; // EQUALS
+        dec.pos += 1; // EQUALS
         if (k === "county") {
           const v = dec.readBareValue();
           county = typeof v === "number" ? v : null;
-        } else if (k === "deaths") {
-          const openCode = view.getUint16(dec.pos, true);
-          dec.pos += 2;
-          if (openCode === OPEN) {
-            while (true) {
-              const p2 = view.getUint16(dec.pos, true);
-              if (p2 === CLOSE) {
-                dec.pos += 2;
-                break;
-              }
-              if (p2 !== OPEN) {
-                // shouldn't happen (each death entry is a subobject) - bail
-                dec.skipBareValue();
-                continue;
-              }
-              dec.pos += 2;
-              const d = parseDeathEntry();
-              if (d.diseaseOutbreak === targetIdentity && typeof d.amount === "number") total += d.amount;
+        } else if (k === "deaths" && dec.peekKind() === TAPE_OPEN) {
+          dec.pos += 1;
+          while (true) {
+            if (dec.peekKind() === TAPE_CLOSE) {
+              dec.pos += 1;
+              break;
             }
+            if (dec.peekKind() !== TAPE_OPEN) {
+              dec.skipBareValue();
+              continue;
+            }
+            dec.pos += 1;
+            const d = parseDeathEntry();
+            if (d.diseaseOutbreak === targetIdentity && typeof d.amount === "number") total += d.amount;
           }
         } else {
           dec.skipBareValue();
@@ -929,31 +873,26 @@
 
     function parseTypeEntry() {
       while (true) {
-        const peek = view.getUint16(dec.pos, true);
-        if (peek === CLOSE) {
-          dec.pos += 2;
+        if (dec.peekKind() === TAPE_CLOSE) {
+          dec.pos += 1;
           break;
         }
         const resolved = dec.resolveToken();
         const k = dec.keyToPropName(resolved);
-        dec.pos += 2; // EQUALS
-        if (k === "countries") {
-          const openCode = view.getUint16(dec.pos, true);
-          dec.pos += 2;
-          if (openCode === OPEN) {
-            while (true) {
-              const p2 = view.getUint16(dec.pos, true);
-              if (p2 === CLOSE) {
-                dec.pos += 2;
-                break;
-              }
-              if (p2 !== OPEN) {
-                dec.skipBareValue();
-                continue;
-              }
-              dec.pos += 2;
-              parseCountryEntry();
+        dec.pos += 1; // EQUALS
+        if (k === "countries" && dec.peekKind() === TAPE_OPEN) {
+          dec.pos += 1;
+          while (true) {
+            if (dec.peekKind() === TAPE_CLOSE) {
+              dec.pos += 1;
+              break;
             }
+            if (dec.peekKind() !== TAPE_OPEN) {
+              dec.skipBareValue();
+              continue;
+            }
+            dec.pos += 1;
+            parseCountryEntry();
           }
         } else {
           // "locations" (huge) / "type" / "date" / "current" - none needed.
@@ -962,122 +901,42 @@
       }
     }
 
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      dec.pos += 2; // EQUALS
-      if (key === "data") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode === OPEN) {
-          while (true) {
-            const p2 = view.getUint16(dec.pos, true);
-            if (p2 === CLOSE) {
-              dec.pos += 2;
-              break;
-            }
-            if (p2 !== OPEN) {
-              dec.skipBareValue();
-              continue;
-            }
-            dec.pos += 2;
-            parseTypeEntry();
-          }
+    walkSection(dec, (key) => {
+      if (key !== "data" || dec.peekKind() !== TAPE_OPEN) return false;
+      dec.pos += 1;
+      while (true) {
+        if (dec.peekKind() === TAPE_CLOSE) {
+          dec.pos += 1;
+          break;
         }
-      } else {
-        dec.skipBareValue();
+        if (dec.peekKind() !== TAPE_OPEN) {
+          dec.skipBareValue();
+          continue;
+        }
+        dec.pos += 1;
+        parseTypeEntry();
       }
-    }
+      return true;
+    });
 
     return deathsByCountry;
   }
 
-  // Mirrors js/clausewitz.js's parseProvincesSection: each provinces.database
-  // entry is fully decoded then immediately reduced to {definition, owner}
-  // and discarded (not huge like disease_outbreak_manager's per-location
-  // blob, so no field-by-field selective walk needed - same treatment as
-  // war_manager.database).
-  function parseProvincesSection(dec, view, onProvince) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`provinces desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected provinces.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          dec.resolveToken(); // entry number - not needed
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`provinces.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const obj = dec.readBareValue();
-          if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) {
-            const definition = typeof obj.province_definition === "string" ? obj.province_definition : null;
-            const owner = typeof obj.owner === "number" ? obj.owner : null;
-            if (definition) onProvince({ definition, owner });
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
-  }
-
-  // situation_manager tracks ~20 scripted historical events by name (the
-  // names themselves are string_lookup refs, not fixed IDs, so they
-  // resolve to real strings directly); only black_death is read here, the
-  // rest stay skipped. See js/clausewitz.js's parseSave for the text-format
-  // twin.
-  function parseSituationManagerSection(dec, view, onBlackDeath) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`situation_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "black_death") {
-        const obj = dec.readBareValue();
-        if (obj && typeof obj === "object" && !Array.isArray(obj) && !("fixedNum" in obj)) onBlackDeath(obj);
-      } else {
-        dec.skipBareValue();
-      }
-    }
+  function extractPlayer(obj) {
+    return {
+      name: obj.name,
+      id: obj.id,
+      countryNumber: obj.country,
+      proficiency: obj.player_proficiency,
+      preferredMapMode: obj.preferred_map_mode,
+    };
   }
 
   // Clausewitz.extractWarFields expects start_date/end_date/joined.date/
   // left.date to already be "Y.M.D" strings (true for the text parser's
   // output) - the binary decoder hands back raw hour counts instead (same
   // encoding as metadata.date), so convert the handful of date fields in
-  // place before handing the object to the shared extractor. Mirrors
-  // extractBlackDeathBinary's date handling for situation_manager.
+  // place before handing the object to the shared extractor.
   function convertWarDatesBinary(warObj) {
     if (typeof warObj.start_date === "number") warObj.start_date = dateFromHours(warObj.start_date);
     if (typeof warObj.end_date === "number") warObj.end_date = dateFromHours(warObj.end_date);
@@ -1100,114 +959,6 @@
     return warObj;
   }
 
-  // Mirrors js/clausewitz.js's parseWarManagerSection: "names" (naming
-  // templates) is skipped, each "database" entry is fully decoded then
-  // immediately reduced via Clausewitz.extractWarFields and discarded.
-  function parseWarManagerSection(dec, view, onWar) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`war_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected war_manager.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          const numResolved = dec.resolveToken();
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`war_manager.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const warObj = dec.readBareValue();
-          // Freed/reserved war IDs decode to a bare unresolved value (the
-          // literal "none" in melted text) rather than a subobject - same
-          // tombstone-entry shape as countries.database's phantom
-          // (merged-away) entries. extractWarFields already returns null
-          // for a non-object, so this filters them the same way.
-          if (warObj && typeof warObj === "object" && !Array.isArray(warObj) && !("fixedNum" in warObj)) {
-            const war = Clausewitz.extractWarFields(numResolved, convertWarDatesBinary(warObj));
-            if (war) onWar(war);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
-  }
-
-  // Mirrors js/clausewitz.js's parseLoanManagerSection: each "database"
-  // entry is fully decoded then immediately reduced via
-  // Clausewitz.extractLoanFields and discarded (loan_manager is small - tens
-  // of KB even in a large late-game save - so unlike war_manager/locations
-  // this always runs, no includeXxx opt-in gate).
-  function parseLoanManagerSection(dec, view, onLoan) {
-    dec.pos += 2; // consume OPEN already peeked by caller
-    while (true) {
-      const peek = view.getUint16(dec.pos, true);
-      if (peek === CLOSE) {
-        dec.pos += 2;
-        break;
-      }
-      const resolved = dec.resolveToken();
-      const key = dec.keyToPropName(resolved);
-      const eq = view.getUint16(dec.pos, true);
-      if (eq !== EQUALS) throw new Error(`loan_manager desync at ${dec.pos}`);
-      dec.pos += 2;
-
-      if (key === "database") {
-        const openCode = view.getUint16(dec.pos, true);
-        dec.pos += 2;
-        if (openCode !== OPEN) throw new Error("expected loan_manager.database to be a subobject");
-        while (true) {
-          const p2 = view.getUint16(dec.pos, true);
-          if (p2 === CLOSE) {
-            dec.pos += 2;
-            break;
-          }
-          dec.resolveToken(); // entry number - not needed
-          const eq2 = view.getUint16(dec.pos, true);
-          if (eq2 !== EQUALS) throw new Error(`loan_manager.database desync at ${dec.pos}`);
-          dec.pos += 2;
-          const loanObj = dec.readBareValue();
-          // Cleared/tombstoned loan entries decode to a bare unresolved
-          // value (the literal "none" in melted text) rather than a
-          // subobject - same shape as war_manager's freed war IDs.
-          // extractLoanFields already returns null for a non-object, so
-          // this filters them the same way.
-          if (loanObj && typeof loanObj === "object" && !Array.isArray(loanObj) && !("fixedNum" in loanObj)) {
-            const loan = Clausewitz.extractLoanFields(loanObj);
-            if (loan) onLoan(loan);
-          }
-        }
-      } else {
-        dec.skipBareValue();
-      }
-    }
-  }
-
-  function extractPlayer(obj) {
-    return {
-      name: obj.name,
-      id: obj.id,
-      countryNumber: obj.country,
-      proficiency: obj.player_proficiency,
-      preferredMapMode: obj.preferred_map_mode,
-    };
-  }
-
   async function parseCompressedSave(arrayBuffer, options) {
     options = options || {};
     const onProgress = options.onProgress || function () {};
@@ -1218,7 +969,6 @@
     if (nl === -1 || !headerText.startsWith("SAV")) throw new Error("not an EU5 save file");
     const bodyStart = nl + 1;
 
-    // Find the embedded zip's start.
     let zipStart = -1;
     for (let i = bodyStart; i < bytes.length - 4; i++) {
       if (bytes[i] === 0x50 && bytes[i + 1] === 0x4b && bytes[i + 2] === 0x03 && bytes[i + 3] === 0x04) {
@@ -1243,12 +993,20 @@
 
     const gsView = new DataView(entries.gamestate.buffer, entries.gamestate.byteOffset, entries.gamestate.byteLength);
     const includeLocations = !!options.includeLocations;
-    // war_manager.database entries carry a big per-battle combat log each -
-    // opt-in for the same reason as includeLocations, independent of it
-    // (see js/clausewitz.js's parseSave for the text-format twin).
     const includeWars = !!options.includeWars;
+    const includeModifierState = !!options.includeModifierState;
     const result = {
       metadata,
+      // Set below if tokenizing hit a truncated/corrupted tail, or the
+      // semantic walk had to bail out early. null means fully parsed - NOT
+      // a guarantee every section was understood, just that nothing threw.
+      // A caller that silently trusts an empty players/wars/locations array
+      // without checking this can't tell "genuinely empty" apart from "the
+      // parser gave up partway through" - which is exactly how a real save
+      // produced 25 straight autosave snapshots that looked like clean,
+      // complete zero-player/zero-war recordings instead of the parse
+      // failures they actually were (see CHANGELOG).
+      parseWarning: null,
       countries: [],
       countriesByNumber: new Map(),
       players: [],
@@ -1258,9 +1016,14 @@
       warReparations: [],
       locationAssets: [],
       estateTradeIncomes: [],
+      activeEstateMemberships: [],
+      estateManagerSeen: false,
       buildings: [],
       cultures: [],
       religions: [],
+      internationalOrganizations: [],
+      societalCharacters: [],
+      societalWorksOfArt: [],
       markets: [],
       wars: [],
       blackDeath: { status: null, start: null, end: null, identity: null, deathsByCountry: null },
@@ -1274,6 +1037,13 @@
       popRecords: [],
       subunitManagerSeen: false,
     };
+
+    // Phase 1: tokenize the whole gamestate buffer up front (0.55 -> 0.85).
+    const gsTape = tokenize(gsView, strings, (frac) => onProgress(0.55 + 0.3 * frac));
+    if (gsTape.truncated) {
+      result.parseWarning = `Gamestate truncated or corrupted around byte ${gsTape.length ? gsTape.offsets[gsTape.length - 1] : 0} - some sections may be missing.`;
+    }
+    onProgress(0.85);
 
     // Normally "countries" and "played_country" are true top-level keys, but
     // at least one observed save (an early-patch autosave) nested them one
@@ -1303,58 +1073,66 @@
     let tradePathManagerSeen = false;
     let tradeManagerSeen = false;
     let populationSeen = false;
+    let internationalOrganizationManagerSeen = false;
+    let characterDbSeen = false;
+    let workOfArtManagerSeen = false;
     function handleSpecialKey(key) {
       if (key === "countries" && !countriesSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos; // rewind; parseCountriesSection expects to see OPEN itself
-        if (firstKey !== "tags") return false;
+        if (peekFirstKeyOfObject(dec) !== "tags") return false;
         countriesSeen = true;
-        parseCountriesSection(dec, gsView, (country) => {
-          result.countries.push(country);
-          result.countriesByNumber.set(country.number, country);
-        });
+        parseCountriesSection(
+          dec,
+          (country) => {
+            result.countries.push(country);
+            result.countriesByNumber.set(country.number, country);
+          },
+          includeModifierState
+        );
         return true;
       }
       if (key === "played_country") {
         const obj = dec.readBareValue();
-        // Handled either way (value's already consumed) - a shape mismatch
-        // just means we discard it, not that skipBody should re-walk it.
         if (obj && typeof obj === "object" && !Array.isArray(obj) && typeof obj.name === "string" && typeof obj.country === "number") {
           result.players.push(extractPlayer(obj));
         }
         return true;
       }
+      if (key === "international_organization_manager" && includeModifierState && !internationalOrganizationManagerSeen) {
+        const firstKey = peekFirstKeyOfObject(dec);
+        // Some saves begin with destroy_ios before database; the generic
+        // database walker skips every non-database field either way.
+        if (firstKey !== "database" && firstKey !== "#382c") return false;
+        internationalOrganizationManagerSeen = true;
+        parsePlainDatabaseSection(dec, (number, obj) => {
+          const organization = Clausewitz.extractInternationalOrganizationFields(number, obj);
+          if (organization) result.internationalOrganizations.push(organization);
+        });
+        return true;
+      }
+      if ((key === "character_db" || key === "work_of_art_manager") && includeModifierState) {
+        const seen = key === "character_db" ? characterDbSeen : workOfArtManagerSeen;
+        if (seen) return false;
+        if (dec.peekKind() !== TAPE_OPEN) return false;
+        if (key === "character_db") characterDbSeen = true;
+        else workOfArtManagerSeen = true;
+        parsePlainDatabaseSection(dec, (number, obj) => {
+          const entry = key === "character_db" ? Clausewitz.extractCharacterSocietalFields(number, obj) : Clausewitz.extractWorkOfArtSocietalFields(number, obj);
+          if (entry) (key === "character_db" ? result.societalCharacters : result.societalWorksOfArt).push(entry);
+        });
+        return true;
+      }
       if (key === "locations" && includeLocations && !locationsSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "locations") return false;
+        if (peekFirstKeyOfObject(dec) !== "locations") return false;
         locationsSeen = true;
-        parseLocationsSection(dec, gsView, (location) => {
+        parseLocationsSection(dec, (location) => {
           result.locations.push(location);
         });
         return true;
       }
       if (key === "population" && includeLocations && !populationSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         populationSeen = true;
-        parsePlainDatabaseSection(dec, gsView, "population", (number, obj) => {
+        parsePlainDatabaseSection(dec, (number, obj) => {
           const pop = Clausewitz.extractPopFields(number, obj);
           if (pop) result.popRecords.push(pop);
         });
@@ -1363,12 +1141,10 @@
       // dependencies are small (hundreds of entries) - always parsed, no
       // includeLocations-style opt-in needed.
       if (key === "diplomacy_manager" && !diplomacySeen) {
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
+        if (dec.peekKind() !== TAPE_OPEN) return false;
         diplomacySeen = true;
         parseDiplomacyManagerSection(
           dec,
-          gsView,
           (dep) => {
             result.dependencies.push(dep);
           },
@@ -1379,38 +1155,27 @@
         return true;
       }
       if (key === "estate_manager" && includeLocations && !estateManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         estateManagerSeen = true;
+        result.estateManagerSeen = true;
         parseEstateManagerSection(
           dec,
-          gsView,
           (asset) => {
             result.locationAssets.push(asset);
           },
           (entry) => {
             result.estateTradeIncomes.push(entry);
+          },
+          (entry) => {
+            result.activeEstateMemberships.push(entry);
           }
         );
         return true;
       }
       if (key === "building_manager" && includeLocations && !buildingManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         buildingManagerSeen = true;
-        parseBuildingManagerSection(dec, gsView, (building) => {
+        parseBuildingManagerSection(dec, (building) => {
           result.buildings.push(building);
         });
         return true;
@@ -1418,73 +1183,37 @@
       if ((key === "culture_manager" || key === "religion_manager") && includeLocations) {
         if (key === "culture_manager" && cultureManagerSeen) return false;
         if (key === "religion_manager" && religionManagerSeen) return false;
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         if (key === "culture_manager") {
           cultureManagerSeen = true;
-          parseNamedDatabaseSection(dec, gsView, key, (entry) => result.cultures.push(entry));
+          parseNamedDatabaseSection(dec, (entry) => result.cultures.push(entry));
         } else {
           religionManagerSeen = true;
-          parseNamedDatabaseSection(dec, gsView, key, (entry) => result.religions.push(entry));
+          parseNamedDatabaseSection(dec, (entry) => result.religions.push(entry));
         }
         return true;
       }
       if (key === "market_manager" && includeLocations && !marketManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        // market_manager's own first field is `produced_goods` (0x324d), not
-        // `database` directly - this section is detected by that distinctive
-        // first-field signature (same pattern as every other ambiguous
-        // top-level key here). 0x324d used to have no name, so this checked
-        // for the literal unresolved "#324d" placeholder; now that
-        // js/eu5-fixed-ids.js resolves it to "produced_goods" (added
-        // alongside the rest of the market-statistics fields), the OLD
-        // check silently stopped matching and market_manager stopped being
-        // parsed at all (result.markets came back empty on every real save)
-        // - both spellings are accepted here so this doesn't regress again
-        // if the fixed-id table changes further.
+        const firstKey = peekFirstKeyOfObject(dec);
+        // See the module-level comment on parseMarketManagerSection for why
+        // both spellings of the produced_goods signature are accepted.
         if (firstKey !== "database" && firstKey !== "#324d" && firstKey !== "produced_goods") return false;
         marketManagerSeen = true;
-        parseMarketManagerSection(dec, gsView, (entry) => result.markets.push(entry));
+        parseMarketManagerSection(dec, (entry) => result.markets.push(entry));
         return true;
       }
       if (key === "provinces" && includeLocations && !provincesSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         provincesSeen = true;
-        parseProvincesSection(dec, gsView, (p) => {
+        parseProvincesSection(dec, (p) => {
           result.provinceOwnerByDefinition[p.definition] = p.owner;
         });
         return true;
       }
       if (key === "situation_manager" && !situationManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "black_death") return false;
+        if (peekFirstKeyOfObject(dec) !== "black_death") return false;
         situationManagerSeen = true;
-        parseSituationManagerSection(dec, gsView, (obj) => {
+        parseSituationManagerSection(dec, (obj) => {
           result.blackDeath = extractBlackDeathBinary(obj);
         });
         return true;
@@ -1496,44 +1225,23 @@
       // this campaign. Otherwise fall through to a normal skip, same cost
       // as any other unhandled key.
       if (key === "disease_outbreak_manager" && !diseaseOutbreakManagerSeen && typeof result.blackDeath.identity === "number") {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         diseaseOutbreakManagerSeen = true;
-        result.blackDeath.deathsByCountry = parseDiseaseOutbreakManagerSection(dec, gsView, result.blackDeath.identity);
+        result.blackDeath.deathsByCountry = parseDiseaseOutbreakManagerSection(dec, result.blackDeath.identity);
         return true;
       }
       if (key === "loan_manager" && !loanManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         loanManagerSeen = true;
-        parseLoanManagerSection(dec, gsView, (loan) => {
+        parseLoanManagerSection(dec, (loan) => {
           result.countryDebt.set(loan.borrower, (result.countryDebt.get(loan.borrower) || 0) + loan.amount);
         });
         return true;
       }
       if (key === "subunit_manager" && !result.subunitManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         result.subunitManagerSeen = true;
-        parsePlainDatabaseSection(dec, gsView, "subunit_manager", (number, obj) => {
+        parsePlainDatabaseSection(dec, (number, obj) => {
           const ship = Clausewitz.extractNavalSubunit(obj);
           if (ship) result.navalSubunits.push(ship);
           const troop = Clausewitz.extractArmySubunit(obj);
@@ -1542,51 +1250,30 @@
         return true;
       }
       if (key === "trade_path_manager" && includeLocations && !tradePathManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         tradePathManagerSeen = true;
-        parsePlainDatabaseSection(dec, gsView, "trade_path_manager", (number, obj) => {
+        parsePlainDatabaseSection(dec, (number, obj) => {
           const path = Clausewitz.extractTradePathFields(number, obj);
           if (path) result.tradePaths.push(path);
         });
         return true;
       }
       if (key === "trade_manager" && includeLocations && !tradeManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
-        if (firstKey !== "database") return false;
+        if (peekFirstKeyOfObject(dec) !== "database") return false;
         tradeManagerSeen = true;
-        parsePlainDatabaseSection(dec, gsView, "trade_manager", (number, obj) => {
+        parsePlainDatabaseSection(dec, (number, obj) => {
           const trade = Clausewitz.extractTradeFields(number, obj);
           if (trade) result.trades.push(trade);
         });
         return true;
       }
       if (key === "war_manager" && includeWars && !warManagerSeen) {
-        const beforePos = dec.pos;
-        const peek = gsView.getUint16(dec.pos, true);
-        if (peek !== OPEN) return false;
-        const afterOpen = dec.pos + 2;
-        dec.pos = afterOpen;
-        const firstKey = dec.keyToPropName(dec.resolveToken());
-        dec.pos = beforePos;
+        const firstKey = peekFirstKeyOfObject(dec);
         // Pre-1.3 saves omit the "names" naming-template block entirely and
-        // go straight to "database" - accept either shape (same pattern as
-        // market_manager's two acceptable first keys above).
+        // go straight to "database" - accept either shape.
         if (firstKey !== "names" && firstKey !== "database") return false;
         warManagerSeen = true;
-        parseWarManagerSection(dec, gsView, (war) => {
+        parseWarManagerSection(dec, (war) => {
           result.wars.push(war);
         });
         return true;
@@ -1594,32 +1281,49 @@
       return false;
     }
 
-    const dec = makeDecoder(gsView, strings, { onSpecialKey: handleSpecialKey });
-    const total = entries.gamestate.length;
+    const dec = makeTapeCursor(gsTape, { onSpecialKey: handleSpecialKey });
+    const totalTapeLen = gsTape.length;
     let lastProgressPos = 0;
-    const progressStep = Math.max(1, Math.floor(total / 100));
+    const progressStep = Math.max(1, Math.floor(totalTapeLen / 50));
 
     try {
-      while (dec.pos < total) {
-        const resolved = dec.resolveToken();
-        const key = dec.keyToPropName(resolved);
-        const eq = gsView.getUint16(dec.pos, true);
-        if (eq !== EQUALS) break; // malformed/truncated tail - stop, keep what we have
-        dec.pos += 2;
-
-        if (!handleSpecialKey(key)) {
+      while (dec.pos < totalTapeLen) {
+        // Normally every top-level gamestate entry is "key=value", but a
+        // real multiplayer save (274MB gamestate, 2500+ countries, 8
+        // players) was found with a run of bare (unkeyed) entries sitting
+        // between diplomacy_manager and war_manager - small anonymous
+        // {target={type=... identity=...}} records, structurally identical
+        // to the array elements the nested walker (skipBody) already
+        // tolerates everywhere else. Tolerating bare entries at the true
+        // top level too (skip and keep going) fixed a real save that came
+        // back with 0 players/wars/locations despite parsing 2542 real
+        // countries correctly.
+        const peek = dec.peekKind();
+        if (peek === TAPE_OPEN) {
           dec.skipBareValue();
+        } else {
+          const resolved = dec.resolveToken();
+          if (dec.peekKind() === TAPE_EQUALS) {
+            dec.pos += 1;
+            const key = dec.keyToPropName(resolved);
+            if (!handleSpecialKey(key)) {
+              dec.skipBareValue();
+            }
+          }
+          // else: a bare scalar sibling of the OPEN case above, already
+          // consumed by resolveToken() - fall through and keep going.
         }
 
         if (dec.pos - lastProgressPos > progressStep) {
           lastProgressPos = dec.pos;
-          onProgress(0.55 + 0.45 * (dec.pos / total));
+          onProgress(0.85 + 0.15 * (dec.pos / totalTapeLen));
         }
       }
     } catch (err) {
       // Truncated save, or a structural quirk we haven't seen - keep
       // whatever countries/players were successfully extracted rather than
       // losing everything to one bad section.
+      result.parseWarning = `Save parsing stopped early at byte ${dec.byteOffset}: ${err.message}. Some sections (possibly players/wars/locations) may be missing or incomplete.`;
       if (typeof console !== "undefined" && console.warn) {
         console.warn("EU5 save parsing stopped early (partial results kept):", err.message);
       }
@@ -1637,6 +1341,8 @@
     Clausewitz.attachTradeRoutes(result);
     Clausewitz.attachNavyCounts(result);
     Clausewitz.attachArmyCounts(result);
+    Clausewitz.attachActiveEstateTypes(result);
+    Clausewitz.attachSocietalSourceFacts(result);
 
     onProgress(1);
     return result;

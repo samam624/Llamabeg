@@ -16,7 +16,12 @@ const root = path.join(__dirname, "..");
 const vendorDir = path.join(root, "vendor");
 
 const copies = [
-  { from: path.join(root, "..", "js"), to: path.join(vendorDir, "js"), files: ["llama-score.js", "clausewitz.js", "clausewitz-binary.js", "eu5-fixed-ids.js"] },
+  {
+    from: path.join(root, "..", "js"),
+    to: path.join(vendorDir, "js"),
+    files: ["llama-score.js", "clausewitz.js", "clausewitz-binary.js", "eu5-fixed-ids.js", "modifier-finder.js"],
+  },
+  { from: path.join(root, "..", "tools"), to: path.join(vendorDir, "tools"), files: ["scan-modifier-sources.js"] },
   {
     from: path.join(root, "..", "llama-score-automatic-logging-machine"),
     to: path.join(vendorDir, "llama-score-automatic-logging-machine"),

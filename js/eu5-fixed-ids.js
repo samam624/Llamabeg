@@ -54,6 +54,39 @@
     "31df": "war_manager",
     "2e6b": "building_manager",
     "2ebc": "loan_manager",
+    // Compact societal-value source state. These four ids were aligned
+    // against the same HUN campaign in binary and melted-text form: the
+    // manager positions match exactly and the two country/pop fields carry
+    // the values shown by the in-game societal-value tooltips.
+    "2757": "character_db",
+    "2fb4": "work_of_art_manager",
+    "2f69": "literacy",
+    // "38ac" was misidentified as accepted_cultures - byte-verified 2026-07-19
+    // against the real 3baa76aa save (DAN/SWE) that it actually decodes
+    // tolerated_cultures (e.g. DAN's real tolerated_cultures={1047 1545} vs
+    // melted text's accepted_cultures={342}, which is genuinely at "31bf").
+    // Every binary save was silently reading tolerated_cultures data under
+    // the accepted_cultures name until this fix.
+    "38ac": "tolerated_cultures",
+    "31bf": "accepted_cultures",
+    "648": "traits",
+    "2fb5": "quality",
+    // work_of_art_manager database entries also carry these two dates as
+    // encoded integers (verified 2026-07-19 against the real 3baa76aa save's
+    // entry 0, the Bayeux Tapestry: decoding #2fb7=53234520 and
+    // #2fb6=55848384 through the same date formula normalizeEu5Date() uses
+    // elsewhere gives exactly the melted text's creation_date=1077.1.1 and
+    // destroyed_date=1375.5.22). Without "2fb6" mapped, a binary save could
+    // never see destroyed_date at all, so destroyed artwork silently kept
+    // counting toward a country's artwork-quality share.
+    "2fb7": "creation_date",
+    "2fb6": "destroyed_date",
+    // international_organization_manager and the compact membership fields
+    // used by the modifier optimizer. Derived by top-level position alignment
+    // and generic decoding against the matching melted 3baa76aa campaign.
+    "32e9": "international_organization_manager",
+    "378f": "all_members",
+    "284c": "leader",
     // Derived by position-aligning the binary top-level key walk against the
     // melted text's top-level key order (same method as war_manager - the
     // sequence "... population, subunit_manager, unit_manager, provinces,
@@ -289,6 +322,26 @@
     "31a5": "monthly_gold",
     "31b5": "recent_balance",
     "2c62": "counters",
+
+    // Per-country modifier-choice state used by the desktop optimizer.
+    // Byte-verified against autosave_llamascoretest2.eu5 and matched to the
+    // same country's melted-text researched/government blocks.
+    "38b6": "researched_advances",
+    "3600": "implemented_laws",
+    "35fd": "implemented_privileges",
+    "35ff": "implemented_reforms",
+    "2e91": "estates",
+    "514": "days",
+    // government.societal_values. Byte-verified against the current HUN
+    // autosave: the decoded #317a block contains the exact axis ids and
+    // values present in melted saves (including -999 for inapplicable axes).
+    "317a": "societal_values",
+    // employment_system had no fixed ID at all, so every binary save always
+    // fell back to extractCountryFields's "first_come_first_serve" default -
+    // byte-verified 2026-07-19 against the real 3baa76aa save: RAG and CRT's
+    // real employment_system=capitalism decodes as "#3807"="capitalism",
+    // and NAM's real employment_system=equality decodes the same way.
+    "3807": "employment_system",
 
     // diplomacy_manager / subject-overlord ("dependency") records
     "2fc3": "diplomacy_manager",
