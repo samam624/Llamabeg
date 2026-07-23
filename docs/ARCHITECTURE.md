@@ -46,9 +46,44 @@ cross-checking it, section by section and field by field, against the *melted pl
 that exact same save* (the game/pdx.tools can already melt saves). `test/run-binary.js`
 codifies that validation permanently: it parses both the compressed and melted forms of the
 same save and diffs every extracted field. Validated against 6 melted/compressed save pairs
-spanning game versions 1.1.2–1.3.10 (0 field mismatches across 376,610+ field checks) and a
-corpus sweep of 59 real saves spanning 1.0.8–1.3.10 (no thrown errors, sane country/player
-counts on all 59).
+spanning game versions 1.1.2–1.3.10 and both solo and 8-player campaigns (0 field mismatches
+across 376,610+ field checks) and a corpus sweep of 59 real saves spanning 1.0.8–1.3.10 (no
+thrown errors, sane country/player counts on all 59).
+
+**Two-phase "tape" architecture** (rewritten 2026-07-23, matching
+[jomini](https://github.com/rakaly/jomini) — the Rust parser PDX Tools itself is built on for
+EU4/EU5/CK3/HOI4/Vic3/Imperator). The parser used to do one recursive pass that decoded bytes
+and interpreted their *meaning* at the same time, so a wrong assumption about what a section
+meant (e.g. "the true top level is always `key=value`") could corrupt byte alignment for
+everything read afterward — a real save (274MB gamestate, 8 players, 2545 countries) hit
+exactly this and silently came back with 0 players/wars/locations despite parsing 2542
+countries correctly, because a large multiplayer campaign accumulates data shapes a short
+solo reference save never exercises. Splitting into two phases makes that structurally
+impossible:
+- **Phase 1 (`tokenize`)**: one mechanical forward pass over the whole gamestate buffer with
+  *zero* shape assumptions. Every token's width comes purely from its own 2-byte type tag
+  against a complete value-type catalog — never from "what key/section is this." Produces a
+  flat, self-describing tape (parallel arrays: kind, decoded value, byte offset, matching
+  bracket index).
+- **Phase 2 (the section parsers)**: walks that tape *by index*, not by byte offset. A wrong
+  shape assumption here can at worst misread one section's meaning — it can no longer corrupt
+  alignment for anything downstream, because phase 1 already guarantees every tape index lands
+  on a real token boundary.
+
+The ~13 near-identical section parsers (`parseCountriesSection`, `parseLocationsSection`,
+`parseWarManagerSection`, ...) were each hand-rolling the same "peek CLOSE, resolve key,
+expect EQUALS, recurse into `database={n={...}}`" boilerplate; migrating them onto the tape
+cursor was also the natural point to consolidate that into two shared helpers (`walkSection`,
+`walkDatabase`) — a net reduction in code, not an addition, as a direct byproduct of the
+migration rather than a separate cleanup pass.
+
+Trade-off: tokenizing the whole buffer up front (rather than only the bytes phase 2 actually
+visits) costs real time/memory on a large save — roughly 2x slower and ~2x more peak memory
+than the old lazy-walk architecture on a 274MB gamestate (~7.8s / ~690MB RSS with every
+extraction option on, vs. ~3-6s before). Considered acceptable for the robustness gained;
+typed-array tape storage and lazy string decoding (matching jomini's own zero-copy
+`Scalar<'a>` design more closely) are available follow-ups if this ever becomes a real
+bottleneck.
 
 Key encoding details worth knowing if this needs revisiting:
 - A "key" token can be a fixed 2-byte ID, a `string_lookup` reference (2 bytes + 1-3 byte
@@ -80,20 +115,60 @@ Key encoding details worth knowing if this needs revisiting:
   left 4 real payload bytes unconsumed, desyncing the rest of the file and silently producing
   a "0 countries, no error" result. Fixed by giving `0x029c` its own 8-byte case in
   `readScalarValue`/`skipScalarValue`/`resolveToken`.
+- The value-type catalog was missing 5 real codes entirely until 2026-07-23, found by
+  cross-checking against jomini's own token table rather than guessing: `I64` (`0x0317`, 8
+  bytes — the same "wider sibling" trap as `0x029c` above, just a code no reference save had
+  ever been large enough to exercise), `F32` (`0x000d`, 4 bytes), the 3-byte and 4-byte
+  `string_lookup` ref widths (`0x0d41`/`0x0d3f` — needed once `string_lookup` exceeds 65,536
+  entries, which a long multiplayer campaign's easily does), and a dedicated empty-string code
+  (`0x0d42`). Every one fell through to the "unresolved token, zero payload bytes" default,
+  silently under-consuming real payload.
+- `0x0001`/`0x0003`/`0x0004` (EQUALS/OPEN/CLOSE) are **not exclusively** structural control
+  codes — the format also reuses them as bare opaque enum values in specific fields (byte-
+  verified: `population.database`'s per-pop `pop_demand` array has a literal EQUALS-coded
+  element with no key before it, and a field elsewhere does the same with a CLOSE-coded one).
+  They're structural *only* at the specific points that explicitly check for them (right after
+  a resolved key, or before ever resolving a token at all) — anywhere else a token gets
+  resolved as a bare value, all three must fall back to the same opaque `{fixedNum: code}`
+  sentinel every other unmapped code gets, not throw. Easy to get wrong when rearchitecting:
+  the tape rewrite above initially treated these three as unconditionally structural and broke
+  on real saves until this was found.
+- The true **top level** of `gamestate` isn't always strictly `key=value` either — a real save
+  was found with a long run of bare, unkeyed records (`{target=... start_date=...
+  expiration_date=...}`, accumulated diplomatic timers a short solo game never generates
+  enough of) sitting right after `diplomacy_manager`. The nested walker already tolerated bare
+  array elements everywhere; the top-level loop didn't, and silently gave up the instant it
+  saw one, discarding every section after it. Same tolerance now applies at every depth,
+  top level included.
 
 Deflate decompression uses the browser's native `DecompressionStream('deflate-raw')` (falls
 back to Node's `zlib` when running under `test/`) — no bundler, no external zip/inflate
 library.
 
-**Caveat:** the fixed-ID table was derived from saves on game version 1.3.10 and validated
-back to 1.0.8. Paradox could still add new fixed IDs in future patches (probably additive,
-not renumbered, going by how EU4's equivalent token space has behaved historically, but
-unverified for EU5). An unrecognized ID degrades gracefully to a `#hex` placeholder rather
-than crashing the parse — worth checking `test/run-binary.js` against a save from a new
-patch before trusting results from it. `test/debug-desync*.js` and
-`test/debug-anomaly-scan.js` are the tools for tracking down a new mismatch: they walk the
-same token stream with instrumentation to pinpoint exactly which key/position first goes
-wrong. For context on how much more robust this needs to be: even `rakaly/jomini`, the
+**Caveat:** the fixed-ID *key* table was derived from saves on game version 1.3.10 and
+validated back to 1.0.8. Paradox could still add new fixed IDs in future patches (probably
+additive, not renumbered, going by how EU4's equivalent token space has behaved historically,
+but unverified for EU5). An unrecognized *key* still degrades gracefully to a `#hex`
+placeholder — that part didn't change tonight. The *value-type* catalog (the 2-byte codes that
+determine a payload's byte width — `0x000c`/`0x0317`/`0x0167`/etc., a completely different,
+much smaller table from the fixed-ID key names) is a different story: as of 2026-07-23 it's
+been cross-checked complete against jomini's own reference catalog (see the two-phase tape
+section above), which is the part that actually matters for not desyncing — an unrecognized
+*key* degrades gracefully by design, but an unrecognized *value type* used to desync
+everything downstream of it, silently. Worth checking `test/run-binary.js` against a save
+from a new patch before trusting results from it either way.
+
+`test/debug-desync*.js` and `test/debug-anomaly-scan.js` predate the tape rewrite and are
+stale — they assume `dec.pos` is a byte offset (it's now a tape index post-rewrite) and hunt
+for exactly the value-width desync class the tape architecture now rules out structurally. Not
+deleted (harmless as historical reference for the debugging *technique*), but don't trust
+their hardcoded byte-offset constants or expect them to run against the current decoder
+without adaptation. If a *new* silent-empty-result bug ever shows up, see the
+`diagnose-eu5-binary-parser-desync` skill for the up-to-date methodology (bisect the
+suspect section with a debug-enabled tape cursor, compare against jomini's catalog for a
+missing/misrouted token, don't assume `test/debug-desync*.js` still applies as-is).
+
+For context on how much more robust this needs to be regardless: even `rakaly/jomini`, the
 library behind pdx.tools, explicitly disclaims full cross-patch compatibility for the same
 reason — there's no shortcut around it for a closed-source, undocumented format.
 
