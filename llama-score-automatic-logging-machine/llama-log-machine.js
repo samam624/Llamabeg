@@ -465,6 +465,11 @@ function countrySummary(c, overlordOf, includeLocations, includeAutomation) {
     income: c.income,
     expense: c.expense,
     lastMonthGoldIncome: c.lastMonthGoldIncome,
+    // Country-level Crown revenue from trade, not the private
+    // estate_manager last_month.trade_income pool.
+    tradeIncome: c.lastMonthsTradeIncome,
+    // Canonical completed-month taxes paid to the Crown.
+    taxIncome: c.lastMonthsTaxIncome,
     creditworthiness: c.creditworthiness,
     loanCapacity: c.loanCapacity,
     // Total outstanding loan principal (js/clausewitz.js's/clausewitz-

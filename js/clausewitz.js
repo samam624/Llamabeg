@@ -408,6 +408,19 @@
       coinMinting: economy.coin_minting,
       monthlyGoldTrend: Array.isArray(economy.monthly_gold) ? economy.monthly_gold : null,
       lastMonthsTaxIncome: obj.last_months_tax_income,
+      // The government's actual share of merchant-route profit for the last
+      // completed month. This is a country-level treasury value, unlike
+      // estate_manager.*.last_month.trade_income, which belongs to each
+      // estate's private gold pool. Current binary saves encode this key as
+      // fixed token 0x36f8 (resolved in eu5-fixed-ids.js); retain the direct
+      // fallback so this extractor is also safe when used with an older or
+      // partial resolver.
+      lastMonthsTradeIncome:
+        typeof obj.last_months_trade_income === "number"
+          ? obj.last_months_trade_income
+          : typeof obj["#36f8"] === "number"
+            ? obj["#36f8"]
+            : undefined,
       lastMonthsManpowerExpense: obj.last_months_manpower_expense,
       lastMonthsSailorExpense: obj.last_months_sailor_expense,
       lastMonthsSubjectTax: obj.last_months_subject_tax,
@@ -644,11 +657,10 @@
       // feeds the estate's own gold/balance, a pool separate from the
       // country's treasury - confirmed on real saves where these entries
       // carry their own `gold`/`balance` fields) - summing it across a
-      // country's estates is still the best available proxy for the
-      // Economy tab's "Trade Income" column, but it is NOT verified to
-      // match the government ledger's own "Trade Income" line (no
-      // country-level field for that total exists anywhere in the save -
-      // see docs/ARCHITECTURE.md).
+      // country's estates must therefore never be used for the Economy
+      // tab's state "Trade Income" column. The real country-level treasury
+      // field is last_months_trade_income (binary token 0x36f8), extracted
+      // by extractCountryFields above.
       tradeIncome: obj.last_month && typeof obj.last_month.trade_income === "number" ? obj.last_month.trade_income : undefined,
       // `paid_taxes` is the actual gold this estate sent to the crown last
       // month - unlike `trade_income` above, this genuinely is state

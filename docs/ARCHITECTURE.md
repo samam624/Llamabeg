@@ -328,18 +328,24 @@ players and every series is right-aligned to it, since each array's *last* entry
 parsing bug) — cross-checked on a newer save where both exist and track within ~1-2% of
 each other.
 
-**Trade Income and Tax Income** (Economy tab) both come from `estate_manager.database`, which
-mixes two record shapes under one numbering: real location assets (RGOs/buildings/roads) and,
-separately, one summary entry per country per estate type (nobles/clergy/burghers/…) carrying a
-`last_month` breakdown. Both columns sum a field of that summary across a country's estates, but
-they're *not* equally trustworthy: `paid_taxes` (→ Tax Income) is the real gold the estate sent
-the crown and lines up with the government ledger's per-estate "Tax at X% from &lt;estate&gt;"
-lines, whereas `trade_income` (→ Trade Income) is each estate's own *private* trade wealth (it
-feeds the estate's separate `gold`/`balance` pool) and is only a best-effort proxy for the
-ledger's own "Trade Income" — summing it alongside Tax Income for one test country already
-exceeded that country's entire Gross Income, so the two can't both be simple additive
-components. Trade Income's column/tooltip say so; Tax Income was sanity-checked at or under Gross
-Income for 1,705 of 1,707 countries on a real save.
+**Trade Income** (Economy tab) reads the country's real `last_months_trade_income` field
+(`0x36f8` in current binary saves). This is the Crown's state revenue from merchant-route profit
+for the last completed month, after the game's trade-income share has been applied. Do not replace
+it with a sum of `estate_manager.database.*.last_month.trade_income`: those similarly named values
+feed each estate's separate private `gold`/`balance` pool. In the 1486-02-01 BYZ benchmark the
+country field is `320.49149`, while the five private estate values sum to `619.00846`.
+
+**Tax Income** reads the country's canonical `last_months_tax_income` field. This is the
+Crown's state tax revenue for the last completed month. It exactly equals the sum of
+`estate_manager.database.*.last_month.paid_taxes` across every estate: all 1,878 countries
+carrying the country field in the 1486-02-01 benchmark matched their estate sum, including BYZ
+at `371.19028`. The direct country field is preferred because it remains available when the
+optional estate/location parse is omitted. The in-game Economy screen recalculates a
+current-month projection after loading, so its estate rows can differ from this saved,
+completed-month value.
+
+See [STATE_TRADE_AND_TAX_INCOME.md](STATE_TRADE_AND_TAX_INCOME.md) for the complete
+field provenance, BYZ benchmark, live Economy-screen reconciliation, and regression checks.
 
 **Base Tax and Economic Base** (Economy tab, Base Tax also on Key) read the *last* entry of
 `historical_tax_base` / `historical_economical_base` respectively (always "now"), not a

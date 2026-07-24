@@ -102,7 +102,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.3";
+  const ASSET_VERSION = "v1.3.5";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -455,25 +455,16 @@
     // either renders, rather than only inside renderCountries() (which used
     // to run after renderPlayers(), so player rows briefly/always read
     // undefined for these).
-    // Neither Trade Income nor Tax Income has a single per-country field in
-    // the save - both only exist as last_month.trade_income/paid_taxes on
-    // each of a country's individual estates (nobles_estate/clergy_estate/
-    // burghers_estate/...), so each has to be summed across every estate
-    // belonging to that country first. See js/clausewitz.js's
-    // extractEstateAssetFields for where estateTradeIncomes comes from, and
-    // its comments for why tradeIncome (private estate wealth, best-effort
-    // proxy only) and paidTaxes (real state revenue) aren't equally trustworthy.
-    const tradeIncomeByCountry = new Map();
-    const taxIncomeByCountry = new Map();
-    for (const entry of result.estateTradeIncomes || []) {
-      if (typeof entry.country !== "number") continue;
-      if (typeof entry.tradeIncome === "number") tradeIncomeByCountry.set(entry.country, (tradeIncomeByCountry.get(entry.country) || 0) + entry.tradeIncome);
-      if (typeof entry.paidTaxes === "number") taxIncomeByCountry.set(entry.country, (taxIncomeByCountry.get(entry.country) || 0) + entry.paidTaxes);
-    }
+    // State Trade Income and State Tax Income both have canonical
+    // country-level last-completed-month fields. Do not sum the similarly
+    // named estate_manager last_month.trade_income values here: those feed
+    // the estates' private gold pools. The estate paid_taxes sum does equal
+    // last_months_tax_income, but the direct field is authoritative and
+    // remains available when the optional estate/location parse is omitted.
     result.countries.forEach((c) => {
       c.__isPlayerCountry = c.players && c.players.length > 0;
-      c.tradeIncome = tradeIncomeByCountry.get(c.number);
-      c.taxIncome = taxIncomeByCountry.get(c.number);
+      c.tradeIncome = c.lastMonthsTradeIncome;
+      c.taxIncome = c.lastMonthsTaxIncome;
       computeDerivedMetrics(c);
     });
     // Army Size/Levies/Regulars/Mercenaries (above, via attachArmyCounts) are
@@ -1873,8 +1864,8 @@
     lastMonthGoldIncome: "Gold income from last month (last_month_gold_income in the save) - the game's own single \"how much did I make\" figure.",
     income: "Gross income - all sources of income added together, before any expenses are subtracted.",
     expense: "Gross expense - all outgoing spending added together, before weighing it against income.",
-    tradeIncome: "Best-effort estimate only: summed across every estate (nobles/clergy/burghers/...) this country has, but this is each estate's own private trade wealth (it has its own gold/balance pool, separate from the treasury) - not confirmed to match the government ledger's own \"Trade Income\" line. Treat as approximate.",
-    taxIncome: "Gold actually collected by the crown from every estate (nobles/clergy/burghers/...) last month - summed from each estate's real paid_taxes field, a component of Gross Income. See each estate's tax rate in the country detail view.",
+    tradeIncome: "The Crown's actual state revenue from trade for the last completed month, read from the country's save-backed last_months_trade_income field. This already reflects the government's trade-income share; it does not sum the estates' separate private trade wealth. The live in-game Economy panel can differ because it previews the current month's routes.",
+    taxIncome: "The Crown's actual state tax revenue for the last completed month, read from the country's save-backed last_months_tax_income field. It equals the sum of every estate's paid_taxes records. The live in-game Economy panel can differ because it recalculates the current month's estate tax projection after loading.",
     profit: "Income minus Expense - what's actually left over each month after paying for everything.",
     efficiency: "Profit divided by Income - the share of gross income kept as profit rather than spent. 100% = no expenses at all; 0% = spending exactly what you make; negative = spending more than you make.",
     lastMonthsArmyMaintenance: "Gold spent maintaining the standing army last month.",
@@ -1929,8 +1920,8 @@
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (c) => fmtNum(c.lastMonthGoldIncome, 2) },
     { key: "income", label: "Gross Income", numeric: true, render: (c) => fmtNum(c.income, 1) },
     { key: "expense", label: "Gross Expense", numeric: true, render: (c) => fmtNum(c.expense, 1) },
-    { key: "tradeIncome", label: "Trade Income", numeric: true, render: (c) => fmtNum(c.tradeIncome, 2) },
-    { key: "taxIncome", label: "Tax Income", numeric: true, render: (c) => fmtNum(c.taxIncome, 2) },
+    { key: "tradeIncome", label: "State Trade Income (Last Month)", numeric: true, render: (c) => fmtNum(c.tradeIncome, 2) },
+    { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (c) => fmtNum(c.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (c) => fmtNum(c.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (c) => fmtNum(c.latestEconomicalBase, 1) },
     { key: "profit", label: "Profit", numeric: true, render: (c) => fmtNum(c.profit, 1) },
@@ -2156,8 +2147,8 @@
     { key: "avgDevelopment", label: "Avg Dev/location", numeric: true, render: (p) => fmtNum(p.country && p.country.avgDevelopment, 2) },
     { key: "gold", label: "Treasury", numeric: true, render: (p) => fmtNum(p.country && p.country.gold, 1) },
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (p) => fmtNum(p.country && p.country.lastMonthGoldIncome, 2) },
-    { key: "tradeIncome", label: "Trade Income", numeric: true, render: (p) => fmtNum(p.country && p.country.tradeIncome, 2) },
-    { key: "taxIncome", label: "Tax Income", numeric: true, render: (p) => fmtNum(p.country && p.country.taxIncome, 2) },
+    { key: "tradeIncome", label: "State Trade Income (Last Month)", numeric: true, render: (p) => fmtNum(p.country && p.country.tradeIncome, 2) },
+    { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (p) => fmtNum(p.country && p.country.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (p) => fmtNum(p.country && p.country.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (p) => fmtNum(p.country && p.country.latestEconomicalBase, 1) },
     { key: "profit", label: "Profit", numeric: true, render: (p) => fmtNum(p.country && p.country.profit, 1) },
@@ -2752,7 +2743,11 @@
   // of strength, and an absent strength field is read as an unraised levy (0
   // troops) rather than a phantom full regiment. A cached save from before
   // this carries the old per-regiment strength baked in - needs a fresh parse.
-  const RESULT_SCHEMA_VERSION = 12;
+  // v13 (2026-07-23): country.lastMonthsTradeIncome now reads the real
+  // country-level last_months_trade_income field (binary token 0x36f8), and
+  // the Economy table uses it instead of summing estates' private
+  // last_month.trade_income pools.
+  const RESULT_SCHEMA_VERSION = 13;
 
   function saveResultToLibrary(fileName, result) {
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) return;

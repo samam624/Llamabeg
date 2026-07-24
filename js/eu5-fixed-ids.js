@@ -71,6 +71,14 @@
     "31bf": "accepted_cultures",
     "648": "traits",
     "2fb5": "quality",
+    // Country-level state trade revenue for the last completed month.
+    // Identified 2026-07-23 from the 3baa76aa BYZ save: #36f8=320.49149,
+    // while the same country's five estate last_month.trade_income values
+    // sum to 619.00846. Across 826 countries carrying the field it tracks
+    // the country's merchant-route profit (r=0.977), not private estate
+    // wealth. Its position in the country record is also the
+    // last_months_* block, immediately before the maintenance fields.
+    "36f8": "last_months_trade_income",
     // work_of_art_manager database entries also carry these two dates as
     // encoded integers (verified 2026-07-19 against the real 3baa76aa save's
     // entry 0, the Bayeux Tapestry: decoding #2fb7=53234520 and

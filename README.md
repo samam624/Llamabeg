@@ -105,7 +105,9 @@ binary format parser, since EU5's save format isn't documented anywhere. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full technical write-up: how the save
 formats were reverse-engineered, how the map's pixel data maps to in-game locations, how war
 scoring's winner-detection actually works internally, and the validation results behind all
-of it.
+of it. The government-versus-estate income distinction and the exact BYZ benchmark are
+documented separately in
+[docs/STATE_TRADE_AND_TAX_INCOME.md](docs/STATE_TRADE_AND_TAX_INCOME.md).
 
 ## Deploying (Netlify)
 
