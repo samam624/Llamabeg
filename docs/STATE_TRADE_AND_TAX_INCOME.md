@@ -34,6 +34,11 @@ The estate summaries remain useful elsewhere—for example, the modifier optimiz
 their private trade income as `estateTradeIncome`—but that field must stay explicitly
 separate from state revenue.
 
+The Metrics → Estates table also exposes this data directly. Select an estate sub-tab to
+see its **Private Trade Income (Last Month)** for every country or player. The column is
+derived from that estate's `last_month.trade_income` record and deliberately retains the
+word "Private" so it cannot be mistaken for the government's State Trade Income.
+
 ## Why tax income can be read directly
 
 The estate summary's `last_month.paid_taxes` is different from its `trade_income`: it is
@@ -122,7 +127,9 @@ are the post-load projection.
    parsing aligned.
 4. `js/parse-worker.js` returns the compact country records.
 5. `js/app.js` maps those fields to `tradeIncome` and `taxIncome`, then renders the
-   explicitly labeled last-month columns.
+   explicitly labeled state-income columns. It separately groups
+   `result.estateTradeIncomes` by country and estate for the Estates table's private-income
+   column.
 6. `llama-score-automatic-logging-machine/llama-log-machine.js` writes the same
    country-level state values into compact campaign snapshots.
 

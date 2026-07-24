@@ -102,7 +102,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.5";
+  const ASSET_VERSION = "v1.3.6";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -426,12 +426,19 @@
       Array.isArray(result.locations) &&
       result.locations.some((loc) => loc && Array.isArray(loc.popIds) && loc.popIds.length) &&
       (!Array.isArray(result.popRecords) || !result.popRecords.length);
-    const staleParsedResult = (result.__schemaVersion !== undefined && result.__schemaVersion !== RESULT_SCHEMA_VERSION) || missingPopulationRecords;
+    const missingEstateIncomeRecords = !Array.isArray(result.estateTradeIncomes);
+    const staleParsedResult =
+      (result.__schemaVersion !== undefined && result.__schemaVersion !== RESULT_SCHEMA_VERSION) ||
+      missingPopulationRecords ||
+      missingEstateIncomeRecords;
     if (staleParsedResult) {
       const canRemoveStale = options.persist === false && options.libraryId;
-      const missingPopText = missingPopulationRecords ? " population database records" : " newer fields (including estate tax rates)";
+      const missingData = [];
+      if (missingPopulationRecords) missingData.push("population database records");
+      if (missingEstateIncomeRecords) missingData.push("per-estate income records");
+      if (!missingData.length) missingData.push("newer fields (including estate tax rates)");
       showError(
-        `This save was loaded from parsed data saved by an older version of this analyzer - some${missingPopText} may be missing until it's re-parsed. ` +
+        `This save was loaded from parsed data saved by an older version of this analyzer - some ${missingData.join(" and ")} may be missing until it's re-parsed. ` +
           `${canRemoveStale ? `<button type="button" id="staleCacheRemoveBtn" class="link-btn">Remove from history</button> and ` : ""}re-upload the original <code>.eu5</code> file to refresh it.`
       );
       const removeBtn = document.getElementById("staleCacheRemoveBtn");
@@ -2039,6 +2046,10 @@
     return `${key}ExtractedTaxPer1k`;
   }
 
+  function estatePrivateTradeIncomeKey(key) {
+    return `${key}PrivateTradeIncome`;
+  }
+
   function estateMetricValue(row, key) {
     return row && typeof row[key] === "number" ? row[key] : undefined;
   }
@@ -2122,6 +2133,14 @@
         numeric: true,
         heatColumn: true,
         render: (row) => fmtNum(renderValue(row, estateExtractedTaxPer1kKey(group.key)), 4),
+      },
+      {
+        key: estatePrivateTradeIncomeKey(group.key),
+        label: "Private Trade Income (Last Month)",
+        title: `${group.label} private trade income for the last completed month, read from this estate's own last_month.trade_income record. This belongs to the estate's separate private economy; it is not the Crown's State Trade Income.`,
+        numeric: true,
+        heatColumn: true,
+        render: (row) => fmtNum(renderValue(row, estatePrivateTradeIncomeKey(group.key)), 2),
       },
     ];
   }
@@ -2361,7 +2380,7 @@
   }
 
   function isEstateMetricKey(key) {
-    return /(?:PopShare|TaxBaseTotal|TaxPer1k|TaxRate|ExtractedTaxTotal|ExtractedTaxPer1k)$/.test(key || "");
+    return /(?:PopShare|TaxBaseTotal|TaxPer1k|TaxRate|ExtractedTaxTotal|ExtractedTaxPer1k|PrivateTradeIncome)$/.test(key || "");
   }
 
   function sortValue(row, col) {
@@ -2584,6 +2603,16 @@
     const discoveredEstateGroups = new Map(BASE_ESTATE_TAX_GROUPS.map((group) => [group.key, group.label]));
     const popsById = populationRecordMap(result);
     const hasPopRecords = popsById.size > 0;
+    const privateTradeIncomeByCountry = new Map();
+    for (const entry of result.estateTradeIncomes || []) {
+      if (!entry || typeof entry.country !== "number" || typeof entry.tradeIncome !== "number") continue;
+      const group = estateMetricGroup(entry.estateType);
+      if (!group || group === "crown") continue;
+      if (!discoveredEstateGroups.has(group)) discoveredEstateGroups.set(group, estateMetricLabel(group));
+      if (!privateTradeIncomeByCountry.has(entry.country)) privateTradeIncomeByCountry.set(entry.country, new Map());
+      const byEstate = privateTradeIncomeByCountry.get(entry.country);
+      byEstate.set(group, (byEstate.get(group) || 0) + entry.tradeIncome);
+    }
     for (const country of result.countries || []) {
       for (const estate of Object.keys(country.taxRates || {})) {
         const group = estateTaxMetricGroup(estate);
@@ -2629,6 +2658,12 @@
     activeEstateTaxGroups = [...discoveredEstateGroups.entries()].map(([key, label]) => ({ key, label }));
     if (!activeEstateTaxGroups.some((group) => group.key === currentEstateMetricGroup)) {
       currentEstateMetricGroup = activeEstateTaxGroups[0] ? activeEstateTaxGroups[0].key : "commoners";
+    }
+    for (const country of result.countries || []) {
+      const byEstate = privateTradeIncomeByCountry.get(country.number);
+      for (const group of activeEstateTaxGroups) {
+        country[estatePrivateTradeIncomeKey(group.key)] = byEstate ? byEstate.get(group.key) : undefined;
+      }
     }
     for (const [countryNumber, row] of totals.entries()) {
       const country = byCountry.get(countryNumber);
