@@ -1119,6 +1119,18 @@
     const timeline = new Map(); // country -> [{date, players: string[]}], ascending
     const sameRoster = (a, b) => a.length === b.length && a.every((p, i) => p === b[i]);
     for (const snapshot of sorted) {
+      // A snapshot the recorder itself flagged as parsed from a broken/
+      // partial read (see llama-log-machine.js's parseWarning field) reports
+      // an empty or truncated countries block that looks exactly like every
+      // player having simultaneously vanished. Trusting that produced a real
+      // false "departed" verdict: a save-parser bug damaged 28 recorded
+      // autosaves' worth of snapshots for one campaign, and the last of
+      // those bad snapshots (not the last GOOD one) became "active at end"
+      // for every country, permanently marking a still-actively-playing
+      // player as departed with no way to un-hide them (2026-07-23).
+      // Skipping flagged snapshots entirely here means the timeline's last
+      // segment is always the last snapshot that actually captured real data.
+      if (snapshot.parseWarning) continue;
       const countryBlocks = {};
       if (snapshot.countries && typeof snapshot.countries === "object") Object.assign(countryBlocks, snapshot.countries);
       if (snapshot.economyCountries && typeof snapshot.economyCountries === "object") Object.assign(countryBlocks, snapshot.economyCountries);

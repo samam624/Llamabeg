@@ -539,6 +539,13 @@ the latest snapshot" silently un-excluded genuinely-abandoned wars the moment a 
 reconnect happened. Every exclusion is overridable per-war in the "Edit war corrections"
 modal; a manual override always wins over the automatic read.
 
+Snapshots carrying `parseWarning` are excluded from this control timeline. A partial parser
+result can retain a country while losing its `players` roster, which otherwise looks exactly
+like a genuine transition to AI control. This was verified against 28 damaged snapshots in a
+real campaign: including them falsely marked the still-active player `Zuup` as departed;
+skipping them preserved the last trustworthy roster. A later valid snapshot still updates
+the timeline normally, and an unflagged empty roster still represents a real departure.
+
 ## Ocean/lake caveat
 
 Sea/lake classification is per-*location*, not aggregated into named bodies of water (the
