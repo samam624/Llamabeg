@@ -2242,55 +2242,71 @@
   // played_country entries accumulate once per session (reconnects,
   // multiplayer resumes, a different human taking over an existing player's
   // country, ...), so the same country can have many entries across the
-  // save's history, under different player names. There's no timestamp on
-  // these, but they're written in a stable order that does reflect recency
-  // (confirmed against a real save: a country with two different named
-  // players had the later-appearing name's sessions consistently
-  // interleaved after the earlier one's) - so keep only the LAST entry for
-  // each country as that country's current controller, dropping any earlier
-  // session under a different name.
+  // save's history, under different player names.
   //
-  // That per-country collapse alone still leaves a gap: a player who
-  // abandoned an earlier country for a new one, with nobody ever taking
-  // over the old one since, ends up as the "last entry" for BOTH countries
-  // independently - each country's own history looks like a valid single-
-  // controller record in isolation. Confirmed against a real save
-  // (`autosave_a881d67a-...`): DokiDoki's last session on SAR (Sardinia)
-  // and their later session on NED (Netherlands) both survived the
-  // per-country collapse, so the map labeled DokiDoki over BOTH countries'
-  // capitals and the Black Death/Players tables listed them twice. Since
-  // playerSessions preserves file order (= recency, per above) across
-  // EVERY country's history, not just one country's, a second pass can
-  // catch this: for any player name that still controls more than one
-  // country after the per-country collapse, keep only the most recent of
-  // those and drop the player from the older country/countries entirely
-  // (there's no reliable "who controls it now instead" signal, so it's left
-  // with no current player rather than a stale/duplicate one).
+  // Two DIFFERENT recency signals are available, and they are NOT
+  // interchangeable - using the wrong one for the wrong comparison is a
+  // real bug that shipped and was caught on a live campaign (two players
+  // who both briefly took over each other's country mid-session, e.g. to
+  // cover an AFK): each played_country record's own `id` field is a
+  // per-PLAYER, monotonically-increasing reconnect counter (confirmed: the
+  // same `id` value recurs across DIFFERENT players in the same save, so
+  // it cannot be a save-wide sequence - it only ever means "the Nth time
+  // THIS player connected"). Raw file/array order, by contrast, reflects
+  // recency reliably WITHIN a single country's own append-ordered history
+  // (confirmed against a real save: DokiDoki's sessions on a country
+  // consistently came after the previous controller nurd's, in file order)
+  // but does NOT reliably reflect recency ACROSS different countries -
+  // each country's played_country list is its own independently-ordered
+  // block, so comparing file position between an entry under country A and
+  // an entry under country B tells you nothing about which happened later
+  // in real time.
+  //
+  // So: use `id` (own-player-relative) to find each PLAYER's own truest
+  // most-recent session first, regardless of which country it's under -
+  // this is the step that broke before, using file order for a
+  // cross-country comparison it isn't valid for, and wrongly concluding a
+  // player currently split between two countries had abandoned BOTH in
+  // favor of whichever the raw file happened to serialize later. THEN, if
+  // that leaves two DIFFERENT players both claiming the same country as
+  // their own most-recent (an ordinary single-controller handoff, e.g. one
+  // player permanently replacing another - confirmed on a real save:
+  // `autosave_a881d67a-...`'s DokiDoki-took-over-from-nurd case), fall back
+  // to file order to pick the real current one, since THAT comparison (two
+  // records under the SAME country) is exactly what file order reliably
+  // orders.
   //
   // Shared between the text and binary parsers (js/clausewitz-binary.js
   // calls this too via the module's exports) since the fix applies
   // identically to both.
   function collapsePlayerSessions(result) {
     result.playerSessions = result.players.slice();
-    const lastPlayerByCountry = new Map();
     result.playerSessions.forEach((player, idx) => {
       player.sessionIndex = idx;
-      lastPlayerByCountry.set(player.countryNumber, player);
     });
-    const collapsed = [...lastPlayerByCountry.values()];
 
     const byName = new Map();
-    for (const player of collapsed) {
+    for (const player of result.playerSessions) {
       if (!byName.has(player.name)) byName.set(player.name, []);
       byName.get(player.name).push(player);
     }
-    const dropped = new Set();
-    for (const entries of byName.values()) {
-      if (entries.length <= 1) continue;
-      entries.sort((a, b) => a.sessionIndex - b.sessionIndex);
-      for (let i = 0; i < entries.length - 1; i++) dropped.add(entries[i]);
+    const ownMostRecent = [...byName.values()].map((entries) => {
+      entries.sort((a, b) => (b.id || 0) - (a.id || 0) || b.sessionIndex - a.sessionIndex);
+      return entries[0];
+    });
+
+    const byCountry = new Map();
+    for (const player of ownMostRecent) {
+      if (!byCountry.has(player.countryNumber)) byCountry.set(player.countryNumber, []);
+      byCountry.get(player.countryNumber).push(player);
     }
-    result.players = collapsed.filter((p) => !dropped.has(p));
+    const winners = [];
+    for (const entries of byCountry.values()) {
+      entries.sort((a, b) => b.sessionIndex - a.sessionIndex);
+      winners.push(entries[0]);
+    }
+
+    result.players = winners;
     for (const p of result.playerSessions) delete p.sessionIndex;
 
     for (const player of result.players) {

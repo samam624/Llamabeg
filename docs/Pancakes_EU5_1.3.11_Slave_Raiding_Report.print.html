@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pancakes — EU5 1.3.11 Slave Raiding Report</title>
+<style>
+  @page { size: Letter; margin: 0.62in 0.68in 0.68in; }
+  * { box-sizing: border-box; }
+  html { color: #1c2530; font-family: "Segoe UI", Arial, sans-serif; font-size: 10.25pt; line-height: 1.43; }
+  body { margin: 0 auto; max-width: 7.1in; }
+  h1, h2, h3 { color: #233d54; break-after: avoid; }
+  h1 { font-size: 23pt; line-height: 1.12; margin: 0 0 9pt; padding-bottom: 8pt; border-bottom: 3px solid #c8a457; }
+  h2 { font-size: 15pt; line-height: 1.2; margin: 18pt 0 6pt; padding-bottom: 3pt; border-bottom: 1px solid #d8dde2; }
+  h3 { font-size: 11.8pt; margin: 13pt 0 4pt; }
+  p { margin: 4pt 0 7pt; orphans: 3; widows: 3; }
+  ul, ol { margin: 4pt 0 8pt 20pt; padding-left: 9pt; }
+  li { margin: 2.5pt 0; }
+  strong { color: #162b3d; }
+  code { font-family: Consolas, "Courier New", monospace; font-size: 8.8pt; color: #6f2e2e; background: #f3f4f5; border: 1px solid #e2e5e8; border-radius: 3px; padding: 0.5pt 2.5pt; overflow-wrap: anywhere; }
+  a { color: #245d85; text-decoration: none; }
+  table { width: 100%; border-collapse: collapse; margin: 8pt 0 12pt; font-size: 9pt; break-inside: avoid; }
+  th { color: #fff; background: #34556f; font-weight: 650; text-align: left; }
+  th, td { border: 1px solid #cbd2d8; padding: 4pt 5pt; vertical-align: top; }
+  tbody tr:nth-child(even) { background: #f5f7f8; }
+  hr { border: 0; border-top: 1px solid #d8dde2; margin: 12pt 0; }
+  h1 + p { color: #596672; font-size: 9.5pt; }
+</style>
+</head>
+<body>
+<h1>Pancakes — Slave raiding, slave movement, exports, and emancipation in EU5 1.3.11</h1>
+<p>Research date: 29 July 2026 Target version: Europa Universalis V 1.3.11, checksum <code>b08d</code>, Steam build <code>24187685</code></p>
+<h2>Short answer</h2>
+<ul>
+<li>Army slave raiding happens on a new occupation, not continuously while a location remains occupied. The same location has a hard <strong>240-day occupation-enslavement cooldown</strong>.</li>
+<li>Most countries with a raiding ability have <strong>Raid Religious Enemies for Slaves</strong>, which only takes pops whose <strong>religion group differs from the raider's</strong>. The target country's state religion is not enough: the individual pops in the occupied location must qualify.</li>
+<li>Privateer raiding is a separate system. An eligible privateer gets only a <strong>25-in-1,000 monthly roll (2.5%)</strong>, takes a base <strong>1%</strong>, needs an unprotected coastal location, and is completely stopped there by a Coastal Fort or Naval Battery.</li>
+<li>Slave pops cannot use ordinary migration. Since 1.1, however, the game redistributes them <strong>inside their current market</strong> according to slave surplus and job demand. Country borders do not reserve them for their owner.</li>
+<li>Slaves cross <strong>between</strong> markets only through the special <code>Slaves</code> trade good. Importing that good physically moves viable slave pops when the receiving market has unfilled slave jobs below its slave-pop cap.</li>
+<li>The reliable hard export control is <strong>Slavery Outlawed</strong>: it blocks slavery and both imports and exports of slave goods. The ban applies to markets the country <strong>owns</strong>, not every market in which it merely owns a location.</li>
+<li>In 1.3.11 there is no per-country “do not let another member of this market take my slaves” toggle. Separate the locations into different markets or remove the market-wide slave demand.</li>
+<li>For maximum emancipation without deliberately losing to rebels: outlaw slavery, remove every Slave Market and every remaining source of slave demand, then accept slave cultures and/or convert slaves to a religion group which your state religion may not enslave. In the current 1.3.11 behavior, <strong>deleting</strong> a Slave Market is safer than merely closing it.</li>
+<li>The fastest scripted mass-emancipation method is to accept the demands of slave rebels: the current files change <strong>every slave pop in the country</strong> into peasants. This is immediate but deliberately creating or conceding to rebels is obviously disruptive.</li>
+</ul>
+<h2>1. Version and evidence standard</h2>
+<p>This report is based primarily on the installed 1.3.11 game data, not pre-release Tinto Talks or old guides. Steam's manifest identifies the local public-branch installation as build <code>24187685</code>; that is the build published for patch 1.3.11 on 16 July 2026. The patch itself mainly adjusted trade range, merchant maintenance, trade income, and mercenaries. The slavery changes now present in the files were introduced principally during 1.1 and 1.3.</p>
+<p>Evidence is labelled as follows:</p>
+<ul>
+<li><strong>File-defined:</strong> an exposed define, modifier, law, building, tooltip, or scripted effect.</li>
+<li><strong>Engine behavior:</strong> described by current localization/patch notes but implemented in the executable, so the complete formula is not script-visible.</li>
+<li><strong>1.3.11 observation:</strong> a current player reproduction used only where the game files and tooltips do not expose a reported bug.</li>
+</ul>
+<p>The base path for file references is:</p>
+<p><code>C:\Program Files (x86)\Steam\steamapps\common\Europa Universalis V\game</code></p>
+<h2>2. Why an army slave raid may fail</h2>
+<h3>2.1 The exact occupation checks</h3>
+<p>For a normal army occupation raid, work through this list:</p>
+<ol>
+<li><strong>Did the location actually change controller?</strong> The ability fires “when occupying a location.” Sitting in an already occupied location does not repeatedly raid it. Retaking it can trigger the occupation event again, subject to the cooldown.</li>
+<li><strong>Does the occupier currently have the correct country modifier?</strong> <code>auto_slave_raid</code> allows part of all eligible pops to be enslaved. <code>auto_slave_raid_different_religion</code> only applies to pops in a different religion group.</li>
+<li><strong>Do the individual pops qualify?</strong> Under the much more common different-religion version, compare each pop's religion group to the raider's. A hostile or normally “raidable” country can contain locations dominated by the raider's own religion group; those pops are not valid targets. The tooltip explicitly says <strong>religion group</strong>, not individual religion and not the target state's official religion.</li>
+<li><strong>Has that location been enslaved within the last 240 days?</strong> <code>ENSLAVE_AT_OCCUPATION_DAY_COOLDOWN = 240</code>. This is a per-location occupation-enslavement cooldown intended to stop back-and-forth occupation farming. The exposed define does not make the cooldown country-specific, so the safe assumption is that another qualifying occupation of that location can consume the same location cooldown.</li>
+<li><strong>Is there a usable non-slave population to take?</strong> A raid cannot manufacture people. Empty, depopulated, already heavily enslaved, or otherwise non-viable locations can show no meaningful result. The 1.3 tooltip says “part of all pops,” but the final selection and rounding are engine-side.</li>
+<li><strong>Can the captured pop remain a slave under the raider's rules?</strong> Culture/religion viability matters to the current slave system. Patch 1.3 explicitly added that check to slave-import orders. Christians, Muslims, and Israelites cannot retain slaves of their own religion group; accepted-culture pops are also normally freed. Nahuatl's Unrestricted Slavery modifier is the notable exception: any captured or bought pop remains a slave.</li>
+</ol>
+<p>The quantity side exposes:</p>
+<ul>
+<li><code>ENSLAVE_AT_OCCUPATION = 0.15</code> — base percentage associated with occupation enslavement.</li>
+<li>Base <code>slave_raid_efficiency = 0.02</code>.</li>
+<li>Slave Raid Efficiency's tooltip: it changes how many pops an army can make into slaves.</li>
+</ul>
+<p>The executable combines these values. The files do <strong>not</strong> expose enough of the formula to justify claiming that every raid is simply 15%, 17%, or some other fixed final percentage. Treat 15% as the occupation base and Slave Raid Efficiency as the scaling modifier shown by the UI.</p>
+<p>Sources:</p>
+<ul>
+<li><code>loading_screen\common\defines\00_defines.txt:205-210</code></li>
+<li><code>main_menu\localization\english\modifier_types_l_english.yml:2776-2785</code></li>
+<li><code>in_game\common\auto_modifiers\country.txt:208</code></li>
+<li><code>in_game\common\religion_groups\00_default.txt:1-18,59-62</code></li>
+<li><code>in_game\common\religions\tonal.txt:7-12</code></li>
+</ul>
+<h3>2.2 The raid ability and the Slave Raiding CB are not the same thing</h3>
+<p>The scripted <code>cb_slave_raiding</code> is visible only to a country with unrestricted <code>auto_slave_raid</code>, and is enabled when the target is not under truce. It uses a Humiliate war goal and has no special scripted enslavement effect.</p>
+<p>That means:</p>
+<ul>
+<li>The raid is an <strong>occupation side effect</strong>, not the war goal reward.</li>
+<li>A raiding country can enslave on occupation in another kind of war while its modifier is active.</li>
+<li>Having no truce makes the dedicated CB usable; it is not an extra per-location occupation condition after a different war has begun.</li>
+<li>The more common <code>auto_slave_raid_different_religion</code> modifier does not itself make this dedicated CB visible.</li>
+</ul>
+<p>Source: <code>in_game\common\casus_belli\slave_raiding.txt:1-20</code></p>
+<p>Examples of the religious-enemy version include Old Norse, Morocco's Amazigh Slave Raids advance, and several country reforms. Nahuatl's Altepetl reform supplies the unrestricted version.</p>
+<h3>2.3 Privateer slave raiding is a separate lottery</h3>
+<p>Privateers do not use the army-occupation rules:</p>
+<ul>
+<li>The country needs <code>allow_privateers_slave_raid</code>.</li>
+<li>The target must be an <strong>unprotected coastal location</strong>.</li>
+<li>Each monthly opportunity succeeds when a d1000 result is below 25: <strong>2.5% per month</strong>.</li>
+<li><code>ENSLAVE_FROM_PRIVATEERS = 0.01</code>, a 1% base amount.</li>
+<li>A <strong>Coastal Fort</strong> or <strong>Naval Battery</strong> gives <code>blocks_privateer_raids = yes</code>, making privateer enslavement impossible in that location.</li>
+</ul>
+<p>At a constant 2.5% monthly chance, there is about a 73.8% chance of at least one success within a year, but also a 26.2% chance of none. A long dry spell therefore does not by itself prove the mechanic is broken.</p>
+<p>Coastal protection only blocks <strong>privateer</strong> raids. Its tooltip does not block an army that conquers and occupies the location.</p>
+<p>Sources:</p>
+<ul>
+<li><code>loading_screen\common\defines\00_defines.txt:207-210</code></li>
+<li><code>in_game\common\building_types\coastal_forts.txt:43,92</code></li>
+<li><code>main_menu\localization\english\modifier_types_l_english.yml:2776-2779</code></li>
+</ul>
+<h3>2.4 Do not confuse the normal occupation raid with the scripted horde event raid</h3>
+<p><code>horde_raid_location</code> has a five-year <code>recently_raided</code> modifier and moves people toward the horde capital, but in 1.3.11 it is a scripted effect used by specific horde content. It is <strong>not</strong> the generic occupation system controlled by the 240-day define. Old posts which infer a multi-year cooldown from horde events should not be applied to ordinary occupation raiding.</p>
+<p>Source: <code>in_game\common\scripted_effects\location_effects.txt:38-103</code></p>
+<h2>3. How slave pops move</h2>
+<p>The confusing part is that “slaves” are represented in two connected forms:</p>
+<ol>
+<li>A <strong>slave pop</strong> located in a specific location.</li>
+<li><code>slaves_goods</code>, a special produced good with <code>is_slaves = yes</code>.</li>
+</ol>
+<p>Source: <code>in_game\common\goods\04_special.txt</code></p>
+<h3>3.1 Ordinary migration: no</h3>
+<p>The Slaves pop type has a very small <code>migration_factor = 0.01</code>, but the current game concept explicitly identifies slaves as permanently restricted from ordinary migration. They do not independently follow the usual “highest migration attraction in the same market” rule.</p>
+<p>Sources:</p>
+<ul>
+<li><code>in_game\common\pop_types\00_default.txt</code> — <code>slaves</code> block</li>
+<li><code>main_menu\localization\english\game_concepts_l_english.yml:1731</code></li>
+</ul>
+<h3>3.2 Automatic movement within one market: yes</h3>
+<p>Since the 1.1 Rossbach changes, slaves are redistributed inside a market according to <strong>surplus and demand</strong>. The population-history interface records this separately as “Moved around the market as supply and demand in different locations changes.”</p>
+<p>The current define <code>SLAVE_MONTHLY_MAX_DISTRIBUTION = 0.25</code> caps this monthly distribution. The executable does not expose whether that 0.25 is applied to the source pool, shortage, or another intermediate value, so it should be described as the internal-distribution cap, not confidently converted into a universal “exactly 25% of all slaves move” rule.</p>
+<p>Consequences:</p>
+<ul>
+<li>A slave pop can move between locations in the same market despite being barred from normal migration.</li>
+<li>Country borders do not isolate the market. A foreign location in the same market can receive slaves if it has the relevant demand.</li>
+<li>This internal redistribution is <strong>not an export trade route</strong>. Cancelling a route or banning exports does not by itself turn off same-market distribution.</li>
+<li>Market access matters generally to who receives market goods, while the slave distributor specifically follows slave surplus and vacant slave jobs.</li>
+</ul>
+<p>Sources:</p>
+<ul>
+<li><code>loading_screen\common\defines\00_defines.txt:232-234</code></li>
+<li><code>main_menu\localization\english\interfaces_l_english.yml:4668-4669,4694-4695</code></li>
+<li><code>main_menu\localization\english\tutorial_l_english.yml:327</code></li>
+<li><a href="https://steamcommunity.com/app/3450310/allnews/%3Fl%3Djapanese">Official 1.1 open-beta economy notes mirrored on Steam</a></li>
+</ul>
+<h3>3.3 Movement between markets: only through slave-goods trade</h3>
+<p>Trading <code>slaves_goods</code> between markets is the cross-market transport channel. The game's hint says that the trade physically moves slave pops between markets to fill vacant slave jobs.</p>
+<p>The receiving side needs:</p>
+<ul>
+<li>An import/export route carrying <code>slaves_goods</code>.</li>
+<li>Slave-pop culture/religion viability under the recipient's rules.</li>
+<li>Unfilled jobs which demand slaves.</li>
+<li>Room below the location's slave-pop cap.</li>
+</ul>
+<p>The hint specifically advises building the slave-demanding building first. If the destination is already at its cap, imported slave goods do not become new slave pops there. This is why a trade route can visibly carry the good without producing the population movement a player expected.</p>
+<p>Sources:</p>
+<ul>
+<li><code>main_menu\localization\english\goods_l_english.yml:146-147</code></li>
+<li><code>main_menu\localization\english\hints_l_english.yml:930-934</code></li>
+<li><code>main_menu\localization\english\interfaces_l_english.yml:4668,4694</code></li>
+<li><a href="https://steamdb.info/patchnotes/23513340/">Patch 1.3 notes: import orders now check pop culture/religion viability</a></li>
+</ul>
+<h3>3.4 What Slave Markets, Slave Centers, and plantations do</h3>
+<ul>
+<li>A <strong>Slave Market</strong> is a domestic building available only while slavery is legal and, normally, only to non-Christian countries. It produces 2 units of slave goods and has <code>building_enslavement_power = 0.10</code>.</li>
+<li>A <strong>Slave Center</strong> is a foreign building placed under strict West/Central African, coastal, religion, range, and slavery conditions. It produces 1 slave good and has <code>building_enslavement_power = 0.20</code>.</li>
+<li>In current 1.3, Slave Centers can enslave laborers as well as peasants, choosing the larger valid pool.</li>
+<li>Plantations demand slave goods and employ slave pops; they therefore create the destination-side demand which makes physical imports useful.</li>
+</ul>
+<p>“Monthly Enslavement” is the number of pops becoming slaves in the building's location. The Slaves hint describes a Slave Market as turning existing slave pops into the trade good, but the system is not a simple permanent one-pop/one-good inventory: building production, market stockpiles, trade capacity, pop viability, and job caps all intervene.</p>
+<p>Sources:</p>
+<ul>
+<li><code>in_game\common\building_types\town_buildings.txt:558-627</code></li>
+<li><code>in_game\common\building_types\foreign_buildings.txt:168-231</code></li>
+<li><code>in_game\common\building_types\plantations.txt</code></li>
+<li><code>main_menu\localization\english\modifier_types_l_english.yml:744-745</code></li>
+<li><a href="https://steamdb.info/patchnotes/23513340/">Patch 1.3 economy and production changes</a></li>
+</ul>
+<h2>4. Can you stop other countries from taking “your” slaves?</h2>
+<h3>If they are in the same market</h3>
+<p>There is no exposed per-country reservation, internal embargo, or “national workers first” rule for slaves. Markets cross borders, and 1.1 added market-wide slave distribution based on surplus and demand. A foreign location in the market can therefore gain slave pops from that market's pool.</p>
+<p>Practical countermeasures:</p>
+<ol>
+<li>Remove or close slave-demanding buildings throughout the market. For the 1.3.11 promotion bug, delete Slave Markets rather than relying on closure.</li>
+<li>Pull your locations into a market you own and reduce the attraction/access that keeps foreign locations attached to it. Merely owning the market center does not make every attached location domestic.</li>
+<li>Create or capture a separate market and move the relevant locations out of the shared market.</li>
+<li>Free the slaves before the distributor can reassign them.</li>
+<li>Outlaw slavery to stop new legal slave supply and demand in your country. This does not give you control over a foreign-owned market's law.</li>
+</ol>
+<p>An export ban is not the answer to same-market movement: no inter-market export is occurring.</p>
+<h3>If they are in another market</h3>
+<p>Stop the <code>slaves_goods</code> route. Cancel your manual route and any slave export order. Also turn off or constrain automation so your own merchant capacity does not recreate it.</p>
+<p>That is not a complete sovereign blockade: foreign merchants and burgher trade can create trades too. The reliable market-wide control is <code>ban_exports_of_slaves_goods</code>, because its tooltip says it blocks exports from <strong>all markets the country owns</strong>.</p>
+<h2>5. How to stop slaves being exported as trade goods</h2>
+<table><thead><tr>
+<th>Method</th>
+<th>What it stops</th>
+<th>Important limit</th>
+</tr></thead><tbody>
+<tr>
+<td>Cancel a slave trade/order</td>
+<td>Your selected route or automated order</td>
+<td>Other merchants/burghers may still trade; automation may choose new profitable routes</td>
+</tr>
+<tr>
+<td><strong>Slavery Outlawed</strong> law</td>
+<td>Slavery, slave-goods imports, and slave-goods exports</td>
+<td>Export/import ban applies to markets your country owns</td>
+</tr>
+<tr>
+<td>“Protect against the slave trade” economy event choice</td>
+<td>Gives the ruler a permanent <code>ban_exports_of_slaves_goods</code> modifier and an export-efficiency penalty</td>
+<td>Event-dependent and lasts through that ruler's modifier</td>
+</tr>
+<tr>
+<td>Delete Slave Markets/Centers</td>
+<td>Stops that building's enslavement and slave-goods output; Slave Markets are automatically invalid without slavery</td>
+<td>Does not cancel already-existing routes or stock instantly</td>
+</tr>
+<tr>
+<td>Separate markets</td>
+<td>Stops internal same-market redistribution across the new boundary</td>
+<td>A trade route can still move slave goods across the boundary</td>
+</tr>
+</tbody></table>
+<p>The law is defined as:</p>
+<ul>
+<li><code>slavery_blocked = yes</code></li>
+<li><code>ban_exports_of_slaves_goods = yes</code></li>
+<li><code>ban_imports_of_slaves_goods = yes</code></li>
+</ul>
+<p>The critical scope wording is “all markets that a country owns.” If your locations belong to somebody else's market, your national export-ban modifier does not turn you into the owner of that market. The long-term solution is market ownership or market separation.</p>
+<p>Sources:</p>
+<ul>
+<li><code>in_game\common\laws\01_common.txt:399-427</code></li>
+<li><code>main_menu\localization\english\modifier_types_l_english.yml:1975-1976,2105-2106</code></li>
+<li><code>main_menu\common\static_modifiers\character.txt:331-336</code></li>
+<li><code>in_game\events\economy\slave_trade.txt:1-76</code></li>
+<li><code>main_menu\localization\english\trade_orders_l_english.yml:6-22</code></li>
+</ul>
+<h2>6. Fastest strategy to turn slaves into non-slave pops</h2>
+<h3>Route A — immediate but high-risk: concede to slave rebels</h3>
+<p>The default slave-rebel demand is unambiguous. On concession it:</p>
+<ol>
+<li>Pacifies the rebel pops.</li>
+<li>Iterates through every pop owned by the country.</li>
+<li>Changes every <code>slaves</code> pop to <code>peasants</code>.</li>
+</ol>
+<p>This is the only generic current script found which emancipates the entire country's slave population immediately. If a slave rebel faction exists and the game permits accepting its demands, concession is the fastest possible mass conversion. Provoking a revolt or deliberately driving satisfaction below the rebel threshold carries the usual stability, devastation, occupation, political, and timing risks; save first if using it as an optimization trick.</p>
+<p>Source: <code>in_game\common\rebel_demands\999_default_rebel_demands.txt:5-20</code></p>
+<h3>Route B — fastest stable policy</h3>
+<p>Use this order:</p>
+<ol>
+<li><strong>Pass Slavery Outlawed.</strong> It blocks slavery plus imports and exports and causes Slave Markets to fail their <code>remove_if = { has_slavery = no }</code> condition.</li>
+<li><strong>Delete every surviving Slave Market in the affected market/region.</strong> In 1.3.11, current player tests report that a Slave Market can prevent otherwise valid emancipation, even when closed. Delete it; do not merely suspend it.</li>
+<li><strong>Remove all remaining slave job demand.</strong> Close/destroy/downsize plantations and special slave-employing buildings. If your religion allows slaves in RGOs, stop expanding those jobs and remove the demand where practical. Check subjects and foreign-owned locations in the same market too, because internal distribution can keep slaves employed there.</li>
+<li><strong>Make each slave pop invalid as a slave.</strong> Accept its culture, or convert it to a religion group which your state cannot enslave. The religion method is guaranteed only for religion groups with <code>allow_slaves_of_same_group = no</code>: Christianity, Islam, and the Israelite group in 1.3.11. Other religion groups default to allowing same-group slaves. Nahuatl's <code>any_pop_can_be_slave</code> explicitly prevents this shortcut.</li>
+<li><strong>For religious freeing, enact Force Slave Conversion and assign conversion cabinet actions to the largest slave concentrations.</strong> Force Slave Conversion is required to convert slave pops and adds +0.1% monthly unemployed-slave promotion. Stack general and local conversion speed and maximize control in those locations. In practice, conversion throughput can be the bottleneck.</li>
+<li><strong>Advance one monthly tick, then audit the population history.</strong> Look for conversion, promotion to peasants, same-market movement, or slave-trade movement. If accepted/same-group slaves remain, search the entire affected market for a surviving Slave Market or slave demand.</li>
+</ol>
+<p>Why both culture and religion are mentioned: acceptance is a normal slave-viability check, while a religion only frees the pop if the governing religion group forbids same-group slaves. Merely converting a slave under a group which permits same-group slavery does not make the pop invalid.</p>
+<h3>Route C — passive unemployed promotion</h3>
+<p>The dedicated mechanic converts a percentage of <strong>unemployed slaves</strong> into peasants each month:</p>
+<ul>
+<li>Universal base: <code>0.001</code> = <strong>0.1% monthly</strong>.</li>
+<li>Force Slave Conversion: another <code>0.001</code>.</li>
+<li>Muslim <strong>Zakah</strong> advance: another <code>0.001</code>.</li>
+</ul>
+<p>The normal practical maximum is therefore:</p>
+<ul>
+<li>0.1% monthly normally.</li>
+<li>0.2% with Force Slave Conversion.</li>
+<li>0.3% for a Muslim country with Force Slave Conversion and Zakah.</li>
+</ul>
+<p>If it operates as a simple monthly fraction and no new slaves arrive:</p>
+<table><thead><tr>
+<th>Rate</th>
+<th>Time to free half</th>
+<th>Time to free 90%</th>
+</tr></thead><tbody>
+<tr>
+<td>0.1%/month</td>
+<td>57.7 years</td>
+<td>191.8 years</td>
+</tr>
+<tr>
+<td>0.2%/month</td>
+<td>28.9 years</td>
+<td>95.8 years</td>
+</tr>
+<tr>
+<td>0.3%/month</td>
+<td>19.2 years</td>
+<td>63.9 years</td>
+</tr>
+</tbody></table>
+<p>This is why removing the blocker and making pops culturally/religiously invalid is much faster than relying on unemployment alone.</p>
+<p>The Slaves pop definition has no ordinary <code>promote_to</code> chain. The dedicated unemployed-slave rule and scripted validity/emancipation behavior are what turn slaves into peasants. General pop-promotion bonuses should not be assumed to multiply the dedicated <code>unemployed_slave_promotion</code> modifier unless the UI breakdown demonstrates that they do.</p>
+<p>Sources:</p>
+<ul>
+<li><code>in_game\common\auto_modifiers\country.txt:85</code></li>
+<li><code>in_game\common\laws\00_religious.txt:450-480</code></li>
+<li><code>in_game\common\advances\religion_muslim.txt:45-55</code></li>
+<li><code>main_menu\localization\english\modifier_types_l_english.yml:1047-1050</code></li>
+<li><code>in_game\common\pop_types\00_default.txt</code></li>
+</ul>
+<h2>7. Current 1.3.11 bug warning</h2>
+<p>The game files expose the intended viability and promotion rules, but current 1.3.11 tests report a regression:</p>
+<ul>
+<li>Accepting the slave culture or converting its religion can fail while a Slave Market remains in the relevant region/market.</li>
+<li>Closing the Slave Market may not be enough; deleting it works in the reproduced case.</li>
+<li>Another reproduction freed accepted-culture slaves on the next tick only after every source of slave demand, including a subject's, was removed.</li>
+<li>Players also report the displayed unemployed-slave-promotion modifier failing to produce the expected throughput while the building/demand blocker exists.</li>
+</ul>
+<p>This is community-observed behavior, not a documented rule in the data files. Treat “delete all Slave Markets and remove all slave demand, then tick” as the 1.3.11 workaround, not intended design.</p>
+<p>Current-version discussion and reproductions: <a href="https://www.reddit.com/r/EU5/comments/1v3bway/slavery_promotion_and_obscure_information_in_1311/">Slavery, promotion and obscure information in 1.3.11</a></p>
+<h2>8. Recommended diagnostic checklist</h2>
+<h3>A raid produced nothing</h3>
+<ol>
+<li>Army raid or privateer raid?</li>
+<li>Does the country tooltip show the correct raid ability right now?</li>
+<li>Did control of the location actually change?</li>
+<li>Was the location raided within 240 days?</li>
+<li>For religious raiding, are the <strong>pops</strong> in another religion group?</li>
+<li>Is there a non-slave population left to take?</li>
+<li>Would those pops remain slaves under the raider's accepted-culture/religion rules?</li>
+<li>For privateers: coastal, unprotected, and no Coastal Fort/Naval Battery?</li>
+<li>For privateers: have enough monthly rolls occurred to distinguish bad luck from a blocker?</li>
+</ol>
+<h3>Slaves are disappearing from a location</h3>
+<p>Check its population history:</p>
+<ul>
+<li>“Moved around the market…” = internal market redistribution.</li>
+<li>“Moved as part of a slave trade” = cross-market <code>slaves_goods</code> route.</li>
+<li>Promotion to peasants = unemployment/validity/emancipation.</li>
+<li>Religion/culture change followed by promotion = pop became invalid as a slave.</li>
+</ul>
+<h3>Slaves will not promote</h3>
+<ol>
+<li>Delete Slave Markets in the affected market/region.</li>
+<li>Remove every slave-employing job, including subject and foreign same-market demand.</li>
+<li>Confirm the pop's culture is accepted or its religion group is forbidden as a slave by your religion group.</li>
+<li>Confirm Nahuatl Unrestricted Slavery is not active.</li>
+<li>Use Force Slave Conversion and a conversion cabinet action.</li>
+<li>Let a monthly tick pass and inspect the history rather than only the aggregate tooltip.</li>
+</ol>
+<h2>9. Online current-version references</h2>
+<ul>
+<li><a href="https://steamdb.info/patchnotes/24187685/">Patch 1.3.11, build 24187685</a></li>
+<li><a href="https://steamdb.info/patchnotes/23513340/">Open Beta 1.3 notes</a> — includes slave-import viability, stronger occupation raids, Slave Center changes, slave growth, and RGO eligibility fixes now present in 1.3.11.</li>
+<li><a href="https://steamcommunity.com/app/3450310/allnews/%3Fl%3Djapanese">Official Steam news feed containing the 1.1 internal slave-distribution change</a></li>
+<li><a href="https://eu5.paradoxwikis.com/index.php?mobileaction=toggle_view_desktop&amp;section=4&amp;title=Religion_modding&amp;veaction=edit">EU5 Wiki religion-group modding reference</a> — corroborates the meaning and default of <code>allow_slaves_of_same_group</code>.</li>
+<li><a href="https://www.reddit.com/r/EU5/comments/1v3bway/slavery_promotion_and_obscure_information_in_1311/">Current 1.3.11 Slave Market/promotion regression discussion</a> — community evidence, not an official specification.</li>
+</ul>
+<h2>Bottom line for Pancakes</h2>
+<p>For raiding, the likely “mystery blocker” is the exact <strong>240-day location cooldown</strong>, followed by checking the religion group of the <strong>local pops</strong>, not the target country. For privateers, protection plus a low monthly roll explains most failures.</p>
+<p>For retention, there is no national fence inside a shared market. Same-market demand can pull slaves across borders; inter-market slave-goods trade moves them farther. Own/separate the market and remove demand if the goal is to keep control.</p>
+<p>For emancipation, the clean route is: <strong>Outlaw Slavery → delete Slave Markets → remove slave demand → accept/convert the pops → run conversion cabinet actions</strong>. If pure speed outweighs all political costs, accepting slave-rebel demands is scripted to turn the entire country's slave population into peasants at once.</p>
+</body>
+</html>

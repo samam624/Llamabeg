@@ -95,6 +95,39 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean).map(String))].sort((a, b) => a.localeCompare(b));
 }
 
+// Mirrors llama-dashboard/main.js's applyPlayerOverrides - see that file's
+// player-country-overrides.json comment for why this exists (a multiplayer
+// rehost can leave literally no reliable signal anywhere in the save for
+// automatic player<->country detection to resolve, confirmed against a real
+// campaign). Without this, importing would silently ship the auto-detected
+// value to the live site even after the user manually corrected it in the
+// dashboard - the override file lives in the SAME per-campaign folder this
+// script already reads everything else from, so it's picked up for free
+// once a campaign has one.
+function readPlayerOverrides(dir) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, "player-country-overrides.json"), "utf8"));
+    return new Map(Object.entries(raw));
+  } catch {
+    return new Map();
+  }
+}
+function applyPlayerOverrides(playerCountries, overrides) {
+  if (!overrides.size) return playerCountries;
+  const result = playerCountries.map((c) => Object.assign({}, c));
+  for (const [numStr, playerName] of overrides) {
+    const number = Number(numStr);
+    const players = playerName ? [playerName] : [];
+    let pc = result.find((c) => c.number === number);
+    if (!pc && players.length) {
+      pc = { number, players };
+      result.push(pc);
+    }
+    if (pc) pc.players = players;
+  }
+  return result.filter((c) => c.players && c.players.length);
+}
+
 function campaignDirs(dataDir, requestedCampaign) {
   const campaignsDir = path.join(dataDir, "campaigns");
   if (!fs.existsSync(campaignsDir)) {
@@ -155,8 +188,17 @@ function loadCampaign(campaignKey, dir) {
     .slice()
     .sort((a, b) => a.captured_at.localeCompare(b.captured_at))
     .pop() || snapshots[snapshots.length - 1] || null;
-  const latestPlayers = latest && Array.isArray(latest.snapshot.playerCountries) ? latest.snapshot.playerCountries : [];
+  const rawLatestPlayers = latest && Array.isArray(latest.snapshot.playerCountries) ? latest.snapshot.playerCountries : [];
+  const latestPlayers = applyPlayerOverrides(rawLatestPlayers, readPlayerOverrides(dir));
   const playerNames = uniqueSorted(latestPlayers.flatMap((country) => Array.isArray(country.players) ? country.players : []));
+  // Patch the actual snapshot row's own embedded JSONB too, not just the
+  // campaign-level cache above - whichever one the frontend actually reads
+  // for the Players table, both need to agree (see the comment on
+  // applyPlayerOverrides for why this correction has to exist at all).
+  if (latest && latestPlayers !== rawLatestPlayers) {
+    latest.snapshot = Object.assign({}, latest.snapshot, { playerCountries: latestPlayers });
+    latest.player_country_count = latestPlayers.length;
+  }
 
   const campaign = {
     campaign_key: campaignKey,

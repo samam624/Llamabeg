@@ -27,7 +27,16 @@ const DEFAULT_CONFIG = {
   stableMs: 2500,
   checkpointYears: 10,
   archiveFullSaves: false,
-  autosavePattern: "^autosave_.*\\.eu5$",
+  // Matches both a normal rotating autosave ("autosave_<uuid>.eu5",
+  // "autosave_<uuid>_3.eu5") AND a manually-named save from the in-game
+  // save menu (Paradox's own convention embeds the campaign UUID at the
+  // end regardless of prefix, e.g. a multiplayer "save as" produces
+  // "MP_<tag>_<date>_<uuid>.eu5") - matching on "starts with autosave_"
+  // specifically was too narrow and silently ignored any manually-named
+  // save entirely, confirmed on a real campaign: an end-of-session manual
+  // save (newer, real end-state data the user specifically wanted) never
+  // got picked up because its filename didn't start with "autosave_".
+  autosavePattern: "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:_\\d+)?\\.eu5$",
   campaignMode: "latest",
   campaignKey: null,
   playerWarsOnly: true,
@@ -329,8 +338,15 @@ function compareDates(a, b) {
   return ak - bk;
 }
 
+// Matches anywhere in a filename regardless of prefix - see
+// DEFAULT_CONFIG.autosavePattern above for why this can't be tied to the
+// "autosave_" prefix specifically (manually-named saves don't have one).
+const CAMPAIGN_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
 function campaignKeyFromFile(file) {
   const name = path.basename(file);
+  const uuidMatch = name.match(CAMPAIGN_UUID_PATTERN);
+  if (uuidMatch) return uuidMatch[0];
   const m = name.match(/^autosave_(.+?)(?:_\d+)?\.eu5$/i);
   return m ? m[1] : name.replace(/\.eu5$/i, "");
 }
@@ -1893,6 +1909,23 @@ function parseSaveInWorker(file, config) {
   return new Promise((resolve, reject) => {
     const worker = new Worker(path.join(__dirname, "parse-worker.js"), {
       workerData: { file, playerWarsOnly: !!config.playerWarsOnly },
+      // The two-phase tape parser (js/clausewitz-binary.js) builds parallel
+      // arrays with one entry per token - measured peak ~4.3GB parsing a
+      // real 71MB save (tape values array is heterogeneous string/number/
+      // bool, so V8 can't pack it as a typed array and boxes most numeric
+      // entries). Worker threads default to the same old-space ceiling as
+      // the main process (~2-2.5GB observed), which a real, currently-
+      // growing live campaign's autosave already exceeds - crashed the
+      // whole app with "JavaScript heap out of memory" a few seconds after
+      // launch. Raised per-worker, not globally, since only this worker
+      // touches raw save bytes. 8192 (not the originally-measured-enough
+      // 6144) - the campaign keeps growing past when this was first
+      // measured, and a worker running right at the edge of its ceiling
+      // can spend a long time thrashing on repeated GC attempts before
+      // either succeeding or finally erroring, which can look like a hang
+      // from the outside; more headroom keeps it comfortably below that
+      // edge instead of just barely under it.
+      resourceLimits: { maxOldGenerationSizeMb: 8192 },
     });
     let settled = false;
     worker.once("message", (msg) => {
@@ -1907,8 +1940,24 @@ function parseSaveInWorker(file, config) {
     });
     worker.once("error", (err) => {
       if (settled) return;
+      settled = true;
       worker.terminate();
       reject(err);
+    });
+    // A worker that dies WITHOUT ever firing "message" or "error" (observed
+    // on real data: a worker thread that stops responding under sustained
+    // memory pressure near its resourceLimits ceiling, without Node's
+    // normal "memory limit" error path triggering) left this promise
+    // permanently unsettled - `scan()`'s outer promise then never resolves,
+    // `tick()`'s `scanning` flag never clears, and every future poll
+    // silently no-ops forever (the app looks alive/idle, not crashed, but
+    // never records anything again). "exit" always fires when a worker
+    // stops for ANY reason, so treat "exit" with nothing already settled
+    // as its own failure instead of leaving the caller waiting forever.
+    worker.once("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`worker exited (code ${code}) without completing`));
     });
   });
 }
@@ -1919,37 +1968,156 @@ function parseSaveInWorker(file, config) {
 // updating state.json).
 const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
 
-// Parses every candidate file CONCURRENTLY across a small worker pool
-// instead of one at a time. Matters specifically when a save folder is
-// autosaving fast: the old sequential loop could take 10+ seconds to drain
-// a batch of several new files, and the game keeps rotating its autosave
-// slots the entire time - a slot could get overwritten again before the
-// recorder ever got around to reading it, which is what produced the
-// "skipped; older than latest" messages even after lowering pollMs (that
-// only shortened the wait BETWEEN scans, not how long a single scan's
-// batch took to drain). Confirmed the underlying chronological sort/dedup
-// logic itself was already correct (a frozen, isolated single-file test
-// scan came out perfectly ordered) - this is purely a throughput fix.
+// The two-phase tape parser (js/clausewitz-binary.js) needs roughly 60-70x
+// a save file's raw byte size in transient heap - measured directly: a
+// real 71MB save peaked at ~4.3GB. EU5's autosave rotation overwrites
+// several ~70MB+ slot files while a long real campaign is actively being
+// played, so a single scan's candidate batch can genuinely contain 2-3+
+// such files at once (each one a real content change, not a caching bug -
+// confirmed via direct instrumentation on a real live campaign). Running
+// them all concurrently under the old thread-count-only cap needed
+// 15-20GB+ simultaneously and crashed the whole app with a real, real-
+// data-reproduced "JavaScript heap out of memory" a few seconds/minutes
+// into actual play.
+//
+// An earlier version of this fix budgeted total ESTIMATED memory across
+// in-flight parses (size * a measured multiplier) instead of a hard count
+// cap, on the theory that the estimate would reliably keep 2 large files
+// from overlapping. It didn't hold up: an isolated repro against this same
+// real campaign's actual current save files hit a genuine ~14.8GB peak RSS
+// (no crash there - nothing else was competing for memory), well above
+// what the estimate predicted for that batch - meaning the budget math
+// still let 2 large files' workers overlap in practice. Inside the real
+// packaged app, the actual EU5 game is ALSO running and consuming its own
+// large share of system memory the whole time, which an isolated repro
+// doesn't account for - that combination is what actually killed the app:
+// no stderr, no Windows Event Log crash entry, no Node "exit" event
+// anywhere, consistent with an external, OS-level termination once total
+// system memory pressure got severe enough (confirmed via live monitoring:
+// system-wide free memory was still several GB when the process vanished,
+// ruling out this worker's own resourceLimits ceiling as the trigger).
+// A SIZE ESTIMATE can be wrong; a hard count cap on large files can't be -
+// strictly one large file parses at a time, full stop, regardless of what
+// the byte-size math predicts for the others.
+const LARGE_FILE_THRESHOLD_MB = 15;
+const PARSE_MEMORY_BUDGET_MB = 8192;
+const PARSE_BYTES_TO_PEAK_MB = 70;
+function estimatedParsePeakMb(stat) {
+  return (stat.size / (1024 * 1024)) * PARSE_BYTES_TO_PEAK_MB;
+}
+function isLargeParseCandidate(stat) {
+  return stat.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024;
+}
+
+// The hard 1-large-file-at-a-time cap above assumes a single large parse
+// will always fit - true today, but the campaign keeps growing (this same
+// investigation caught the save going from 65MB to 76MB over a few weeks),
+// and the ACTUAL running game competes for the same system RAM the whole
+// time. Rather than trust an internal assumption about how much memory is
+// available, check the real thing right before committing to a large
+// parse: `os.freemem()` is live, system-wide, and accounts for the game's
+// own usage automatically - no estimate involved. If the system is
+// genuinely tight RIGHT NOW, defer (leave the file queued - the next
+// scan(), ~5s later by default, tries again) instead of starting a
+// multi-GB allocation into an already-strained system, which is the exact
+// combination that caused the untraceable external kill this was built to
+// prevent (see this file's git history / binary_parser_version_fixes
+// project memory for the full incident).
+const MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE = 6144;
+function systemFreeMb() {
+  return os.freemem() / (1024 * 1024);
+}
+
+// Parses candidate files CONCURRENTLY across a small worker pool instead
+// of one at a time, bounded by both thread count and estimated memory (see
+// above). Matters specifically when a save folder is autosaving fast: the
+// old sequential loop could take 10+ seconds to drain a batch of several
+// new files, and the game keeps rotating its autosave slots the entire
+// time - a slot could get overwritten again before the recorder ever got
+// around to reading it, which is what produced the "skipped; older than
+// latest" messages even after lowering pollMs (that only shortened the
+// wait BETWEEN scans, not how long a single scan's batch took to drain).
+// Confirmed the underlying chronological sort/dedup logic itself was
+// already correct (a frozen, isolated single-file test scan came out
+// perfectly ordered) - this is purely a throughput/memory-safety concern.
 async function parseFilesInParallel(candidates, config) {
   const results = [];
-  let nextIndex = 0;
-  async function runSlot() {
-    while (nextIndex < candidates.length) {
-      const { file, stat, forceModifierStateRefresh } = candidates[nextIndex++];
-      try {
-        const { hash, result } = await parseSaveInWorker(file, config);
-        const date = result.metadata && result.metadata.date;
-        results.push({ file, stat, hash, result, date, forceModifierStateRefresh });
-      } catch (err) {
-        if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
-          console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
+  const queue = candidates.slice();
+  let inFlightMb = 0;
+  let inFlightCount = 0;
+  let largeInFlight = 0;
+
+  return new Promise((resolve) => {
+    function settle() {
+      if (!queue.length && inFlightCount === 0) resolve(results);
+    }
+    function pump() {
+      while (queue.length) {
+        const stat = queue[0].stat;
+        const large = isLargeParseCandidate(stat);
+        const cost = estimatedParsePeakMb(stat);
+        if (large) {
+          // Hard cap: never more than one large file in flight, no matter
+          // what the size estimate says about the others (see comment
+          // above this function - the estimate has been wrong in practice).
+          if (largeInFlight > 0 || inFlightCount >= MAX_PARSE_WORKERS) break;
+          // Live system-memory gate (see MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE
+          // above) - defer to the next scan rather than start a multi-GB
+          // parse while the system is already under real pressure (e.g.
+          // the actual game using a lot of RAM right now).
+          //
+          // MUST skip (shift + continue), NOT break: this promise only
+          // ever gets re-driven by an in-flight parse's own `.finally()`
+          // calling pump()/settle() again. If NOTHING happens to be in
+          // flight when memory is tight (the common case - this is usually
+          // the very first/only candidate), `break` left the queue
+          // non-empty with nothing left to ever call pump() again -
+          // `settle()` never resolves, `scan()` hangs forever, and
+          // `tick()`'s `scanning` guard then silently no-ops every future
+          // poll permanently (confirmed as a real incident: state.json
+          // frozen for an hour with the process still alive). Dropping the
+          // file from THIS scan's queue is safe - `state.files[file]` was
+          // never updated for it, so the very next scan() (~5s later,
+          // rebuilding candidates from scratch) picks it right back up.
+          const freeMb = systemFreeMb();
+          if (freeMb < MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE) {
+            console.warn(
+              `Deferring large save parse (${path.basename(queue[0].file)}) - only ${freeMb.toFixed(0)}MB system memory free, want ${MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE}MB; will retry next scan`
+            );
+            queue.shift();
+            continue;
+          }
+        } else if (inFlightCount > 0 && (inFlightCount >= MAX_PARSE_WORKERS || inFlightMb + cost > PARSE_MEMORY_BUDGET_MB)) {
+          // Small files keep the original estimate-based concurrency -
+          // cheap enough that even a wrong estimate can't cause real harm.
+          break;
         }
+        const { file, forceModifierStateRefresh } = queue.shift();
+        inFlightCount++;
+        inFlightMb += cost;
+        if (large) largeInFlight++;
+        parseSaveInWorker(file, config)
+          .then(({ hash, result }) => {
+            const date = result.metadata && result.metadata.date;
+            results.push({ file, stat, hash, result, date, forceModifierStateRefresh });
+          })
+          .catch((err) => {
+            if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
+              console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
+            }
+          })
+          .finally(() => {
+            inFlightCount--;
+            inFlightMb -= cost;
+            if (large) largeInFlight--;
+            pump();
+            settle();
+          });
       }
     }
-  }
-  const slotCount = Math.max(1, Math.min(MAX_PARSE_WORKERS, candidates.length));
-  await Promise.all(Array.from({ length: slotCount }, runSlot));
-  return results;
+    pump();
+    settle();
+  });
 }
 
 async function scan(config, state) {

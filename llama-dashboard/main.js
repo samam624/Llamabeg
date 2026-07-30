@@ -12,6 +12,25 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 
+// A real, currently-growing live campaign's save file (74MB+, 2500+
+// countries) needs several GB of transient heap to parse (see
+// llama-log-machine.js's parseSaveInWorker, which already raises ITS OWN
+// worker's ceiling) - but the main process receives that same parsed
+// result back over IPC from up to 4 concurrent workers and holds/re-
+// serializes it for the renderer, and Electron's main-process V8 old-space
+// ceiling is smaller than a worker's and NOT changeable via
+// app.commandLine.appendSwitch("js-flags", ...) once the process is
+// already running (confirmed empirically - that only configures newly-
+// spawned child/renderer processes, not the already-initialized main
+// isolate) - observed to OOM-crash the whole app around ~1.4GB regardless.
+// The only way to actually raise the MAIN process's own ceiling is to pass
+// --js-flags as a real startup argument, so relaunch once with it added
+// (guarded so this can't loop forever) before doing anything else.
+if (!process.argv.some((a) => a.startsWith("--js-flags"))) {
+  app.relaunch({ args: process.argv.slice(1).concat(["--js-flags=--max-old-space-size=6144"]) });
+  app.exit(0);
+}
+
 // Two copies of this app (e.g. one launched from an old unzipped folder, one
 // from a fresh re-download elsewhere) polling and writing to the same
 // sibling `data` folder at once is exactly the concurrent-write corruption
@@ -329,6 +348,69 @@ function writeHiddenPlayers(campaignKey, map) {
   fs.writeFileSync(hiddenPlayersFile(campaignKey), JSON.stringify(Object.fromEntries(map), null, 2));
 }
 
+// --- manual player<->country correction (per campaign, same sharing model
+// as hidden-players.json above) ---
+//
+// A country's `played_country` history has no timestamp on any entry, only
+// file order, which reliably reflects recency for a normal single-player
+// handoff (js/clausewitz.js's collapsePlayerSessions) but breaks down for a
+// MULTIPLAYER REHOST: confirmed on a real campaign that a rehost's country-
+// reselection writes both players' entries for BOTH countries in a tight,
+// self-contradicting cluster (the same player's entries look "last" for two
+// different countries at once) with no reliable signal anywhere in the save
+// to resolve which country each of them actually ended up on. Rather than
+// keep guessing at a heuristic that can silently invert itself, this is a
+// manual, one-time correction - same reasoning as hidden-players.json above.
+//
+// Keyed by COUNTRY NUMBER (not tag - a tag can change on reformation/rename,
+// the number never does), value is the player name to force, or an absent
+// key for "use whatever the automatic detection says". Only ever applied to
+// the CURRENT/latest snapshot (see applyPlayerOverrides below) - this
+// corrects what the dashboard displays as "who's on this country right now",
+// it does not retroactively rewrite historical war-scoring attribution.
+function playerOverridesFile(campaignKey) {
+  return path.join(config.campaignsDir, campaignKey, "player-country-overrides.json");
+}
+function readPlayerOverrides(campaignKey) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(playerOverridesFile(campaignKey), "utf8"));
+    return new Map(Object.entries(raw));
+  } catch {
+    return new Map();
+  }
+}
+function writePlayerOverrides(campaignKey, map) {
+  fs.mkdirSync(path.dirname(playerOverridesFile(campaignKey)), { recursive: true });
+  fs.writeFileSync(playerOverridesFile(campaignKey), JSON.stringify(Object.fromEntries(map), null, 2));
+}
+function applyPlayerOverrides(latestSnapshot, overrides) {
+  if (!latestSnapshot || !overrides.size) return;
+  latestSnapshot.playerCountries = latestSnapshot.playerCountries || [];
+  for (const [numStr, playerName] of overrides) {
+    const number = Number(numStr);
+    const players = playerName ? [playerName] : [];
+    for (const bucket of [latestSnapshot.countries, latestSnapshot.economyCountries]) {
+      if (bucket && bucket[number]) bucket[number].players = players;
+    }
+    let pc = latestSnapshot.playerCountries.find((c) => c.number === number);
+    if (!pc && players.length) {
+      // Country wasn't already player-attached (e.g. auto-detection left it
+      // empty, same bug this whole feature exists for) - synthesize an
+      // entry from whatever country data is already known so it can still
+      // show up in the roster/leaderboard, not just silently no-op.
+      const base = (latestSnapshot.countries && latestSnapshot.countries[number]) || (latestSnapshot.economyCountries && latestSnapshot.economyCountries[number]);
+      if (base) {
+        pc = Object.assign({}, base);
+        latestSnapshot.playerCountries.push(pc);
+      }
+    }
+    if (pc) pc.players = players;
+    if (!players.length) {
+      latestSnapshot.playerCountries = latestSnapshot.playerCountries.filter((c) => c.number !== number);
+    }
+  }
+}
+
 function countryLabel(countries, playerCountries, number) {
   const info = (countries && countries[number]) || (playerCountries || []).find((c) => c.number === number);
   return {
@@ -409,7 +491,25 @@ function pushUpdate() {
     log: logLines.slice(-100),
   };
   if (campaignKey) {
-    const { snapshots, events } = readCampaignLedger(campaignKey);
+    let { snapshots, events } = readCampaignLedger(campaignKey);
+    const playerOverrides = readPlayerOverrides(campaignKey);
+    if (snapshots.length && playerOverrides.size) {
+      // readCampaignLedger caches parsed snapshots by file mtime and reuses
+      // the SAME objects across ticks - applyPlayerOverrides mutates in
+      // place, so it must run on a COPY, never the cached original. Without
+      // this, clearing an override later would have no cached-original data
+      // left to fall back to until the underlying ledger file next changes.
+      const latest = snapshots[snapshots.length - 1];
+      const latestCopy = Object.assign({}, latest, {
+        playerCountries: (latest.playerCountries || []).map((c) => Object.assign({}, c)),
+        countries: latest.countries ? Object.assign({}, latest.countries) : latest.countries,
+        economyCountries: latest.economyCountries ? Object.assign({}, latest.economyCountries) : latest.economyCountries,
+      });
+      if (latestCopy.countries) for (const k of Object.keys(latestCopy.countries)) latestCopy.countries[k] = Object.assign({}, latestCopy.countries[k]);
+      if (latestCopy.economyCountries) for (const k of Object.keys(latestCopy.economyCountries)) latestCopy.economyCountries[k] = Object.assign({}, latestCopy.economyCountries[k]);
+      applyPlayerOverrides(latestCopy, playerOverrides);
+      snapshots = snapshots.slice(0, -1).concat([latestCopy]);
+    }
     const hiddenPlayers = readHiddenPlayers(campaignKey);
     // "Every automation flag enabled at once" (see js/llama-score.js's
     // isFullyAutomated/computeAutomationDepartures) is a fully-automatic
@@ -499,6 +599,20 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.webContents.once("did-finish-load", pushUpdate);
+  // A renderer crash (Chromium's separate process, its own memory ceiling -
+  // distinct from the main process's Node/V8 heap covered above) used to be
+  // silently fatal: the window closes, and the default "window-all-closed"
+  // handler below quits the WHOLE app on Windows/Linux with no error text
+  // at all (no stderr, no crash dialog - looked from the outside like the
+  // app had just quietly stopped working after a while). A large real
+  // campaign's per-tick payload (2500+ countries, sent fresh every poll) is
+  // exactly the kind of thing that can stress the renderer's own heap.
+  // Recreate the window instead of letting the app die with it.
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    console.warn(`Renderer process gone (${details.reason}) - recreating window`);
+    mainWindow = null;
+    if (!app.isQuitting) createWindow();
+  });
 }
 
 ipcMain.handle("campaigns:list", () => listCampaigns());
@@ -661,6 +775,21 @@ ipcMain.handle("players:unhide", (_event, name) => {
   return true;
 });
 
+// Manual player<->country correction - see player-country-overrides.json
+// comment above for why this exists (a rehost can leave no reliable signal
+// at all for the automatic detection to resolve). `playerName` of "" or
+// null clears the override for that country (back to auto-detected).
+ipcMain.handle("players:setCountryOverride", (_event, countryNumber, playerName) => {
+  const campaignKey = currentCampaignKey();
+  if (!campaignKey || typeof countryNumber !== "number") return false;
+  const overrides = readPlayerOverrides(campaignKey);
+  if (playerName) overrides.set(String(countryNumber), playerName);
+  else overrides.delete(String(countryNumber));
+  writePlayerOverrides(campaignKey, overrides);
+  pushUpdate();
+  return true;
+});
+
 app.whenReady().then(async () => {
   createWindow();
   await initRecorder();
@@ -670,6 +799,10 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("before-quit", () => {
+  app.isQuitting = true;
 });
 
 app.on("window-all-closed", () => {

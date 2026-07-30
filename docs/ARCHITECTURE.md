@@ -412,6 +412,134 @@ Two encoding subtleties, both learned the hard way:
   contributes 0 to the current-troop sum. (`extractArmySubunit` defaults absent strength to 0
   for exactly this reason.)
 
+## Buildings Value & building maintenance metrics
+
+Three related Economy-tab columns (Players and Countries tables), all added 2026-07-30:
+**Buildings Value** (total ducat value of a country's buildings), **Building Maintenance**
+(total gold spent maintaining them last month), and **Building Maintenance Efficiency** (how
+cheaply, relative to a benchmark, a country maintains them).
+
+### Buildings Value
+
+A save's own `building_manager` records carry no cost/value field at all — just `{type,
+level, employed, upkeep/last_months_profit, location, owner}` (confirmed by dumping raw
+entries directly) — so this is built entirely from the game's own static files via
+`tools/build-building-costs.js`, run manually against the local Steam install, writing
+`game_data/building-costs.json` (gitignored, bundled into the deployed site at build time by
+`scripts/build-netlify-site.js`, same treatment as `map_data/`'s derived files).
+
+There is no single flat cost table in the game files. A building's real one-time gold cost
+resolves through THREE different mechanisms:
+
+1. **Explicit `price = <name>`** in `building_types/*.txt`, resolved through `prices/*.txt`
+   (a referenced amount can itself be a scripted value name like
+   `gold = build_price_age_of_tradition`, needing one more lookup into
+   `script_values/default_values.txt`). Only ~17 of 465 building types (cathedrals,
+   plantations, the HRE armory, aqueduct system, hippodrome, a few estate/event buildings).
+2. **Implicit age-tier default** (337 of 465) for every other normally-constructable building —
+   confirmed via 14 real in-game tooltip screenshots covering every combination of
+   non-expensive/expensive × ages 1-3 × advance-derived/default-age-1, all exact matches (e.g.
+   marketplace/granary/mason at 50g; armory/dock/gun_smith at 100g; printing_press_shop at
+   200g; university/bailiff/entrepot, all `expensive = yes`, at 400g/200g/400g).
+   `prices/01_buildings.txt` defines `p_building_age_N_*` (50/100/200/400/800/1200 gold for
+   ages 1-6) and `p_expensive_building_age_N_*` (200/400/800/1600/3200/5000) — literally
+   `p_building_` or `p_expensive_building_` + an age key string. A building's age is whichever
+   `advances/*.txt` entry has `unlock_building = <this building>` + `age = age_N_...`, or
+   `age_1_traditions` if no advance unlocks it at all (available from game start — this exact
+   fallback branch was itself confirmed via `naval_governor`, predicted and matched 200g).
+   Buildings gated `allow`/`potential`/`country_potential = { always = no }` (event/
+   decision-granted wonders — versailles, zwinger, wisselbank, riksbank,
+   corporation_of_london, ...) correctly stay excluded, since they're never normally
+   constructed and genuinely have no cost to infer.
+3. **`construction_demand = <name>`** (a named `goods_demand/*.txt` goods basket) is NOT a
+   one-time cost despite the filename (`goods_demand/building_construction_costs.txt`) — it's
+   a MONTHLY UPKEEP rate paid during construction, confirmed by a player and separately by the
+   in-game tooltip showing it under "Requirements ... to progress," distinct from the flat
+   "Market Building Costs" number. Never re-derive this as a cost — an earlier attempt at
+   exactly that produced an absurdly cheap total (~1.35 ducats for a building whose real flat
+   price was 400) before this was caught.
+
+Coverage: 17 explicit-price + 337 age-tier = 354/465 building types priced; the remaining
+~111 (mostly the `always = no`-gated wonders) are a real, documented scope limit, not a bug.
+`increase_per_level_cost` (rare, e.g. `construction_center = 0.5`; unset = 0) compounds each
+level's incremental cost geometrically — `js/app.js`'s `buildingValueToLevel()` must match
+the tool's formula exactly: total cost to level L = `baseCost * ((1+r)^L - 1) / r` (or
+`baseCost * L` when r = 0).
+
+### Building Maintenance & Building Maintenance Efficiency
+
+**Building Maintenance** is simply the country's own `last_months_building_maintenance`
+field — already extracted by `extractCountryFields` into `country.lastMonthsBuildingMaintenance`,
+matching the in-game Economy panel's "Building Maintenance" ledger line exactly. Confirmed
+this resolves correctly on binary saves too even without an entry in `js/eu5-fixed-ids.js` —
+not every key needs a compact fixed-ID token; this one round-trips through the save's own
+string table generically (verified by monkey-patching `extractCountryFields` per the
+`reverse-engineer-eu5-binary-field` skill's Step 1 and cross-checking a real country's value
+against its melted-text counterpart).
+
+**Building Maintenance Efficiency** isolates market-price effects from raw spend (a bigger
+empire naturally pays more total upkeep — that isn't inefficiency). Needed no new
+save-parsing: a `building_manager` record's own `upkeep` field is already the real, current,
+per-instance ducat cost — confirmed by hand-deriving the game's own "Maintenance Cost for X"
+tooltip math for a real building (40 Marketplaces in Kōnstantinoúpolis: the file recipe ×
+that market's live goods prices × the tooltip's own "+37.60% of the cost is taken by the
+Country" modifier = 8.93, matching the parent tooltip's "-8.92" to the cent) — so there was no
+need to separately resolve a goods recipe or a market's per-good price
+(`result.markets[].goods[name].price`, already parsed, turned out unnecessary here).
+
+Method (`computeMaintenanceEfficiencyByCountry()` in `js/app.js`): for every building type,
+compute a level-weighted benchmark rate (Σupkeep ÷ Σlevels across a comparison pool) — level-
+weighted so one country's single level-1 building doesn't count the same as another's hundreds
+of levels. Per country: `expectedCost = Σ_type(own levelSum[type] × benchmarkRate[type])`,
+`actualCost = Σ_type(own upkeepSum[type])`, `efficiency = 1 - actualCost/expectedCost`.
+Positive = cheaper than the benchmark; negative = pricier; unbounded on the downside, same
+shape as the pre-existing Profit Efficiency column.
+
+**The comparison pool differs by table.** The Countries tab benchmarks against every real
+territorial country in the save (`isRealTerritorialCountry()`) — a stable, parse-time
+computation (`applyMaintenanceEfficiencyMetric()`). The Players tab benchmarks against only
+the OTHER VISIBLE PLAYERS, recomputed fresh on every `drawPlayerTable()` render (not just at
+parse time, since the visible set changes on hide/show) via
+`applyMaintenanceEfficiencyVsPlayers()`, writing a separate `country.maintenanceEfficiencyVsPlayers`
+field so it doesn't clobber the world-relative value the same shared country object also
+carries for the Countries tab. AI-run countries build/maintain their nations unevenly, so
+mixing them into a small players-only benchmark would mostly add noise rather than a
+meaningful "vs. the field" signal — this was a deliberate, explicit design choice, not an
+oversight.
+
+Verified live against a real campaign: most players clustered +12–15% to -5–11%, except one
+player at a dramatic -94% (vs. the player pool) / -108% (vs. the whole world) — diagnosed
+directly rather than assumed to be a small-sample artifact: that country pays roughly 2x the
+benchmark rate on nearly every building type it owns (marketplace, armory, dock, granary,
+university, temple — all ~2x, each backed by hundreds of other countries' worth of benchmark
+data), a real, consistent, campaign-wide cost premium, not noise.
+
+**Heat-coloring** for the efficiency column is a diverging scale anchored at 0% (exactly the
+benchmark), NOT the flat 0–100%-cap treatment "Profit Efficiency" uses and NOT a plain
+relative min/max. Profit Efficiency's fixed cap works because 100% (spending nothing) is a
+real, reachable ceiling; this metric realistically never approaches +100% (paying zero
+upkeep), so anchoring green there left every real value (single digits to low teens %)
+looking like the same dim brownish-red regardless of actual standing. Instead: `value >= 0` →
+`0.5 + 0.5 * (value / bestPositiveValueShown)` (0% → yellow, the best value shown → full
+green); `value < 0` → `0.5 * (value - worstNegativeValueShown) / (0 - worstNegativeValueShown)`
+(the worst value shown → full red, approaching 0% → yellow). Keeps 0% as a fixed, meaningful
+anchor while still using the full red-yellow-green range for whatever spread is actually on
+screen. The "Building Maintenance" (raw total, not the efficiency %) column, by
+contrast, uses the ordinary relative min/max scale with `lowerIsBetter: true` — there's no
+natural "average" pivot for a raw magnitude, just "lower is better."
+
+Both new metrics needed wiring into **four separate places**, learned the hard way when
+Buildings Value initially shipped Countries-tab-only: `COUNTRY_COLUMNS`/`PLAYER_COLUMNS` are
+fully separate arrays (not shared), as are `COUNTRY_METRIC_GROUPS.economy`/
+`PLAYER_METRIC_GROUPS.economy`, and the Players table's `sortValue()`/heat-value lookup goes
+through a third array, `PLAYER_COUNTRY_SORT_KEYS` — any new Economy metric meant to appear on
+the Players table needs all of `PLAYER_COLUMNS`, `PLAYER_METRIC_GROUPS.economy`, and (unless
+it needs a dedicated `sortValue()` branch, like `maintenanceEfficiency` does for its
+per-table-different field) `PLAYER_COUNTRY_SORT_KEYS`, in addition to the Countries-tab
+equivalents.
+
+Not yet deployed to production — verified against `localhost:8000` only.
+
 ## Black Death analyzer
 
 Ranks countries by population lost to the Black Death. `situation_manager.<name>` tracks
@@ -530,10 +658,50 @@ campaign — even fully post-prune — can look the captured total up instead of
 Saves where NO earlier capture exists anywhere (a fresh upload of a campaign that's already
 past the point of losing the data, with nothing on record) should say something like "not
 enough data" — visibly different from "–" (hasn't happened yet) or an ordinary parse gap.
-Implementation not yet started as of this writing — needs a persistence design decision
-(local IndexedDB only vs. a small Supabase table, since the ask explicitly includes covering
-other players who upload a later save of the same multiplayer campaign, not just this browser's
-own history).
+
+**Update 2026-07-30, round 3 — built, deployed to Supabase, and verified live.** Went with a
+Supabase table (not local IndexedDB), since the ask explicitly includes covering other players
+who upload a later save of the same multiplayer campaign from a different browser/device.
+`supabase/migrations/20260730080000_eu5_black_death_captures.sql` adds
+`public.eu5_black_death_captures` (`playthrough_id, outbreak_identity` primary key,
+`deaths_by_country jsonb`, dates, `game_version`), an anon-select RLS policy, and a
+security-definer RPC `eu5_capture_black_death` (anon-callable, `ON CONFLICT DO NOTHING` — only
+the FIRST-ever capture for a given outbreak survives, never overwritten by a later, possibly
+less-complete reading). Client side: `js/share-store.js`'s `captureBlackDeath`/
+`fetchBlackDeathCapture`, called from `js/app.js`'s `reconcileBlackDeathWithBackend()` — fires
+the capture RPC (fire-and-forget) whenever a save's own `deathsByCountry` is present, or looks
+up an earlier capture when it's null, re-rendering the table once that resolves.
+
+The migration file existed but had never actually been pushed to the remote project
+(`npx supabase migration list` showed it recorded locally only) — caught and pushed before any
+of this could work for real. Verified end-to-end with the repo's own real save files for this
+exact campaign (`3baa76aa-825a-4655-ae49-02edd3b90a4b`): uploaded the repo's old copy
+(v1.3.10, date 1417.2.8.12, outbreak identity 2617, real `deathsByCountry` for 1217 countries)
+— the capture fired and a direct Supabase REST query confirmed the row landed for real. Then
+uploaded the live current save (v1.3.11, date 1512.3.1, same playthrough_id + identity,
+`deathsByCountry: null`) — the Black Death table now shows the identical real per-country
+numbers instead of "not enough data," zero console errors either upload.
+
+**Added a third fallback tier** for campaigns with no earlier capture on record anywhere (the
+common case for any campaign that started on 1.3.11+ with no pre-1.3.11 save ever having
+existed) — this is the tier designed to survive whatever the save format does NEXT, not just
+1.3.11's specific change. `situation_manager.black_death.start`/`.end` and
+`historicalPopulation` (a plain one-entry-per-in-game-year array covering the entire campaign
+from game start — verified 176 entries on a save at date 1512, i.e. game start 1337, not a
+rolling window) are both stored completely independently of whatever `disease_outbreak_manager`
+does, so population-at-outbreak-start/end can always be computed directly from whatever save is
+currently loaded, with zero dependency on the disease-tracking format. This reintroduces the
+exact land-gained/lost pollution problem the feature was originally built to avoid (see the
+2026-07-10 design note above), so it's never silently swapped in as if exact — rendered with a
+"~" prefix and a hover tooltip caveat, and the summary line explicitly says the figures are
+estimated and why. Confirmed the caveat is real, not theoretical: tested by blocking network
+requests to the capture endpoints (simulating "no capture on record") and uploading the live
+save — the estimated Lost % figures came out meaningfully different from the real captured
+tally for several countries (e.g. one country's estimate read roughly half its real figure,
+another's read notably higher), concrete proof land changing hands during a ~19-year outbreak
+window actually does distort the estimate as expected.
+
+Not yet deployed to production (llamabeg.netlify.app) — verified against `localhost:8000` only.
 
 ## Llama score (war scoring)
 
@@ -810,7 +978,7 @@ that save file rather than silently resetting to the blank uploader.
   `ShareStore.uploadCampaignLedger`'s RPCs, for the identical reason `hidden-players.json`
   isn't: those RPCs have no column for either file, both are read only from a local recorder
   folder. Fix both at once if either gets tackled — same shape of fix, same missing piece.
-- **Black Death per-country death breakdown is confirmed broken on later-patch real saves
-  (2026-07-30), root cause found but not fixed — see the "Black Death analyzer" section
-  above for the full investigation state and exactly what's already been ruled out** before
-  picking this back up.
+- **Black Death per-country death breakdown was confirmed broken on later-patch real saves
+  (2026-07-30) — now fixed via a Supabase capture-and-reuse cache plus a labeled
+  population-diff fallback for campaigns with no earlier capture at all, verified live
+  end-to-end — see the "Black Death analyzer" section above.** Not yet deployed to production.

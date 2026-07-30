@@ -17,6 +17,7 @@
     <div class="topbar-actions">
       <span id="statusBadge" class="status-badge status-ok">Starting...</span>
       <button id="campaignsBtn" class="btn-secondary" title="Browse or pick a different campaign to view">Campaign</button>
+      <button id="fixRosterBtn" class="btn-secondary" title="Manually correct which player is on which country - use this if a rehost or seat swap wasn't picked up automatically">Fix players</button>
       <button id="settingsBtn" class="btn-secondary" title="Change watched save folder / data folder">Settings</button>
     </div>
   </header>
@@ -135,6 +136,22 @@
       <pre id="logPane" class="log-pane hidden"></pre>
     </section>
   </main>
+
+  <dialog id="fixRosterDialog">
+    <div class="dialog-body">
+      <h2>Fix players</h2>
+      <p class="note">
+        Corrects which player the dashboard shows as currently controlling each country. Use this when a rehost or seat swap wasn't picked up
+        automatically - the save format has no reliable timestamp for this, so it can't always be detected on its own. Leave a field unchanged to
+        keep the automatic value; clear it entirely to mark that country as having no current player.
+      </p>
+      <div id="fixRosterListWrap" class="table-wrap"><p class="note">Loading...</p></div>
+      <div class="dialog-actions">
+        <button type="button" id="fixRosterClose" class="btn-secondary">Close</button>
+        <button type="button" id="fixRosterSave" class="btn-primary">Save</button>
+      </div>
+    </div>
+  </dialog>
 
   <dialog id="campaignsDialog">
     <div class="dialog-body">

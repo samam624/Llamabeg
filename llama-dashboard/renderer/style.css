@@ -271,6 +271,15 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
   padding: 7px 10px;
   font: inherit;
 }
+.fix-roster-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  color: var(--text);
+  padding: 6px 8px;
+  font: inherit;
+}
 .optimizer-controls { display: flex; align-items: flex-end; gap: 12px; margin-top: 14px; }
 .optimizer-field { min-width: 220px; margin-bottom: 0; }
 .optimizer-key-field { flex: 1; }

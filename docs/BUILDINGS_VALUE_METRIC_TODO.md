@@ -1,72 +1,64 @@
-# Buildings Value metric — status & what to check next
+# Buildings Value metric — status
 
-## Current state (2026-07-30, shipped to code but NOT deployed)
+## Resolved (2026-07-30): the "17/465" gap is fixed
 
-Implemented and verified working end-to-end (real save, real browser, zero
-console errors) — see `[[buildings_value_metric]]` memory and
-`tools/build-building-costs.js`'s header comment for the full writeup. But
-the user flagged, correctly, that only **17 of 465 building types** ending
-up with a real ducat price "is definitely not the right data" — picking
-this back up is the next thing to do before trusting/shipping the metric.
+The user flagged that only 17 of 465 building types getting a real ducat
+price "is definitely not the right data." That's now fixed - see
+`[[buildings_value_metric]]` memory for the full story. Short version:
 
-## The concern
+There is no single flat cost table in the game files. There are THREE
+mechanisms, and the tool now handles all three correctly:
 
-`tools/build-building-costs.js` currently only assigns a nonzero `baseCost`
-to a building type if it has an explicit `price = <name>` field in
-`building_types/*.txt`, resolved through `prices/*.txt`. Confirmed by the
-user: `construction_demand` (the OTHER mechanism, which covers ~427 of the
-465 types) is a monthly upkeep rate, not a purchase cost, so it's correctly
-excluded — that part isn't in question. What's in question is whether
-those ~427 (plus a handful more with neither field) are genuinely FREE to
-build, or whether there's a THIRD cost mechanism this tool hasn't found yet.
+1. **Explicit `price =`** (17 buildings: cathedrals, plantations, HRE
+   armory, etc.) - unchanged, resolves through `prices/*.txt`.
+2. **Implicit age-tier default** (337 buildings, NEW) - confirmed via 14
+   real in-game tooltip screenshots covering every combination of
+   non-expensive/expensive x ages 1-3 x advance-derived/default-age-1, all
+   exact matches (see `[[buildings_value_metric]]` memory for the full
+   list). A building's cost is `p_building_age_N_*` or (if
+   `expensive = yes`) `p_expensive_building_age_N_*` from
+   `prices/01_buildings.txt`, where N is the age of whichever
+   `advances/*.txt` entry has `unlock_building = <this building>` -
+   or `age_1_traditions` if no advance unlocks it at all (available from
+   game start; this exact fallback branch was itself confirmed via
+   `naval_governor`, predicted and matched 200g). Buildings gated
+   `allow`/`potential`/`country_potential = { always = no }`
+   (event/decision-granted wonders - versailles, zwinger, wisselbank, ...)
+   correctly stay excluded, since they're never normally constructed and
+   have no real cost to infer.
+3. **`construction_demand`** - confirmed NOT a cost (monthly upkeep only,
+   shown separately in-game under "Requirements ... to progress"). Still
+   correctly excluded.
 
-## The strongest lead, not yet followed
+Remaining ~111 buildings stay at `baseCost: 0` (`source:
+"excluded_upkeep_only"`) - these are the true unbuildable-through-normal-
+construction wonders/event buildings, a real scope limit, not a bug.
 
-Every building type in `building_types/*.txt` can set a boolean
-`expensive = yes` flag — confirmed via a directory-wide grep: **~168
-occurrences** across most of the building_types files (capital_buildings,
-culture_buildings, event_only_buildings, forts, market_buildings,
-town_buildings, unique_buildings, etc.) - roughly 10x more common than the
-17 buildings with an explicit `price =`. This strongly suggests `expensive`
-combines with something else (most likely the building's age/tier) to
-select an IMPLICIT default price from the very set of scripted values this
-tool already resolves for the `p_building_age_1_traditions` /
-`p_expensive_building_age_1_traditions` family (see
-`prices/01_buildings.txt` lines ~78-121) - those looked "unused" during
-the first pass (zero literal `price = p_building_age_...` references
-anywhere in `building_types/`), but that's exactly what you'd expect if
-they're applied as a DEFAULT rather than referenced explicitly per
-building. This was not confirmed - it's the next thing to check, in order:
+## Residual risk (mostly de-risked)
 
-1. Find whatever determines a building's "age"/tier (a `category`? an
-   `age_X_...` flag? something on the `possible_production_methods` chain?)
-   and see if `expensive = yes/no` + that age cleanly maps to
-   `p_building_age_N_*` / `p_expensive_building_age_N_*` for building types
-   that currently resolve to `baseCost: 0`.
-2. If that mapping doesn't hold, check whether the game's actual in-game
-   "Build" menu shows a ducat cost for an ordinary building at all (e.g.
-   temple, workshop) - if it shows a real number, that's proof a real
-   mechanism exists and hasn't been found yet; if it shows nothing/"free",
-   the current 17-of-465 scope might be correct after all and the user's
-   instinct, while reasonable, would turn out not to change the outcome.
-3. Either way, do NOT re-try treating `construction_demand` as a cost
-   again - that's the specific mistake already made and corrected this
-   session (see the memory file for why the math didn't add up).
+The "no advance found → default to age 1" fallback (mechanism 2 above) was
+worried to risk landing a handful of buildings on a wrong age-1 default if
+they're unlocked through some non-advance mechanism. `naval_governor` was
+exactly this case (no advance-unlock trace, `expensive = yes`) and its
+predicted 200g matched the real in-game tooltip exactly - real evidence
+the fallback generalizes. Not exhaustively audited across all 170
+buildings using this fallback, so if a specific building's Buildings Value
+contribution ever looks wrong, still worth checking for a non-advance
+unlock path before assuming the tool is wrong generally - but this is no
+longer the open question it was.
 
 ## Where the code lives
 
-- `tools/build-building-costs.js` - the extraction tool, run manually
-  (`node tools/build-building-costs.js`) against the local Steam install,
-  writes `game_data/building-costs.json` (gitignored).
+- `tools/build-building-costs.js` - the extraction tool (run manually:
+  `node tools/build-building-costs.js`), writes
+  `game_data/building-costs.json` (gitignored). Full mechanism writeup is
+  in its header comment.
 - `js/app.js` - `buildingValueToLevel()`, `computeBuildingsValueByCountry()`,
   `applyBuildingsValueMetric()`, and the `buildingsValue` column in
-  `COUNTRY_COLUMNS`/`COUNTRY_METRIC_GROUPS.economy`.
+  `COUNTRY_COLUMNS`/`COUNTRY_METRIC_GROUPS.economy`. No changes needed -
+  it just consumes whatever `baseCost` the tool produces.
 - `scripts/build-netlify-site.js` - bundles the JSON into `dist/` at deploy
   time if present locally.
 
-None of this needs to change structurally to fix the `expensive`/age
-question - only `buildBuildingCosts()`'s cost-resolution logic in the tool
-would need a new branch, and the JSON would need regenerating
-(`node tools/build-building-costs.js`) once that's sorted out. Not deployed
-yet - `game_data/building-costs.json` is gitignored and nothing user-facing
-has shipped.
+Not yet deployed - regenerate `game_data/building-costs.json` (already done
+this session) and re-verify against a real save before shipping.

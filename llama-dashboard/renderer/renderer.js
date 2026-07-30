@@ -1082,6 +1082,59 @@ document.getElementById("campaignsBtn").addEventListener("click", () => {
 });
 document.getElementById("campaignsClose").addEventListener("click", () => campaignsDialog.close());
 
+// --- fix players dialog (manual country<->player correction) ---
+//
+// See main.js's player-country-overrides.json comment for why this exists:
+// a rehost's country-reselection can leave no reliable recency signal at
+// all in the save, so the automatic detection sometimes just can't be
+// trusted. Reads from latestModifierContext.playerCountries (already sent
+// every tick, no new IPC needed to POPULATE this) - each row's input starts
+// pre-filled with the CURRENT (possibly wrong) player name; only rows the
+// user actually edits get saved as an explicit override, unedited rows are
+// left alone (no-op, keeps following auto-detection going forward).
+function renderFixRosterList() {
+  const wrap = document.getElementById("fixRosterListWrap");
+  const countries = (latestModifierContext && latestModifierContext.playerCountries) || [];
+  if (!countries.length) {
+    wrap.innerHTML = '<p class="note">No player countries known yet for this campaign.</p>';
+    return;
+  }
+  const rows = countries
+    .slice()
+    .sort((a, b) => (a.tag || "").localeCompare(b.tag || ""))
+    .map(
+      (c) => `
+    <tr>
+      <td><span class="tag-badge">${escapeHtml(c.tag || "#" + c.number)}</span></td>
+      <td><input type="text" class="fix-roster-input" data-country="${c.number}" data-original="${escapeHtml((c.players || [])[0] || "")}" value="${escapeHtml((c.players || [])[0] || "")}" /></td>
+    </tr>`
+    )
+    .join("");
+  wrap.innerHTML = `<table><thead><tr><th>Country</th><th>Player</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+const fixRosterDialog = document.getElementById("fixRosterDialog");
+document.getElementById("fixRosterBtn").addEventListener("click", () => {
+  renderFixRosterList();
+  fixRosterDialog.showModal();
+});
+document.getElementById("fixRosterClose").addEventListener("click", () => fixRosterDialog.close());
+document.getElementById("fixRosterSave").addEventListener("click", async () => {
+  const saveBtn = document.getElementById("fixRosterSave");
+  saveBtn.disabled = true;
+  const inputs = fixRosterDialog.querySelectorAll(".fix-roster-input");
+  const changes = [];
+  inputs.forEach((input) => {
+    const newValue = input.value.trim();
+    if (newValue !== input.dataset.original) changes.push({ country: Number(input.dataset.country), player: newValue });
+  });
+  for (const change of changes) {
+    await window.llamaAPI.setCountryPlayerOverride(change.country, change.player || null);
+  }
+  saveBtn.disabled = false;
+  fixRosterDialog.close();
+});
+
 // --- settings dialog ---
 
 const settingsDialog = document.getElementById("settingsDialog");

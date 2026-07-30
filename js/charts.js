@@ -237,9 +237,14 @@
       crosshair.setAttribute("visibility", "visible");
 
       const rows = series
-        .map((s, si) => {
+        .map((s, si) => ({ s, si, v: s.points[idx] }))
+        .sort((a, b) => {
+          const av = typeof a.v === "number" ? a.v : -Infinity;
+          const bv = typeof b.v === "number" ? b.v : -Infinity;
+          return bv - av;
+        })
+        .map(({ s, si, v }) => {
           const color = legibleChartColor(s.color, theme.isDark) || theme.series[si % theme.series.length];
-          const v = s.points[idx];
           return `<div class="chart-tooltip-row"><span class="chart-legend-swatch" style="background:${color}"></span>${escapeHtml(s.label)}: <b>${
             typeof v === "number" ? fmtCompact(v) : "—"
           }</b></div>`;

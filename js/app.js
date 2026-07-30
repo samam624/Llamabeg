@@ -513,6 +513,7 @@
     });
     computeCountryLocationMetrics(result);
     applyBuildingsValueMetric(result);
+    applyMaintenanceEfficiencyMetric(result);
     renderOverview(result);
     renderPlayers(result);
     renderCountries(result);
@@ -677,7 +678,14 @@
       key: "deaths",
       label: "Black Death Deaths",
       numeric: true,
-      render: (c) => (typeof c.deaths === "number" ? fmtPopulation(c.deaths) : c.noDataAvailable ? "Not enough data" : "-"),
+      render: (c) =>
+        typeof c.deaths !== "number"
+          ? c.noDataAvailable
+            ? "Not enough data"
+            : "-"
+          : c.estimated
+            ? `<span title="Estimated from population change (start vs. end of outbreak) - not the game's own death tally, and can be thrown off by land gained or lost during the outbreak window.">~${fmtPopulation(c.deaths)}</span>`
+            : fmtPopulation(c.deaths),
     },
     {
       key: "popLossPct",
@@ -685,7 +693,14 @@
       numeric: true,
       heatColumn: true,
       lowerIsBetter: true,
-      render: (c) => (typeof c.popLossPct === "number" ? `${(c.popLossPct * 100).toFixed(1)}%` : c.noDataAvailable ? "Not enough data" : "-"),
+      render: (c) =>
+        typeof c.popLossPct !== "number"
+          ? c.noDataAvailable
+            ? "Not enough data"
+            : "-"
+          : c.estimated
+            ? `<span title="Estimated from population change - see Black Death Deaths column.">~${(c.popLossPct * 100).toFixed(1)}%</span>`
+            : `${(c.popLossPct * 100).toFixed(1)}%`,
     },
   ];
 
@@ -704,19 +719,9 @@
     const startYear = parseInt(bd.start, 10);
     const ongoing = !bd.end;
 
-    let summary = ongoing
-      ? `Black Death began ${bd.start} and is still ongoing as of ${result.metadata.date || "the save's date"} - showing deaths so far.`
-      : `Black Death struck from ${bd.start} to ${bd.end}.`;
-    if (bd.__capturedFromEarlierSave) {
-      summary += " Death counts recovered from an earlier save of this campaign - the game itself stopped storing this breakdown in later patches.";
-    } else if (bd.__noDataAvailable) {
-      summary += " Not enough data to show deaths per country - this patch no longer stores the breakdown, and no earlier save of this campaign has been captured yet.";
-    }
-    blackDeathSummaryEl.textContent = summary;
-
-    // Deaths come from the game's own per-country disease death tally
-    // (disease_outbreak_manager.data[].countries, attributed to whichever
-    // country owned a location at the moment of each death), NOT a
+    // Deaths PRIMARILY come from the game's own per-country disease death
+    // tally (disease_outbreak_manager.data[].countries, attributed to
+    // whichever country owned a location at the moment of each death), NOT a
     // population(start) vs. population(end) diff - that diff is polluted by
     // any land gained or lost during the outbreak window (conquest,
     // colonization, war losses), which has nothing to do with actual plague
@@ -725,18 +730,54 @@
     // docs/ARCHITECTURE.md) - reconcileBlackDeathWithBackend() below either
     // recovers it from an earlier capture of the same campaign or marks
     // __noDataAvailable, re-rendering this table once that async check
-    // resolves.
+    // resolves. Only when BOTH of those come up empty does the per-row loop
+    // below fall back to the population diff after all - clearly marked
+    // "estimated" (rendered with "~" + a tooltip caveat) so it's never
+    // confused with the real tally, but it beats showing nothing.
     const deathsByCountry = bd.deathsByCountry || {};
     const noDataAvailable = !!bd.__noDataAvailable;
+    const endYear = ongoing ? currentYear : parseInt(bd.end, 10);
     const visibleNames = new Set(visiblePlayers(result).map((p) => p.name));
     const rows = result.countries
       .filter((c) => c.countryType === "Real" && c.players && c.players.some((name) => visibleNames.has(name)))
       .map((c) => {
         const popAtStart = populationAtYear(c, startYear, currentYear);
-        const deaths = typeof deathsByCountry[c.number] === "number" ? deathsByCountry[c.number] : undefined;
+        const realDeaths = typeof deathsByCountry[c.number] === "number" ? deathsByCountry[c.number] : undefined;
+        let deaths = realDeaths;
+        let estimated = false;
+        if (typeof deaths !== "number") {
+          // Fallback for campaigns with no real per-country tally AND no
+          // earlier-save capture on record (see reconcileBlackDeathWithBackend) -
+          // historicalPopulation is a plain per-year series present in every
+          // save regardless of game version (unlike disease_outbreak_manager,
+          // which 1.3.11 removed), so start-year/end-year population is
+          // always derivable straight from THIS save with no capture step
+          // needed. Deliberately not used as the primary source (see the
+          // comment above this function) - only falls back to it when
+          // nothing better is available, and always rendered with a "~" and
+          // a tooltip caveat so it's never mistaken for the real tally.
+          const popAtEnd = populationAtYear(c, endYear, currentYear);
+          if (typeof popAtStart === "number" && typeof popAtEnd === "number") {
+            deaths = popAtStart - popAtEnd;
+            estimated = true;
+          }
+        }
         const popLossPct = typeof deaths === "number" && popAtStart > 0 ? deaths / popAtStart : undefined;
-        return { ...c, popAtStart, deaths, popLossPct, noDataAvailable };
+        return { ...c, popAtStart, deaths, popLossPct, estimated, noDataAvailable: noDataAvailable && typeof deaths !== "number" };
       });
+
+    let summary = ongoing
+      ? `Black Death began ${bd.start} and is still ongoing as of ${result.metadata.date || "the save's date"} - showing deaths so far.`
+      : `Black Death struck from ${bd.start} to ${bd.end}.`;
+    if (bd.__capturedFromEarlierSave) {
+      summary += " Death counts recovered from an earlier save of this campaign - the game itself stopped storing this breakdown in later patches.";
+    } else if (rows.some((r) => r.estimated)) {
+      summary +=
+        " This patch no longer stores the real death breakdown and no earlier save of this campaign has been captured yet, so figures marked ~ are ESTIMATED from population change instead (start vs. end of the outbreak) - less accurate than the real tally, and thrown off by any land gained or lost during the outbreak window.";
+    } else if (bd.__noDataAvailable) {
+      summary += " Not enough data to show deaths per country.";
+    }
+    blackDeathSummaryEl.textContent = summary;
 
     // Ascending (lowest Lost % first) - the least-affected country is the
     // "winner" of the outbreak, per the tab's rename.
@@ -1983,6 +2024,10 @@
     latestEconomicalBase: "Economic Base - the country's current total economic base (last entry of its historical economical base). A broader measure of the economy's size than tax base alone. Blank on older saves (pre-1.3), which don't record this.",
     buildingsValue:
       "Total ducat value of this country's flat-priced buildings (cathedrals, plantations, the HRE armory, etc.), using each building's real game-file price and level. Ordinary economic buildings (workshops, temples, guild halls, ...) are NOT included - their only game-file cost is a monthly goods upkeep rate, not a one-time purchase price, so there is no real ducat cost to count for them. This is a narrower \"special buildings value\", not a full \"everything this country built\" figure.",
+    lastMonthsBuildingMaintenance:
+      "Total gold spent maintaining ALL buildings last month (last_months_building_maintenance) - the game's own total, matching the Economy tab's \"Building Maintenance\" expense line exactly. Unlike Building Maintenance Efficiency, this is raw spend - a bigger empire with more/higher-level buildings naturally pays more in total, which isn't the same as paying inefficiently for what it has.",
+    maintenanceEfficiency:
+      "How cheaply this country maintains its buildings compared to the field, isolating market-price effects rather than raw spend (a bigger empire naturally pays more total upkeep - that's not inefficiency). For each building type, compares this country's real per-level upkeep cost against the level-weighted average per-level cost across the comparison group, then rolls every type up into one score weighted by how many levels of each type this country actually owns. Positive = cheaper than average (more efficient); negative = pricier than average. On the Players table, the comparison group is just the other visible players (AI-run countries build unevenly and would only add noise); on the Countries table, it's every real country in the save.",
     manpowerPerPop: "Manpower divided by population - how much of this country's population is available as army reinforcements, per person.",
     greatPowerRank: "This country's rank on the game's Great Power standings (lower is better) - factors in population, income, advances, stability, prestige, markets, military, and more per the game's own Great Power Score.",
     popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
@@ -2031,6 +2076,21 @@
       label: "Buildings Value",
       numeric: true,
       render: (c) => (typeof c.buildingsValue === "number" ? fmtNum(c.buildingsValue, 1) : "-"),
+    },
+    {
+      key: "lastMonthsBuildingMaintenance",
+      label: "Building Maintenance",
+      numeric: true,
+      heatColumn: true,
+      lowerIsBetter: true,
+      render: (c) => fmtNum(c.lastMonthsBuildingMaintenance, 2),
+    },
+    {
+      key: "maintenanceEfficiency",
+      label: "Building Maintenance Efficiency",
+      numeric: true,
+      heatColumn: true,
+      render: (c) => (typeof c.maintenanceEfficiency === "number" ? `${c.maintenanceEfficiency >= 0 ? "+" : ""}${fmtPercent(c.maintenanceEfficiency, 1)}` : "-"),
     },
     { key: "profit", label: "Profit", numeric: true, render: (c) => fmtNum(c.profit, 1) },
     {
@@ -2271,6 +2331,34 @@
     { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (p) => fmtNum(p.country && p.country.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (p) => fmtNum(p.country && p.country.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (p) => fmtNum(p.country && p.country.latestEconomicalBase, 1) },
+    {
+      key: "buildingsValue",
+      label: "Buildings Value",
+      numeric: true,
+      render: (p) => (p.country && typeof p.country.buildingsValue === "number" ? fmtNum(p.country.buildingsValue, 1) : "-"),
+    },
+    {
+      key: "lastMonthsBuildingMaintenance",
+      label: "Building Maintenance",
+      numeric: true,
+      heatColumn: true,
+      lowerIsBetter: true,
+      render: (p) => fmtNum(p.country && p.country.lastMonthsBuildingMaintenance, 2),
+    },
+    {
+      key: "maintenanceEfficiency",
+      label: "Building Maintenance Efficiency",
+      numeric: true,
+      heatColumn: true,
+      // Relative to the OTHER VISIBLE PLAYERS, not the whole world - see
+      // computeMaintenanceEfficiencyForPool()/drawPlayerTable() below. AI
+      // countries build/maintain their nations badly, so a world-wide
+      // benchmark (used on the Countries tab) would just be noise here.
+      render: (p) =>
+        p.country && typeof p.country.maintenanceEfficiencyVsPlayers === "number"
+          ? `${p.country.maintenanceEfficiencyVsPlayers >= 0 ? "+" : ""}${fmtPercent(p.country.maintenanceEfficiencyVsPlayers, 1)}`
+          : "-",
+    },
     { key: "profit", label: "Profit", numeric: true, render: (p) => fmtNum(p.country && p.country.profit, 1) },
     {
       key: "efficiency",
@@ -2350,6 +2438,8 @@
     "taxIncome",
     "latestTaxBase",
     "latestEconomicalBase",
+    "buildingsValue",
+    "lastMonthsBuildingMaintenance",
     "profit",
     "efficiency",
     "population",
@@ -2389,6 +2479,8 @@
       "latestTaxBase",
       "latestEconomicalBase",
       "buildingsValue",
+      "lastMonthsBuildingMaintenance",
+      "maintenanceEfficiency",
       "profit",
       "efficiency",
       "lastMonthsArmyMaintenance",
@@ -2432,7 +2524,24 @@
 
   const PLAYER_METRIC_GROUPS = {
     key: ["name", "tag", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
-    economy: ["name", "tag", "gold", "lastMonthGoldIncome", "tradeIncome", "taxIncome", "latestTaxBase", "latestEconomicalBase", "profit", "efficiency", "incomePerPop", "taxBasePerPop", "__hide"],
+    economy: [
+      "name",
+      "tag",
+      "gold",
+      "lastMonthGoldIncome",
+      "tradeIncome",
+      "taxIncome",
+      "latestTaxBase",
+      "latestEconomicalBase",
+      "buildingsValue",
+      "lastMonthsBuildingMaintenance",
+      "maintenanceEfficiency",
+      "profit",
+      "efficiency",
+      "incomePerPop",
+      "taxBasePerPop",
+      "__hide",
+    ],
     military: [
       "name",
       "tag",
@@ -2488,6 +2597,10 @@
   function sortValue(row, col) {
     if (!col) return undefined;
     if (col.key === "tag" && row.country) return row.country.tag;
+    // Player-relative, not the world-relative field COUNTRY_COLUMNS/
+    // PLAYER_COUNTRY_SORT_KEYS' generic lookup would otherwise read - see
+    // computeMaintenanceEfficiencyForPool()/drawPlayerTable().
+    if (col.key === "maintenanceEfficiency" && row.country) return row.country.maintenanceEfficiencyVsPlayers;
     if (PLAYER_COUNTRY_SORT_KEYS.includes(col.key) && row.country) {
       return row.country[col.key];
     }
@@ -2517,6 +2630,30 @@
     if (col.key === "efficiency" && !relativeEfficiencyHeat) {
       if (typeof value !== "number") return undefined;
       return value <= 0 ? 0 : Math.min(1, value);
+    }
+    // maintenanceEfficiency: unlike plain min/max below, 0% (exactly the
+    // comparison group's average) is a fixed, meaningful anchor that should
+    // always land on yellow (score 0.5) - but unlike the flat "efficiency"
+    // treatment above, the RED and GREEN ends are still scaled to whatever
+    // the worst/best value actually present is, not a fixed ±100% cap. A
+    // fixed cap made sense for Profit Efficiency (100% - spending nothing -
+    // is a real, reachable ceiling) but not here: this metric realistically
+    // never gets anywhere near +100% (that would mean paying nothing at
+    // all for upkeep), so anchoring green at 100% left every real value
+    // (usually single-digit to low-teens %) looking like the same dim
+    // brownish-red regardless of how good or bad it actually was. This
+    // keeps the "0 is always yellow, below is always some shade of red,
+    // above is always some shade of green" property while still using the
+    // full color range for whatever spread of values is actually on screen.
+    if (col.key === "maintenanceEfficiency") {
+      if (typeof value !== "number") return undefined;
+      const values = rows.map((r) => metricValue(r, col)).filter((v) => typeof v === "number");
+      if (value >= 0) {
+        const maxV = values.length ? Math.max(...values) : 0;
+        return maxV > 0 ? 0.5 + 0.5 * Math.min(1, value / maxV) : 0.5;
+      }
+      const minV = values.length ? Math.min(...values) : 0;
+      return minV < 0 ? 0.5 * Math.max(0, (value - minV) / (0 - minV)) : 0;
     }
     const values = rows.map((r) => metricValue(r, col)).filter((v) => typeof v === "number");
     const min = values.length ? Math.min(...values) : undefined;
@@ -2624,6 +2761,7 @@
     }
 
     const visible = visiblePlayers(result);
+    applyMaintenanceEfficiencyVsPlayers(result, visible);
     playerCountEl.textContent = visible.length;
 
     const hiddenCount = result.players.length - visible.length;
@@ -2748,6 +2886,107 @@
         renderCountries(result);
         renderPlayers(result);
       });
+    }
+  }
+
+  // "Maintenance Efficiency" - how cheaply a country maintains its buildings
+  // relative to everyone else, isolating market-price effects rather than
+  // just raw spend (a bigger empire naturally pays more upkeep in total -
+  // that's not "inefficient"). Unlike Buildings Value, this needs no static
+  // game-file cost table at all: a building_manager record's own `upkeep`
+  // field (confirmed against a real save, cross-checked against the game's
+  // own "Maintenance Cost for X" tooltip breakdown to the ~1% level) IS
+  // already the real, current, per-instance ducat cost - it already bakes
+  // in that specific location's live market prices for whatever goods the
+  // building consumes, so there's no need to separately resolve a building
+  // type's goods recipe or a market's per-good price from the save/game
+  // files; the game has already done that math for us.
+  //
+  // Method: for every building TYPE, compute the pool's rate (total upkeep
+  // ÷ total levels, across every country IN THE COMPARISON POOL that owns
+  // any) - a level-weighted average, so a handful of tiny countries with
+  // one level-1 building don't count the same as an empire with hundreds
+  // of levels. For each country, compare its OWN actual upkeep for a type
+  // against what it would have paid at that pool rate for the same
+  // levels ("expected cost"), then roll every type up into one ratio
+  // weighted by the country's own levels in each type (so the score
+  // reflects the buildings a country actually has a lot of, not diluted by
+  // a single obscure building type it happens to own one of).
+  //
+  // `poolCountryNumbers` decides both who counts toward the benchmark AND
+  // whose own score gets computed - the whole-world benchmark
+  // (applyMaintenanceEfficiencyMetric, every real territorial country) and
+  // the players-only benchmark (computeMaintenanceEfficiencyForPlayers,
+  // called fresh from drawPlayerTable() since the visible player set can
+  // change without a re-parse) are the same math over a different pool.
+  // AI-run countries build/maintain their nations badly and unevenly, so
+  // mixing them into a small players-only comparison would mostly just add
+  // noise to the benchmark rather than a meaningful "vs. the field" signal.
+  function computeMaintenanceEfficiencyByCountry(result, poolCountryNumbers) {
+    const efficiencyByCountry = new Map();
+    if (!Array.isArray(result.buildings)) return efficiencyByCountry;
+
+    const globalByType = new Map(); // type -> { upkeepSum, levelSum }
+    const countryByType = new Map(); // countryNumber -> Map(type -> { upkeepSum, levelSum })
+
+    for (const b of result.buildings) {
+      if (typeof b.owner !== "number" || !poolCountryNumbers.has(b.owner)) continue;
+      if (!b.type || !(b.level > 0) || typeof b.upkeep !== "number") continue;
+
+      const g = globalByType.get(b.type) || { upkeepSum: 0, levelSum: 0 };
+      g.upkeepSum += b.upkeep;
+      g.levelSum += b.level;
+      globalByType.set(b.type, g);
+
+      if (!countryByType.has(b.owner)) countryByType.set(b.owner, new Map());
+      const byType = countryByType.get(b.owner);
+      const c = byType.get(b.type) || { upkeepSum: 0, levelSum: 0 };
+      c.upkeepSum += b.upkeep;
+      c.levelSum += b.level;
+      byType.set(b.type, c);
+    }
+
+    const globalRatePerType = new Map();
+    for (const [type, g] of globalByType) {
+      if (g.levelSum > 0) globalRatePerType.set(type, g.upkeepSum / g.levelSum);
+    }
+
+    for (const [countryNumber, byType] of countryByType) {
+      let actualCost = 0;
+      let expectedCost = 0;
+      for (const [type, c] of byType) {
+        const rate = globalRatePerType.get(type);
+        if (!(rate > 0)) continue; // no valid global benchmark for this type (shouldn't happen - it's built from the same data)
+        actualCost += c.upkeepSum;
+        expectedCost += c.levelSum * rate;
+      }
+      if (expectedCost > 0) efficiencyByCountry.set(countryNumber, 1 - actualCost / expectedCost);
+    }
+    return efficiencyByCountry;
+  }
+
+  function applyMaintenanceEfficiencyMetric(result) {
+    const pool = new Set(result.countries.filter(isRealTerritorialCountry).map((c) => c.number));
+    const byCountry = computeMaintenanceEfficiencyByCountry(result, pool);
+    result.countries.forEach((c) => {
+      c.maintenanceEfficiency = byCountry.get(c.number);
+    });
+  }
+
+  // Players-table-only variant of the above, benchmarked against just the
+  // OTHER VISIBLE PLAYERS rather than the whole world (see the comment on
+  // computeMaintenanceEfficiencyByCountry) - recomputed on every
+  // drawPlayerTable() call rather than once at parse time, since the
+  // visible set changes whenever a player is hidden/shown without a
+  // re-parse. Mutates the shared country objects (`maintenanceEfficiencyVsPlayers`,
+  // distinct from the world-relative `maintenanceEfficiency` field the
+  // Countries tab reads from the SAME objects - see [[buildings_value_metric]]'s
+  // "result.players[i].country IS the same object reference" note).
+  function applyMaintenanceEfficiencyVsPlayers(result, visiblePlayerRows) {
+    const pool = new Set(visiblePlayerRows.filter((p) => p.country).map((p) => p.country.number));
+    const byCountry = computeMaintenanceEfficiencyByCountry(result, pool);
+    for (const p of visiblePlayerRows) {
+      if (p.country) p.country.maintenanceEfficiencyVsPlayers = byCountry.get(p.country.number);
     }
   }
 

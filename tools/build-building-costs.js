@@ -5,37 +5,52 @@
 // {type, level, location, owner, ...}, no cost of any kind stored in the
 // save itself - confirmed by dumping raw building records directly).
 //
-// There is NO single flat "cost" field per building type in the game files,
-// and only ONE of the two candidate mechanisms found actually represents a
-// one-time ducat cost (confirmed with the user, who plays the game - the
-// other looked plausible from the files alone but is a real trap):
-//   - `building_types/*.txt`'s `price = <name>` - a small set of mostly
-//     special/estate/event/unique buildings (~20 of them) that reference a
-//     NAMED entry in `prices/*.txt`, giving flat currency amounts (gold,
-//     but also religious_influence/stability/legitimacy/etc. for a few
-//     non-economic ones - only the `gold` component counts toward a ducat
-//     value here). A referenced amount can itself be a scripted value name
-//     (e.g. `gold = build_price_age_of_tradition`) needing one more lookup
-//     into `script_values/default_values.txt`.
-//   - `building_types/*.txt`'s `construction_demand = <name>` (a named
-//     `goods_demand/*.txt` goods basket) is NOT a one-time construction
-//     cost despite the filename (`goods_demand/building_construction_costs.txt`)
-//     and the `category = building_construction` tag on every entry - it's
-//     a MONTHLY UPKEEP rate. Confirmed by the user: you don't pay goods as
-//     the actual purchase price. (The math even looked wrong before this
-//     correction: a temple's recipe priced out to ~1.35 ducats total,
-//     absurdly cheap for a real building next to `cathedral`'s 400 flat
-//     gold - multiplying by build_time to explain the gap was the wrong fix;
-//     the right fix is that this number was never a purchase price at all.)
-//     These ~427 ordinary buildings (workshops, temples, guild halls -
-//     the bulk of what most nations build) are therefore EXCLUDED from this
-//     value table entirely (baseCost 0, source "excluded_upkeep_only") -
-//     there is no discoverable one-time ducat cost for them in the game
-//     files, so counting them at all would just be a guess. This makes
-//     "buildings value" a narrower metric than "every building a nation
-//     owns" - only nations holding priced special buildings (cathedrals,
-//     hippodromes, estate buildings, ...) show a nonzero value. That's a
-//     real, known scope limit, not a bug - see docs/ARCHITECTURE.md.
+// There is NO single flat "cost" field per building type in the game files.
+// Confirmed (with the user, who plays the game, plus real in-game tooltip
+// screenshots) that ordinary building costs are resolved through THREE
+// different mechanisms depending on the building:
+//   1. `building_types/*.txt`'s `price = <name>` - a small set (~17) of
+//      mostly special/estate/event/unique buildings that reference a NAMED
+//      entry in `prices/*.txt`, giving flat currency amounts (gold, but also
+//      religious_influence/stability/legitimacy/etc. for a few non-economic
+//      ones - only the `gold` component counts toward a ducat value here).
+//      A referenced amount can itself be a scripted value name (e.g.
+//      `gold = build_price_age_of_tradition`) needing one more lookup into
+//      `script_values/default_values.txt`.
+//   2. Every OTHER building's real one-time "Market Building Costs" (the
+//      flat number shown in the in-game build tooltip, confirmed via 7 real
+//      screenshots against 7 different buildings) is an IMPLICIT default
+//      selected by the building's age tier + its `expensive = yes/no` flag:
+//      `prices/01_buildings.txt` defines `p_building_age_N_*` (50/100/200/
+//      400/800/1200 gold for ages 1-6) and `p_expensive_building_age_N_*`
+//      (200/400/800/1600/3200/5000) - literally `p_building_` or
+//      `p_expensive_building_` + the age key string. A building's age is
+//      whatever `advances/*.txt` entry has `unlock_building = <this
+//      building>` and `age = age_N_...`; if no advance unlocks it at all,
+//      it's available from game start = age_1_traditions. Verified exactly
+//      (all 7/7 match): marketplace/granary/mason (no unlock advance, not
+//      expensive) = 50g; armory/dock/gun_smith (age_2_renaissance) = 100g;
+//      printing_press_shop (age_3_discovery) = 200g. This is now resolved
+//      the same way in `buildBuildingCosts()` below (source: "age_tier").
+//      One heuristic risk: a building with no unlock-advance trace defaults
+//      to age_1 - correctly excluded from this default when it's gated
+//      `allow`/`country_potential`/`potential = { always = no }` (true event/
+//      decision-granted wonders like versailles/zwinger/wisselbank, which
+//      are never normally constructable and so have no real construction
+//      cost at all), but a handful of oddball buildings unlocked through
+//      some OTHER non-advance mechanism (not yet found) could still land on
+//      an incorrect age_1 default. Not fully audited - see
+//      docs/BUILDINGS_VALUE_METRIC_TODO.md if a specific building's value
+//      looks wrong.
+//   3. `construction_demand = <name>` (a named `goods_demand/*.txt` goods
+//      basket) is NOT a one-time construction cost despite the filename
+//      (`goods_demand/building_construction_costs.txt`) and the
+//      `category = building_construction` tag on every entry - it's a
+//      MONTHLY UPKEEP rate paid during construction, confirmed by the user
+//      and separately confirmed by the in-game tooltip showing it under
+//      "Requirements ... to progress" (a per-month goods draw), distinct
+//      from the flat "Market Building Costs" number. Never treat this as a
+//      cost.
 //
 // `increase_per_level_cost` (only set on a handful of building types, e.g.
 // `construction_center = 0.5`; unset = 0, i.e. no compounding, confirmed via
@@ -116,13 +131,36 @@ function resolveGold(priceEntry, scriptValues) {
   return 0; // non-gold-priced (religious_influence/stability/etc.) or unresolvable
 }
 
+// True if a trigger block explicitly says `always = no` - the game's own
+// signal that a building is never normally constructable (event/decision-
+// granted wonders like versailles, zwinger, wisselbank), so it has no real
+// construction cost to infer.
+function isAlwaysNoGated(block) {
+  return !!block && typeof block === "object" && (block.always === false || block.always === "no");
+}
+
+// buildingKey -> age key string (e.g. "age_2_renaissance"), from whichever
+// advances/*.txt entry has `unlock_building = <buildingKey>` and an `age`.
+function buildAgeByBuilding(root) {
+  const advances = parseAllEntitiesInDir(path.join(root, "game", "in_game", "common", "advances"));
+  const ageByBuilding = {};
+  for (const def of Object.values(advances)) {
+    if (def && typeof def === "object" && typeof def.unlock_building === "string" && typeof def.age === "string") {
+      ageByBuilding[def.unlock_building] = def.age;
+    }
+  }
+  return ageByBuilding;
+}
+
 function buildBuildingCosts(root) {
   const priceByKey = parseAllEntitiesInDir(path.join(root, "game", "in_game", "common", "prices"));
   const scriptValues = parseScriptValues(path.join(root, "game", "main_menu", "common", "script_values", "default_values.txt"));
   const buildingEntities = parseAllEntitiesInDir(path.join(root, "game", "in_game", "common", "building_types"));
+  const ageByBuilding = buildAgeByBuilding(root);
 
   const costs = {};
   let unresolvedPrice = 0;
+  let unresolvedAgeTier = 0;
   for (const [buildingKey, def] of Object.entries(buildingEntities)) {
     if (!def || typeof def !== "object" || Array.isArray(def)) continue;
     let baseCost = 0;
@@ -136,6 +174,21 @@ function buildBuildingCosts(root) {
         unresolvedPrice++;
         source = "unresolved_price";
       }
+    } else {
+      const isExpensive = def.expensive === true;
+      const gated = isAlwaysNoGated(def.allow) || isAlwaysNoGated(def.country_potential) || isAlwaysNoGated(def.potential);
+      const ageKey = ageByBuilding[buildingKey] || (gated ? null : "age_1_traditions");
+      if (ageKey) {
+        const priceKeyName = (isExpensive ? "p_expensive_building_" : "p_building_") + ageKey;
+        const priceEntry = priceByKey[priceKeyName];
+        if (priceEntry) {
+          baseCost = resolveGold(priceEntry, scriptValues);
+          source = "age_tier";
+        } else {
+          unresolvedAgeTier++;
+          source = "unresolved_age_tier";
+        }
+      }
     }
     const increasePerLevelCost = typeof def.increase_per_level_cost === "number" ? def.increase_per_level_cost : 0;
     costs[buildingKey] = {
@@ -147,7 +200,8 @@ function buildBuildingCosts(root) {
   }
 
   const priced = Object.values(costs).filter((c) => c.source === "price").length;
-  return { costs, stats: { buildingTypes: Object.keys(costs).length, priced, unresolvedPrice } };
+  const ageTiered = Object.values(costs).filter((c) => c.source === "age_tier").length;
+  return { costs, stats: { buildingTypes: Object.keys(costs).length, priced, ageTiered, unresolvedPrice, unresolvedAgeTier } };
 }
 
 function main() {
@@ -168,8 +222,11 @@ function main() {
   fs.writeFileSync(outPath, JSON.stringify(costs));
 
   console.log(`Wrote ${outPath}`);
-  console.log(`Building types: ${stats.buildingTypes} (${stats.priced} priced, rest excluded as upkeep-only/free)`);
+  console.log(
+    `Building types: ${stats.buildingTypes} (${stats.priced} explicit price, ${stats.ageTiered} age-tier default, rest excluded as unbuildable/upkeep-only)`
+  );
   if (stats.unresolvedPrice) console.warn(`  ${stats.unresolvedPrice} building(s) reference a price key not found in prices/*.txt`);
+  if (stats.unresolvedAgeTier) console.warn(`  ${stats.unresolvedAgeTier} building(s) reference an age-tier price key not found in prices/*.txt`);
 }
 
 if (require.main === module) main();

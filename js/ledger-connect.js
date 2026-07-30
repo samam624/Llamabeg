@@ -181,5 +181,35 @@
     }
   }
 
-  root.LedgerConnect = { supported, saveHandle, loadHandle, clearHandle, verifyPermission, findLatestCampaign, findCampaignByKey, readCampaignLedger, readHiddenPlayers };
+  // Mirrors readHiddenPlayers above (same file, same sharing model) - see
+  // llama-dashboard/main.js's player-country-overrides.json comment for why
+  // this exists: a multiplayer rehost can leave literally no reliable
+  // recency signal anywhere in the save for automatic player<->country
+  // detection to resolve, so this is a manual, one-time correction made
+  // once in the desktop dashboard's "Fix players" dialog and shared here so
+  // this connected-folder web view agrees with it too.
+  async function readPlayerOverrides(campaignDirHandle) {
+    const fileHandle = await campaignDirHandle.getFileHandle("player-country-overrides.json").catch(() => null);
+    if (!fileHandle) return new Map();
+    try {
+      const file = await fileHandle.getFile();
+      const raw = JSON.parse(await file.text());
+      return new Map(Object.entries(raw));
+    } catch (err) {
+      return new Map();
+    }
+  }
+
+  root.LedgerConnect = {
+    supported,
+    saveHandle,
+    loadHandle,
+    clearHandle,
+    verifyPermission,
+    findLatestCampaign,
+    findCampaignByKey,
+    readCampaignLedger,
+    readHiddenPlayers,
+    readPlayerOverrides,
+  };
 })(typeof self !== "undefined" ? self : this);
