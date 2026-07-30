@@ -172,5 +172,55 @@
     }
   }
 
-  root.ShareStore = { isConfigured, upload, fetch: fetchShared, fetchCampaignLedger, uploadCampaignLedger, BUCKET };
+  // Persist a Black Death per-country death breakdown the moment a save
+  // provides one, keyed by the save's own playthrough_id + the outbreak's
+  // own identity number (see supabase/migrations/20260730080000_
+  // eu5_black_death_captures.sql - this data is confirmed unrecoverable from
+  // any 1.3.11+ save on its own, see docs/ARCHITECTURE.md). Best-effort by
+  // design: callers fire this and ignore failures, since it's purely an
+  // opportunistic cache write, never something the current save's own
+  // rendering depends on.
+  async function captureBlackDeath(playthroughId, identity, deathsByCountry, startDate, endDate, gameVersion) {
+    if (!isConfigured() || !playthroughId || typeof identity !== "number" || !deathsByCountry) return;
+    await callLedgerRpc("eu5_capture_black_death", {
+      p_playthrough_id: String(playthroughId),
+      p_outbreak_identity: identity,
+      p_deaths_by_country: deathsByCountry,
+      p_start_date: startDate || null,
+      p_end_date: endDate || null,
+      p_game_version: gameVersion || null,
+    });
+  }
+
+  // Look up a previously-captured breakdown for a save that no longer
+  // carries the raw data itself. Returns null if unconfigured, never
+  // captured, or the request fails - callers treat null as "no capture on
+  // record," distinct from "the Black Death hasn't happened in this save."
+  async function fetchBlackDeathCapture(playthroughId, identity) {
+    if (!isConfigured() || !playthroughId || typeof identity !== "number") return null;
+    const c = config();
+    const url =
+      `${c.supabaseUrl}/rest/v1/eu5_black_death_captures` +
+      `?playthrough_id=eq.${encodeURIComponent(String(playthroughId))}` +
+      `&outbreak_identity=eq.${identity}` +
+      `&select=deaths_by_country,captured_at&limit=1`;
+    const res = await fetch(url, {
+      headers: { apikey: c.supabaseAnonKey, Authorization: `Bearer ${c.supabaseAnonKey}` },
+    }).catch(() => null);
+    if (!res || !res.ok) return null;
+    const rows = await res.json().catch(() => null);
+    if (!Array.isArray(rows) || !rows.length || !rows[0].deaths_by_country) return null;
+    return rows[0].deaths_by_country;
+  }
+
+  root.ShareStore = {
+    isConfigured,
+    upload,
+    fetch: fetchShared,
+    fetchCampaignLedger,
+    uploadCampaignLedger,
+    captureBlackDeath,
+    fetchBlackDeathCapture,
+    BUCKET,
+  };
 })(typeof self !== "undefined" ? self : this);

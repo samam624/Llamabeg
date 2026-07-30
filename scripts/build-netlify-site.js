@@ -51,6 +51,20 @@ if (mapDataShipped < MAP_DATA_FILES.length) {
   console.warn(`map_data/ not fully set up locally (${mapDataShipped}/${MAP_DATA_FILES.length} files found) - Map tab/Home backdrop won't work in this build. See root README's "Map setup".`);
 }
 
+// Same treatment as map_data/ above: game_data/building-costs.json is
+// DERIVED, data-only numbers (tools/build-building-costs.js's output from
+// the player's own local install), never Paradox's original text files, so
+// it's safe to ship even though the whole game_data/ directory is
+// gitignored - see that tool's own header comment for how it's generated.
+// Optional locally, same as map_data - a checkout without it still builds,
+// just without the Buildings Value economic metric.
+const gameDataBuildingCostsSrc = path.join(root, "game_data", "building-costs.json");
+if (fs.existsSync(gameDataBuildingCostsSrc)) {
+  copyFile(path.join("game_data", "building-costs.json"));
+} else {
+  console.warn(`game_data/building-costs.json not found - Buildings Value metric won't work in this build. Run: node tools/build-building-costs.js`);
+}
+
 // Public shared-save backend config (see config.example.js / js/share-store.js).
 // Generated fresh from the Netlify build env vars - NOT copied from any local
 // config.js, so a developer's local creds can never leak into a deploy. If the

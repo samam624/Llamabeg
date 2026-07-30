@@ -82,6 +82,13 @@
   // excludedPlayersForScoring() below for how it's merged with the manual
   // Hide list.
   let sharedHiddenPlayers = new Map();
+  // Same sharing model as sharedHiddenPlayers above, read-only here - see
+  // llama-dashboard/main.js's player-country-overrides.json comment for why
+  // this exists: a multiplayer rehost can leave literally no reliable
+  // recency signal anywhere in the save for automatic player<->country
+  // detection to resolve, so a manual, one-time correction made once in the
+  // desktop dashboard's "Fix players" dialog is shared here too.
+  let sharedPlayerOverrides = new Map();
   let ledgerPollTimer = null;
   // The filename of whatever save is currently loaded - autosave_<uuid>.eu5
   // names carry the recorder's own campaign key, so this is what lets the
@@ -102,7 +109,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.7";
+  const ASSET_VERSION = "v1.3.8";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -448,6 +455,7 @@
     }
 
     latestResult = result;
+    applyPlayerOverridesToResult(latestResult, sharedPlayerOverrides);
     // Temporary debug hook (2026-07-17, Tax Income rollout) - exposes the
     // parsed result on window so a live-game issue can be diagnosed from
     // the browser console without the save ever leaving the machine. Safe
@@ -504,11 +512,13 @@
       c.armyTotalK = bucket.levy + bucket.regular + bucket.mercenary;
     });
     computeCountryLocationMetrics(result);
+    applyBuildingsValueMetric(result);
     renderOverview(result);
     renderPlayers(result);
     renderCountries(result);
     renderTrends(result);
     renderBlackDeath(result);
+    reconcileBlackDeathWithBackend(result);
 
     // A new save means whatever ledger was loaded (if any) belonged to a
     // DIFFERENT save - clear it before the immediate render below so a
@@ -546,6 +556,26 @@
     }
 
     updateShareUrl();
+  }
+
+  // Mirrors llama-dashboard/main.js's applyPlayerOverrides - see
+  // sharedPlayerOverrides' comment above for why this exists. Mutates
+  // country.players directly (each result.players[i].country IS the same
+  // object reference, per collapsePlayerSessions in js/clausewitz.js) and
+  // rebuilds the specific result.players entries for any overridden
+  // country, so a swap between two countries clears BOTH old entries and
+  // adds both corrected ones rather than leaving a stale duplicate.
+  function applyPlayerOverridesToResult(result, overrides) {
+    if (!result || !overrides || !overrides.size) return;
+    const countriesByNumber = result.countriesByNumber || new Map((result.countries || []).map((c) => [c.number, c]));
+    for (const [numStr, playerName] of overrides) {
+      const number = Number(numStr);
+      const country = countriesByNumber.get(number);
+      if (!country) continue;
+      country.players = playerName ? [playerName] : [];
+      result.players = (result.players || []).filter((p) => p.countryNumber !== number);
+      if (playerName) result.players.push({ name: playerName, countryNumber: number, country });
+    }
   }
 
   function visiblePlayers(result) {
@@ -643,14 +673,19 @@
     },
     { key: "playerNames", label: "Player(s)", render: (c) => escapeHtml((c.players || []).join(", ")) },
     { key: "popAtStart", label: "Population (start)", numeric: true, render: (c) => fmtPopulation(c.popAtStart) },
-    { key: "deaths", label: "Black Death Deaths", numeric: true, render: (c) => (typeof c.deaths === "number" ? fmtPopulation(c.deaths) : "-") },
+    {
+      key: "deaths",
+      label: "Black Death Deaths",
+      numeric: true,
+      render: (c) => (typeof c.deaths === "number" ? fmtPopulation(c.deaths) : c.noDataAvailable ? "Not enough data" : "-"),
+    },
     {
       key: "popLossPct",
       label: "Lost %",
       numeric: true,
       heatColumn: true,
       lowerIsBetter: true,
-      render: (c) => (typeof c.popLossPct === "number" ? `${(c.popLossPct * 100).toFixed(1)}%` : "-"),
+      render: (c) => (typeof c.popLossPct === "number" ? `${(c.popLossPct * 100).toFixed(1)}%` : c.noDataAvailable ? "Not enough data" : "-"),
     },
   ];
 
@@ -669,9 +704,15 @@
     const startYear = parseInt(bd.start, 10);
     const ongoing = !bd.end;
 
-    blackDeathSummaryEl.textContent = ongoing
+    let summary = ongoing
       ? `Black Death began ${bd.start} and is still ongoing as of ${result.metadata.date || "the save's date"} - showing deaths so far.`
       : `Black Death struck from ${bd.start} to ${bd.end}.`;
+    if (bd.__capturedFromEarlierSave) {
+      summary += " Death counts recovered from an earlier save of this campaign - the game itself stopped storing this breakdown in later patches.";
+    } else if (bd.__noDataAvailable) {
+      summary += " Not enough data to show deaths per country - this patch no longer stores the breakdown, and no earlier save of this campaign has been captured yet.";
+    }
+    blackDeathSummaryEl.textContent = summary;
 
     // Deaths come from the game's own per-country disease death tally
     // (disease_outbreak_manager.data[].countries, attributed to whichever
@@ -680,7 +721,13 @@
     // any land gained or lost during the outbreak window (conquest,
     // colonization, war losses), which has nothing to do with actual plague
     // deaths. See js/clausewitz.js's parseDiseaseOutbreakManagerSection.
+    // On a 1.3.11+ save this is confirmed gone from the file itself (see
+    // docs/ARCHITECTURE.md) - reconcileBlackDeathWithBackend() below either
+    // recovers it from an earlier capture of the same campaign or marks
+    // __noDataAvailable, re-rendering this table once that async check
+    // resolves.
     const deathsByCountry = bd.deathsByCountry || {};
+    const noDataAvailable = !!bd.__noDataAvailable;
     const visibleNames = new Set(visiblePlayers(result).map((p) => p.name));
     const rows = result.countries
       .filter((c) => c.countryType === "Real" && c.players && c.players.some((name) => visibleNames.has(name)))
@@ -688,12 +735,47 @@
         const popAtStart = populationAtYear(c, startYear, currentYear);
         const deaths = typeof deathsByCountry[c.number] === "number" ? deathsByCountry[c.number] : undefined;
         const popLossPct = typeof deaths === "number" && popAtStart > 0 ? deaths / popAtStart : undefined;
-        return { ...c, popAtStart, deaths, popLossPct };
+        return { ...c, popAtStart, deaths, popLossPct, noDataAvailable };
       });
 
     // Ascending (lowest Lost % first) - the least-affected country is the
     // "winner" of the outbreak, per the tab's rename.
     renderSortableTable(blackDeathTableEl, rows, BLACK_DEATH_COLUMNS, { defaultSortKey: "popLossPct", defaultSortDir: 1, colorKeyMetrics: true });
+  }
+
+  // Game patch 1.3.11 stopped storing the per-country Black Death death
+  // breakdown in the save at all - confirmed unrecoverable from the save on
+  // its own (see docs/ARCHITECTURE.md's "Black Death analyzer" section,
+  // 2026-07-30 updates). Since a campaign's outbreak has one fixed start/end
+  // and its death toll never changes once the outbreak ends, this opportunistically
+  // persists deathsByCountry the moment ANY save provides it (keyed by the
+  // save's own playthrough_id + the outbreak's own identity number - both
+  // already in the file, no filename parsing needed), so a LATER save of the
+  // same campaign that's lost the raw data can look the total up instead.
+  // Runs after the initial (possibly data-less) renderBlackDeath() call and
+  // re-renders once the async lookup/capture resolves - fully best-effort,
+  // never blocks or affects any other rendering.
+  async function reconcileBlackDeathWithBackend(result) {
+    const bd = result.blackDeath;
+    if (!bd || !bd.start || typeof bd.identity !== "number") return;
+    if (typeof ShareStore === "undefined" || !ShareStore.isConfigured()) return;
+    const playthroughId = result.metadata && result.metadata.playthrough_id;
+    if (!playthroughId) return;
+
+    if (bd.deathsByCountry) {
+      ShareStore.captureBlackDeath(playthroughId, bd.identity, bd.deathsByCountry, bd.start, bd.end, result.metadata.version).catch(() => {});
+      return;
+    }
+
+    const captured = await ShareStore.fetchBlackDeathCapture(playthroughId, bd.identity).catch(() => null);
+    if (result.blackDeath !== bd) return; // a different save loaded while this was in flight
+    if (captured) {
+      bd.deathsByCountry = captured;
+      bd.__capturedFromEarlierSave = true;
+    } else {
+      bd.__noDataAvailable = true;
+    }
+    if (latestResult === result) renderBlackDeath(result);
   }
 
   // --- Llama score (js/llama-score.js) ---
@@ -1493,15 +1575,26 @@
     llamaEventsLedger = ledger.events;
     ledgerConnection = { dataDirHandle, campaignKey: best.campaignKey, lastModified: ledger.lastModified };
     sharedHiddenPlayers = await LedgerConnect.readHiddenPlayers(best.dirHandle).catch(() => new Map());
+    sharedPlayerOverrides = await LedgerConnect.readPlayerOverrides(best.dirHandle).catch(() => new Map());
+    // Re-apply to whatever save is ALREADY loaded too (not just the next one
+    // that loads after this) - a "Fix players" correction made in the
+    // desktop dashboard while this page is already open should show up on
+    // the next poll tick without needing a manual re-upload.
+    if (latestResult) applyPlayerOverridesToResult(latestResult, sharedPlayerOverrides);
   }
 
-  // autosave_<uuid>(.eu5 / _1.eu5 / _2.eu5 / ...) - same pattern
-  // llama-log-machine.js's campaignKeyFromFile() uses to name
-  // data/campaigns/<uuid>/, so a save's own filename is enough to find its
-  // matching recorder output with no manual file picking at all.
+  // Matches the campaign UUID anywhere in the filename, not just an
+  // "autosave_" prefix - same fix as llama-log-machine.js's
+  // campaignKeyFromFile() (that one was the original; this copy had the
+  // same bug independently). A manually-named multiplayer save (Paradox's
+  // own "save as" convention, e.g. "MP_<tag>_<date>_<uuid>.eu5") never
+  // starts with "autosave_", so the old prefix-only match silently failed
+  // to auto-link it to its recorder ledger folder at all - confirmed on a
+  // real campaign's actual end-of-session save.
+  const CAMPAIGN_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
   function campaignKeyFromFilename(name) {
-    const m = String(name || "").match(/^autosave_(.+?)(?:_\d+)?\.eu5$/i);
-    return m ? m[1] : null;
+    const m = String(name || "").match(CAMPAIGN_UUID_PATTERN);
+    return m ? m[0] : null;
   }
 
   async function connectToDataDir(dataDirHandle) {
@@ -1888,6 +1981,8 @@
     taxBasePerPop: "Latest tax base value divided by population - how much taxable value this country generates per person.",
     latestTaxBase: "Base Tax - the country's current total tax base (from the last entry of its historical tax base, which is always \"now\"). The taxable value the crown draws its tax income from.",
     latestEconomicalBase: "Economic Base - the country's current total economic base (last entry of its historical economical base). A broader measure of the economy's size than tax base alone. Blank on older saves (pre-1.3), which don't record this.",
+    buildingsValue:
+      "Total ducat value of this country's flat-priced buildings (cathedrals, plantations, the HRE armory, etc.), using each building's real game-file price and level. Ordinary economic buildings (workshops, temples, guild halls, ...) are NOT included - their only game-file cost is a monthly goods upkeep rate, not a one-time purchase price, so there is no real ducat cost to count for them. This is a narrower \"special buildings value\", not a full \"everything this country built\" figure.",
     manpowerPerPop: "Manpower divided by population - how much of this country's population is available as army reinforcements, per person.",
     greatPowerRank: "This country's rank on the game's Great Power standings (lower is better) - factors in population, income, advances, stability, prestige, markets, military, and more per the game's own Great Power Score.",
     popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
@@ -1931,6 +2026,12 @@
     { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (c) => fmtNum(c.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (c) => fmtNum(c.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (c) => fmtNum(c.latestEconomicalBase, 1) },
+    {
+      key: "buildingsValue",
+      label: "Buildings Value",
+      numeric: true,
+      render: (c) => (typeof c.buildingsValue === "number" ? fmtNum(c.buildingsValue, 1) : "-"),
+    },
     { key: "profit", label: "Profit", numeric: true, render: (c) => fmtNum(c.profit, 1) },
     {
       key: "efficiency",
@@ -2287,6 +2388,7 @@
       "taxIncome",
       "latestTaxBase",
       "latestEconomicalBase",
+      "buildingsValue",
       "profit",
       "efficiency",
       "lastMonthsArmyMaintenance",
@@ -2575,6 +2677,79 @@
   }
 
   let countriesController = null;
+
+  // Static per-building-type base cost table (tools/build-building-costs.js's
+  // output, bundled at build time - see scripts/build-netlify-site.js). Only
+  // covers flat-priced buildings (cathedrals, plantations, ...) - ordinary
+  // buildings only have a monthly goods UPKEEP rate in the game files, not a
+  // one-time cost, so they're deliberately excluded (baseCost 0) rather than
+  // guessed. See tools/build-building-costs.js's header for the full
+  // investigation. Loaded once at page load, cached, no cache-bust query
+  // string needed since netlify.toml's default `/*` rule already sends
+  // `Cache-Control: no-store` for anything not under /js//css//map_data.
+  let buildingCostsCache = null;
+  let buildingCostsPromise = null;
+  function loadBuildingCosts() {
+    if (!buildingCostsPromise) {
+      buildingCostsPromise = fetch("game_data/building-costs.json")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          buildingCostsCache = data;
+          return data;
+        })
+        .catch(() => {
+          buildingCostsCache = null;
+          return null;
+        });
+    }
+    return buildingCostsPromise;
+  }
+  loadBuildingCosts();
+
+  // Total cost to build up to `level` (level k's own incremental cost is
+  // baseCost * (1+r)^(k-1), geometric per increase_per_level_cost) - must
+  // match tools/build-building-costs.js's header comment exactly.
+  function buildingValueToLevel(baseCost, increasePerLevelCost, level) {
+    if (!(baseCost > 0) || !(level > 0)) return 0;
+    if (!increasePerLevelCost) return baseCost * level;
+    return baseCost * ((Math.pow(1 + increasePerLevelCost, level) - 1) / increasePerLevelCost);
+  }
+
+  function computeBuildingsValueByCountry(result, costs) {
+    const byCountry = new Map();
+    if (!costs || !Array.isArray(result.buildings)) return byCountry;
+    for (const b of result.buildings) {
+      if (typeof b.owner !== "number" || !b.type || !(b.level > 0)) continue;
+      const info = costs[b.type];
+      if (!info || !(info.baseCost > 0)) continue;
+      const value = buildingValueToLevel(info.baseCost, info.increasePerLevelCost || 0, b.level);
+      byCountry.set(b.owner, (byCountry.get(b.owner) || 0) + value);
+    }
+    return byCountry;
+  }
+
+  // Best-effort, non-blocking - mirrors reconcileBlackDeathWithBackend's
+  // "render with whatever's cached now, re-render if a still-loading async
+  // dependency resolves later" shape. The 56KB JSON is kicked off at page
+  // load (loadBuildingCosts() above), so in practice it's almost always
+  // already resolved by the time a save finishes parsing.
+  function applyBuildingsValueMetric(result) {
+    const applyWith = (costs) => {
+      const byCountry = computeBuildingsValueByCountry(result, costs);
+      result.countries.forEach((c) => {
+        c.buildingsValue = byCountry.get(c.number) || 0;
+      });
+    };
+    applyWith(buildingCostsCache);
+    if (!buildingCostsCache) {
+      loadBuildingCosts().then((costs) => {
+        if (latestResult !== result) return; // a different save loaded meanwhile
+        applyWith(costs);
+        renderCountries(result);
+        renderPlayers(result);
+      });
+    }
+  }
 
   // Derived economy metrics - computed once per country rather than per
   // render/sort, since sortValue() otherwise expects a plain property.

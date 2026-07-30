@@ -300,11 +300,35 @@ country with more than one historical player is flagged "ambiguous" and defaults
 current controller; the actual call is left to the review table, since there's still no
 timestamp to line a session up against a specific war's known start/end dates.
 
-`collapsePlayerSessions()` (shared by both parsers) also handles a player who abandoned one
-country for another with nobody ever taking over the old one: group the per-country-
-collapsed list by player name, and for any name still controlling more than one country,
-keep only the one whose session is most recent in file order and drop the player from the
-older country entirely.
+`collapsePlayerSessions()` (shared by both parsers) resolves this in two steps, using two
+DIFFERENT recency signals that are each reliable only for a specific comparison — a real bug
+shipped from conflating them (see CHANGELOG): (1) group all sessions by player NAME, and for
+each player pick their own highest `played_country.id` (a genuine per-player, monotonically
+increasing reconnect counter — confirmed the same `id` value recurs across DIFFERENT
+players in the same save, so it can't be a save-wide sequence) as THEIR current country,
+regardless of which country it's under; (2) if two DIFFERENT players still end up both
+claiming the same country as their own most-recent (an ordinary single-controller handoff,
+e.g. one player permanently replacing another), fall back to raw file order to pick the real
+current one — file order is reliable for THIS comparison specifically, since same-country
+entries really are appended in one real chronological block, unlike `id` (scoped per player)
+or file order used ACROSS different countries (each country's own history is its own
+independently-serialized block in the save, so comparing positions between two different
+countries' entries proved unreliable — confirmed on a real campaign where two active players
+each briefly took over the other's country: file order made BOTH countries look like the
+same player's most recent, and the old single-pass "keep only the last entry per country,
+then drop a repeat player's older claim" approach had no way to recover the real runner-up
+once that happened, leaving the dropped country player-less with no fallback).
+
+**Known limitation, no full fix**: a multiplayer REHOST (stopping and restarting the session
+from a save, with each player re-picking a country in the lobby) can leave literally no
+recoverable signal in `played_country` at all for which country each player actually landed
+on afterward — confirmed on a real rehosted campaign, diffed across the actual sequence of
+real autosaves. The safety valve is a manual "Fix players" correction
+(`player-country-overrides.json`, same per-campaign sharing model as `hidden-players.json`) —
+see the desktop dashboard's "Fix players" dialog, and the CHANGELOG entry for how it's wired
+through the Supabase import script and the website's own "Connect campaign folder" read path.
+Not yet wired into the Supabase share-link RPC path (`ShareStore.uploadCampaignLedger`) the
+way `hidden-players.json` also isn't — see "Roadmap / known limitations" below.
 
 ## Economy/military fields and trend charts
 
@@ -409,6 +433,107 @@ breakdown.
 `renderBlackDeath()` shows Tag / Player(s) / Population (start) / Black Death Deaths / Lost
 % = deaths ÷ population-at-start, color-graded green (least lost) to red (most), scaled to
 the loaded save's own min/max rather than a fixed 0–100% axis.
+
+**KNOWN BROKEN as of 2026-07-30, root cause now CONFIRMED (patch-gated, not version-vague,
+not time-decay) — read this before touching the feature again.** Every row's Black Death
+Deaths/Lost % renders as "–" (`deathsByCountry: null`) on any save from game patch **1.3.11**
+where the Black Death has already fired. `situation_manager.black_death` itself still parses
+fine (`status`/`start`/`end`/`identity`) — only the death-count source is gone.
+
+**Definitively ruled out this round**: this is NOT time-since-outbreak decay/pruning. Full
+corpus re-scan (2026-07-30) of every real save in the repo plus 6 live saves pulled fresh from
+the actual game install, spanning versions 1.0.8 through 1.3.10, shows `deathsByCountry`
+populated (1200-1900 entries) in **every single one**, including saves 250-300 in-game years
+after their Black Death ended (`autosave_4bae15f8...`: 1.0.10, outbreak ended centuries prior,
+still 1907-1911 entries; `autosave_a881d67a...`: 1.1.10, outbreak ended 1351, still 1754-1755
+entries at date 1646). The SAME campaign as the original 1486.2.1 screenshot
+(`3baa76aa-825a-4655-ae49-02edd3b90a4b`), continued to date 1508-1513 by the user across
+2026-07-29, is 1.3.11 and shows `deathsByCountry: null` in **every** save from that range —
+while an earlier save of the identical campaign at 1.3.10/date 1417 has full data. Same
+campaign, same disease-outbreak `identity` (2617), only the game patch differs. This is a
+real save-format change introduced in 1.3.11, not a decay curve — don't re-investigate time-
+based theories.
+
+**Also ruled out this round** (in addition to the disaster_manager/nested-black_death/string-
+scan checks already done previously): the per-country field theory. Dumped every raw unmapped
+`#hex` field of real player countries (e.g. BYZ/#203) in a 1.3.11 post-outbreak save — nothing
+disease/death-labeled. Went further and **brute-force correlated every unmapped numeric `#hex`
+field across all ~2500 countries** in the broken 1513 save against the known-good
+`deathsByCountry` totals from the same campaign's working 1417 save (matched by country
+number) looking for a field that lines up. Nothing does — the closest candidates are either
+constant sentinel values (e.g. `#3ebb=127` for nearly every country) or diverge wildly
+per-country (a shared placeholder field, not a real per-country tally). The per-country death
+breakdown is not silently relocated anywhere reachable in the save's own data — don't
+re-attempt this correlation approach, it's been done properly with real data and found nothing.
+
+**Update 2026-07-30, round 2 (user rightly pushed back that "a save-format field vanishing
+between a .10 and .11 patch" was too big a claim to accept without harder proof) — the data
+DOES still exist in 1.3.11, just in a much less useful shape, confirmed with real numbers:**
+
+1.3.11 flattens all per-outbreak disease records directly onto the gamestate TOP LEVEL,
+keyed by the outbreak's own numeric `identity` (the exact same identity number
+`situation_manager.black_death.identity` already points to) instead of nesting them under a
+named `disease_outbreak_manager.data[]` array. Confirmed on a real save: the top-level entry
+keyed `2617` (this campaign's Black Death identity) has an inner `#3e0.type = "bubonic_plague"`
+and a `#3dc8` field that decodes (via the same hours-since-year‑5000 formula used everywhere
+else) to **`1368.10.1`** — an exact match to the real, known Black Death start date. This is
+unambiguously the right record, not a coincidence.
+
+That record carries a `#3991` field: a flat array of `[locationNumber, deaths, locationNumber,
+deaths, ...]` pairs — i.e. exactly the kind of raw material the old `deathsByCountry` used to
+be pre-aggregated from, just no longer pre-summed by country. **However, summing it does NOT
+reproduce the historical total**: on the `3baa76aa-...` campaign, the old (1.3.10, date 1417)
+`deathsByCountry` totals 82,115.6 across 1217 countries; the new top-level `#3991` array for
+the identical outbreak identity, at 1508-1513 (91-126 years later), sums to only **9,387**
+across 878 locations — about 11% of the old total, and mapping those locations to their
+CURRENT (1513) owning country produces per-country sums nowhere near the old per-country
+figures even for the same country numbers (further confounded by 91+ years of border changes
+making "current owner" a bad proxy for "owner at time of each historical death" anyway, which
+is exactly the attribution the old `countries` sub-list did correctly and this new structure
+no longer does at all).
+
+Checked whether this is an ACTIVELY decaying counter (would make it merely "imprecise" rather
+than "unusable"): re-parsed the same top-level entry across every locally-available real save
+from 1508 through 1513 (five snapshots spanning 5 in-game years) — the array is **byte-for-byte
+identical every time** (1756 elements, sum 9387) across that window. So it's not shrinking
+day-to-day. The likeliest explanation for why it's still only ~11% of the true total: this
+structure is fundamentally the OLD "per-location resistance/immunity simulation blob" that
+this feature always deliberately skipped as irrelevant noise (see the original 2026-07-10
+design note above) — a location's entry here plausibly only persists while the location's
+disease-resistance simulation is still active/incomplete, and gets dropped once resistance
+fully resolves, taking that location's historical death contribution with it. Over a short
+5-year window few locations finish resolving, so it looks frozen; over the 91-year gap between
+1417 and 1508, most of them did, which is consistent with the ~89% loss observed. **This makes
+the new structure fundamentally lossy by design, not just relocated** — summing it will never
+recover the true historical total, and will keep getting less complete the longer a campaign
+runs past 1.3.11. One genuine trap hit and fixed while investigating this: naively grabbing
+"the" top-level entry for a given identity is wrong — the same numeric ID gets reused across
+completely unrelated top-level records too (id `2617` appeared as a second, unrelated tiny
+`{#37c2: ...}` object in two of the six saves checked) — any code that goes looking for this
+must keep the FIRST match with a `#3e0.type` field, not just any match for the id.
+
+Also still holds from the previous round: the current game install's own script files
+(`game/in_game/common/trigger_localization/disease_outbreak_triggers.txt`) still define live
+scripting triggers named `disease_country_deaths` / `disease_outbreak_country_deaths` /
+`disease_total_deaths` / `disease_outbreak_total_deaths` — the engine can still query this at
+runtime, it's just querying the same lossy, pruned-over-time structure described above, not a
+hidden complete total.
+
+**Decision, made 2026-07-30**: the true historical total is confirmed unrecoverable from any
+1.3.11+ save on its own — not "not yet found," genuinely gone from what gets serialized. Per
+the user's direction: since a campaign's Black Death has a fixed, one-time start/end and its
+death toll is "locked in" for the rest of that campaign once computed, the fix is to CAPTURE
+`deathsByCountry` the moment it's available (any pre-1.3.11 save, or any 1.3.11+ save uploaded
+before enough locations have pruned — worth checking empirically how long that grace window
+is) and persist it keyed by campaign + outbreak identity, so any LATER save of the same
+campaign — even fully post-prune — can look the captured total up instead of re-deriving it.
+Saves where NO earlier capture exists anywhere (a fresh upload of a campaign that's already
+past the point of losing the data, with nothing on record) should say something like "not
+enough data" — visibly different from "–" (hasn't happened yet) or an ordinary parse gap.
+Implementation not yet started as of this writing — needs a persistence design decision
+(local IndexedDB only vs. a small Supabase table, since the ask explicitly includes covering
+other players who upload a later save of the same multiplayer campaign, not just this browser's
+own history).
 
 ## Llama score (war scoring)
 
@@ -678,3 +803,14 @@ that save file rather than silently resetting to the blank uploader.
   real, by adding a `hidden_players` jsonb column to `eu5_campaigns` (or a sibling table) and
   wiring it through both the upload and fetch RPCs the same way `snapshots`/`events` already
   are.
+- **Same gap, same reason, for the newer `player-country-overrides.json` (2026-07-30 — see
+  "Player-session history" above and the CHANGELOG).** The manual "Fix players" correction is
+  wired through the desktop dashboard, the recorder's Supabase import script, and the
+  website's own "Connect campaign folder" local read path — but NOT through
+  `ShareStore.uploadCampaignLedger`'s RPCs, for the identical reason `hidden-players.json`
+  isn't: those RPCs have no column for either file, both are read only from a local recorder
+  folder. Fix both at once if either gets tackled — same shape of fix, same missing piece.
+- **Black Death per-country death breakdown is confirmed broken on later-patch real saves
+  (2026-07-30), root cause found but not fixed — see the "Black Death analyzer" section
+  above for the full investigation state and exactly what's already been ruled out** before
+  picking this back up.
