@@ -149,7 +149,6 @@ try {
 }
 
 $runtimeFiles = @(
-  "package.json",
   "main.js",
   "preload.js",
   "data-paths.js",
@@ -163,6 +162,31 @@ foreach ($relativePath in $runtimeFiles) {
     $packagedHash = Get-FileDigest -LiteralPath (Join-Path $appRoot $relativePath) -Algorithm SHA256
     if ($sourceHash -ne $packagedHash) {
       throw "Packaged runtime does not match source: $relativePath in $appRoot"
+    }
+  }
+}
+
+# Electron Forge is allowed to normalize package.json while pruning development
+# dependencies. Verify the fields that define the shipped app and require the
+# complete production dependency set instead of comparing formatting bytes.
+$packageIdentityFields = @("name", "version", "productName", "main")
+foreach ($appRoot in @($portableAppPath, $installerAppPath)) {
+  $packagedPackagePath = Join-Path $appRoot "package.json"
+  $packagedPackage = Get-Content -LiteralPath $packagedPackagePath -Raw | ConvertFrom-Json
+  foreach ($field in $packageIdentityFields) {
+    if ([string]$packagedPackage.$field -ne [string]$package.$field) {
+      throw "Packaged package.json has an unexpected '$field' value in $appRoot."
+    }
+  }
+
+  $sourceDependencyNames = @($package.dependencies.PSObject.Properties.Name | Sort-Object)
+  $packagedDependencyNames = @($packagedPackage.dependencies.PSObject.Properties.Name | Sort-Object)
+  if ([string]::Join("|", $packagedDependencyNames) -ne [string]::Join("|", $sourceDependencyNames)) {
+    throw "Packaged package.json has an unexpected production dependency set in $appRoot."
+  }
+  foreach ($dependencyName in $sourceDependencyNames) {
+    if ([string]$packagedPackage.dependencies.$dependencyName -ne [string]$package.dependencies.$dependencyName) {
+      throw "Packaged package.json has an unexpected '$dependencyName' version in $appRoot."
     }
   }
 }
