@@ -48,8 +48,21 @@ The recommended recorder is the normal per-user Windows installation:
 
 1. Download [`Llama-Score-Dashboard-Setup.exe`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Setup.exe)
    from the latest GitHub Release.
-2. Run the installer. It does not require administrator access.
+2. Run the installer. It installs silently for the current Windows user, immediately
+   opens the installed copy, and does not require administrator access. There is no
+   setup wizard.
 3. Open **Llama Score Dashboard** from the Start menu.
+
+The installed files and user-owned data are deliberately separated:
+
+- Application and updater: `%LOCALAPPDATA%\LlamaScoreDashboard`
+- Settings, logs, and crash reports: `%APPDATA%\llama-score-dashboard`
+- Campaign history: `%USERPROFILE%\Documents\Llamabeg\Campaign Data`
+- Start-menu shortcut: **Llamabeg → Llama Score Dashboard**
+
+After the first installation, launch the app from the Start menu rather than running
+Setup.exe again. Uninstall it through **Windows Settings → Apps → Installed apps**; the
+campaign-data folder is independent of the application installation.
 
 Campaign history is stored independently of the application under
 `Documents\Llamabeg\Campaign Data`, so replacing or updating the installed app does not
@@ -62,6 +75,20 @@ background, and ask before restarting. The portable ZIP remains available as a f
 but portable and development builds deliberately do not update themselves. See
 [llama-dashboard/README.md](llama-dashboard/README.md) for build, release, and migration
 details.
+
+### How updates reach installed apps
+
+A normal branch push updates source code on GitHub but does **not** update installed
+applications. A maintainer must bump the desktop package version, push the change, and
+push the matching version tag. The Windows release workflow then builds and verifies the
+installer, Squirrel package, update manifest, and portable fallback before publishing a
+GitHub Release.
+
+Once that signed release is public, Squirrel-installed copies discover it at startup or
+during the hourly check, download it in the background, and ask before restarting.
+Portable ZIP and development copies never auto-update. See the
+[desktop release checklist](llama-dashboard/README.md#automatic-updates-and-github-releases)
+for the exact prerequisites and commands.
 
 ## Running locally
 

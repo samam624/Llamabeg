@@ -48,80 +48,124 @@ First run downloads Electron itself (~150 MB). After that, `npm start` opens
 the window directly against the real save folder/data folder - no build step
 needed while iterating on the UI.
 
-## Build a standalone app you can launch from the Desktop
+## Build the Windows desktop distributions
 
 ```powershell
 cd llama-dashboard
-npm run dist
+npm run make-installer
+npm run release
+npm run verify-update-release
 ```
 
-This vendors a copy of `js/llama-score.js` + the recorder into
-`llama-dashboard/vendor/` (so the packaged app doesn't depend on the rest of
-this repo at runtime) and packages everything with `electron-packager` into:
+`make-installer` produces the normal, no-admin Squirrel installation and its
+update metadata:
+
+```text
+llama-dashboard/out/make/squirrel.windows/x64/
+  Llama-Score-Dashboard-Setup.exe
+  LlamaScoreDashboard-<version>-full.nupkg
+  RELEASES
+```
+
+`release` keeps the legacy portable fallback current at the two canonical
+paths:
 
 ```text
 llama-dashboard/release/Llama Score Dashboard-win32-x64/
-  Llama Score Dashboard.exe   <- the app
-  ...(Electron runtime files - all required, don't separate them from the exe)
+llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip
 ```
 
-This is a portable Electron app, not a single-file exe - all the files in
-that folder need to stay together. To launch it like a normal app:
+The release verifier checks Squirrel's manifest hash/size, version and tag,
+the exact canonical release names, packaged runtime hashes, signatures when
+required, and that both public archives contain zero campaign-data files.
+The canonical app's local `data/` ledger is held outside the replacement
+path during a rebuild and restored afterward.
 
-1. Right-click `Llama Score Dashboard.exe` -> **Send to -> Desktop (create
-   shortcut)**.
-2. Launch it from that Desktop shortcut whenever you want the dashboard - no
-   terminal needed.
+Installed and portable apps use
+`Documents\Llamabeg\Campaign Data`. On first packaged launch, data from the
+old extracted `Documents\Llama-Score-Dashboard-win32-x64\data` location is
+copied through a hash-verified staging directory; the original is retained
+as a backup.
 
-Re-run `npm run dist` after changing `main.js`/`preload.js`/`renderer/` or
-after `js/llama-score.js`/the recorder itself changes upstream - the vendored
-copy is a snapshot, not a live link.
+## Automatic updates and GitHub releases
 
-`release/Llama Score Dashboard-win32-x64/` is the single canonical local
-build. Re-run `npm run dist` to update that folder in place; do not create
-separate version-named test-build folders. Close any older copy of the app
-before launching the canonical executable, because the single-instance lock
-will otherwise focus the already-running older build.
+Only the Squirrel-installed app enables automatic updates. It confirms that
+the installation's parent `Update.exe` exists, checks once at startup and
+then hourly, downloads in the background, and asks before restarting.
+Development and portable builds deliberately do not update themselves.
 
-The build wrapper preserves and restores the canonical folder's existing
-`data/` ledger while Electron replaces the app runtime. It creates an empty
-`data/` folder for a first build.
+Setup.exe uses Squirrel's silent per-user installation flow. It shows no
+wizard: running it installs under `%LOCALAPPDATA%\LlamaScoreDashboard` and
+immediately launches the installed version. Subsequent launches should use
+the **Llamabeg → Llama Score Dashboard** Start-menu shortcut. Runtime
+settings/logs live under `%APPDATA%\llama-score-dashboard`, while campaign
+history remains under `%USERPROFILE%\Documents\Llamabeg\Campaign Data`.
 
-## Cutting a distributable .zip (for other people to download)
+Public downloads and Electron's update service use this repository's GitHub
+Releases:
 
-```powershell
-cd llama-dashboard
-npm run release
+```text
+https://github.com/samam624/Llamabeg/releases
 ```
 
-This runs `dist` and then zips the packaged output into
-`llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip` - the exact file
-the website's download link points at (see the root `index.html`'s hardcoded
-GitHub Releases URL). Upload that file as the release asset.
+The repository must remain public so installed clients can check releases
+without credentials. The workflow uploads only Setup.exe, the `.nupkg`,
+`RELEASES`, and the empty-data portable ZIP; settings, saves, and ledger data
+remain outside the repository and packaged artifacts.
 
-The ZIP is staged separately and always contains an empty `data/` folder.
-Local `state.json`, campaign snapshots, war events, and other recorder data
-are explicitly excluded even if the canonical local app contains them.
+Configure these repository secrets:
 
-**Always use `npm run release` for this - never rename/zip the
-`release/Llama Score Dashboard-win32-x64/` folder by hand.** A previous
-release was built by hand (build, rename the folder to remove the spaces,
-right-click -> zip, upload) and the manual rename step left a trailing space
-in the folder's name without anyone noticing. Every person who downloaded
-and unzipped that release got a folder Windows Explorer could see but could
-never delete or rename ("Item Not Found... this is no longer located in..."),
-because Win32's normal path-handling APIs (the ones Explorer's own delete
-uses) silently strip a trailing space before doing the actual filesystem
-lookup, while NTFS preserves the literal name - so the folder is real, but
-almost nothing can address it correctly by name. (The only fix, if this
-happens to you: prefix the path with `\\?\` to bypass that normalization,
-e.g. `Remove-Item -LiteralPath "\\?\C:\full\path\to\the folder "` in
-PowerShell - note the exact trailing character(s) must still match; use
-`Get-ChildItem`'s `.FullName` rather than retyping the name by hand.)
-`scripts/package-release-zip.js` sets the zip's internal folder name
-programmatically (via `archiver`, not a filesystem rename) specifically so
-there's no rename step left for a stray keystroke to hide in, and it
-self-checks that name for a trailing space/dot before writing anything.
+- `WINDOWS_CERTIFICATE_PFX_BASE64`: base64 contents of the trusted Windows
+  code-signing `.pfx`.
+- `WINDOWS_CERTIFICATE_PASSWORD`: password for that certificate.
+
+The workflow's built-in `GITHUB_TOKEN` publishes the release to this
+repository; no personal access token or second release repository is needed.
+`.github/workflows/desktop-release.yml` supports unsigned manual CI builds,
+but a tagged release refuses to publish unless the binaries have valid
+Authenticode signatures.
+
+### Does every push update installed apps?
+
+No. Pushing a commit or merging a branch only updates the source repository.
+Installed clients change only when all of these conditions are satisfied:
+
+1. `llama-dashboard/package.json` and `package-lock.json` contain the same
+   newer SemVer version.
+2. That source and `.github/workflows/desktop-release.yml` are committed and
+   pushed to the public repository.
+3. A matching tag such as `v1.0.2` is pushed.
+4. The tagged Windows workflow succeeds, including Authenticode verification.
+5. The resulting GitHub Release contains Setup.exe, the versioned full
+   `.nupkg`, `RELEASES`, and the empty-data portable ZIP.
+
+If any condition fails, no update is published and existing installations
+continue running their current version. Users who are offline or have the app
+closed receive the update the next time an installed copy can perform a
+check. Portable and development builds are never eligible.
+
+### Maintainer release checklist
+
+To publish an update:
+
+1. Update `llama-dashboard/package.json` and `package-lock.json` to the same
+   SemVer version, which must be greater than the last published version.
+2. Run `npm.cmd test` from `llama-dashboard/`.
+3. Commit and push all intended application and workflow changes.
+4. Create and push the matching tag:
+
+   ```powershell
+   git tag v1.0.2
+   git push origin v1.0.2
+   ```
+
+5. The Windows workflow builds, verifies, signs, and publishes the four
+   assets to this repository's GitHub Release.
+6. Confirm the release is marked latest and contains all four expected
+   assets before announcing it.
+
+The website download button uses this repository's
+`releases/latest/download/Llama-Score-Dashboard-Setup.exe` URL.
 
 ## Settings
 
@@ -134,9 +178,9 @@ install:
 - **EU5 install folder** - used only by Modifier Optimizer to read game
   definitions; defaults to the standard Steam install path.
   under the current Windows user, same default the CLI recorder uses.
-- **Ledger data folder** - a `data` folder created next to
-  `Llama Score Dashboard.exe` (in a packaged build) - the same folder the web
-  app's "Connect campaign folder..." should be pointed at.
+- **Ledger data folder** - `Documents\Llamabeg\Campaign Data`, independent
+  of the installed application version - the same folder the web app's
+  "Connect campaign folder..." should be pointed at.
 
 Changing either restarts the embedded watcher.
 
@@ -152,10 +196,6 @@ Changing either restarts the embedded watcher.
 - "Ongoing wars" come straight from the latest snapshot's own war list
   (`concluded: false` entries) - concluded/scored wars come from
   `war-events.jsonl`'s `war-disappeared` events, same as the web app.
-- Packaging uses `electron-packager`, not `electron-builder` - this repo's
-  sandboxed build environment couldn't extract electron-builder's
-  `winCodeSign` dependency (needs a Windows symlink privilege electron-builder
-  requests even when not code-signing), and enabling that machine-wide
-  (Developer Mode) wasn't something to change without asking. `electron-packager`
-  needs no code-signing tooling at all, at the cost of producing a
-  folder+exe instead of a single compressed installer.
+- The portable fallback uses Electron Packager; the normal installer and
+  update package use Electron Forge's Squirrel.Windows maker. Both use the
+  same vendored recorder/parser runtime and optional signing certificate.
