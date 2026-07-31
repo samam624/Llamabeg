@@ -595,14 +595,6 @@ function societalDynamicFacts(country, result) {
   };
 }
 
-function allCountryLookup(countries, overlordOf) {
-  const lookup = {};
-  for (const c of countries || []) {
-    if (typeof c.number === "number") lookup[c.number] = countrySummary(c, overlordOf);
-  }
-  return lookup;
-}
-
 function participantSummary(p) {
   return {
     country: p.country,
@@ -1487,48 +1479,25 @@ function warTouchesCountries(war, countryNumbers) {
   return false;
 }
 
-function buildSnapshot(file, hash, result, config, previousWars) {
+// Converts the multi-gigabyte parser result into a compact, state-independent
+// seed while it is still inside the parsing worker. The parent recorder only
+// needs this seed plus its small previousWars map to finish the snapshot; it
+// must never receive the raw locations/population/token-derived object graph.
+//
+// countrySummaries intentionally contains every country's compact summary,
+// including owned-location IDs. That is still small (one entry per country
+// plus one integer per owned location), and lets finalizeSnapshotSeed retain
+// countries referenced only by a just-disappeared war without needing the raw
+// parser result. Keeping this as an array preserves the original countries
+// database order across the worker's structured-clone boundary.
+function buildSnapshotSeed(file, hash, result, config) {
   const countries = result.countries || [];
-  const countryByNumber = result.countriesByNumber || new Map(countries.map((c) => [c.number, c]));
   const date = result.metadata && result.metadata.date;
   const playerCountriesSet = playerCountryNumbers(result);
   const rawWars = config.playerWarsOnly && playerCountriesSet.size ? (result.wars || []).filter((war) => warTouchesCountries(war, playerCountriesSet)) : result.wars || [];
   const wars = rawWars.map(warSummary);
-  const interestingCountries = new Set();
-  for (const c of countries) {
-    if (c.players && c.players.length) interestingCountries.add(c.number);
-  }
-  for (const war of wars) {
-    if (typeof war.originalAttacker === "number") interestingCountries.add(war.originalAttacker);
-    for (const c of war.originalDefenders || []) interestingCountries.add(c);
-    for (const p of war.participants || []) if (typeof p.country === "number") interestingCountries.add(p.country);
-  }
-  for (const previous of Object.values(previousWars || {})) {
-    const war = previous && previous.lastWar;
-    if (!war) continue;
-    if (typeof war.originalAttacker === "number") interestingCountries.add(war.originalAttacker);
-    for (const c of war.originalDefenders || []) interestingCountries.add(c);
-    for (const p of war.participants || []) if (typeof p.country === "number") interestingCountries.add(p.country);
-  }
   const overlordOf = buildOverlordLookup(result);
-  // A brand-new subject of an already-interesting country (e.g. a player
-  // fully conquers an opponent's provinces and releases them straight into
-  // a new vassal instead of keeping them, a real EU5 peace-deal option) is
-  // otherwise invisible forever - it's not a player, and it was never a war
-  // participant since it didn't exist until the peace treaty created it, so
-  // it would never enter interestingCountries any other way. Tracking it
-  // from here on lets sideEconomyDeltas (below) attribute its land back to
-  // whichever principal formed it, instead of the conquest silently
-  // vanishing because the principal's OWN locationCount never moves.
-  for (const c of countries) {
-    const overlord = overlordOf.get(c.number);
-    if (typeof overlord === "number" && interestingCountries.has(overlord)) interestingCountries.add(c.number);
-  }
-  const countryLookup = {};
-  for (const n of interestingCountries) {
-    const c = countryByNumber.get(n);
-    if (c) countryLookup[n] = countrySummary(c, overlordOf, true);
-  }
+  const countrySummaries = countries.map((country) => countrySummary(country, overlordOf, true));
   const culturesByNumber = new Map((result.cultures || []).map((entry) => [entry.number, entry]));
   const religionsByNumber = new Map((result.religions || []).map((entry) => [entry.number, entry]));
   const playerCountries = countries
@@ -1558,7 +1527,6 @@ function buildSnapshot(file, hash, result, config, previousWars) {
       }
       return summary;
     });
-  const economyCountries = config.storeAllEconomyCountries ? allCountryLookup(countries, overlordOf) : countryLookup;
   return {
     modifierStateSchemaVersion: MODIFIER_STATE_SCHEMA_VERSION,
     capturedAt: new Date().toISOString(),
@@ -1570,8 +1538,7 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     playthroughName: result.metadata && result.metadata.playthrough_name,
     gameVersion: result.metadata && result.metadata.version,
     playerCountries,
-    countries: countryLookup,
-    economyCountries,
+    countrySummaries,
     wars,
     warFilter: config.playerWarsOnly ? "player" : "all",
     // Enforced war-reparations obligations (see js/clausewitz.js's
@@ -1594,6 +1561,77 @@ function buildSnapshot(file, hash, result, config, previousWars) {
     // 1am.
     parseWarning: result.parseWarning || null,
   };
+}
+
+function finalizeSnapshotSeed(seed, config, previousWars) {
+  const countrySummaries = seed.countrySummaries || [];
+  const countryByNumber = new Map(countrySummaries.map((country) => [country.number, country]));
+  const interestingCountries = new Set();
+  for (const country of countrySummaries) {
+    if (country.players && country.players.length) interestingCountries.add(country.number);
+  }
+  for (const war of seed.wars || []) {
+    if (typeof war.originalAttacker === "number") interestingCountries.add(war.originalAttacker);
+    for (const country of war.originalDefenders || []) interestingCountries.add(country);
+    for (const participant of war.participants || []) {
+      if (typeof participant.country === "number") interestingCountries.add(participant.country);
+    }
+  }
+  for (const previous of Object.values(previousWars || {})) {
+    const war = previous && previous.lastWar;
+    if (!war) continue;
+    if (typeof war.originalAttacker === "number") interestingCountries.add(war.originalAttacker);
+    for (const country of war.originalDefenders || []) interestingCountries.add(country);
+    for (const participant of war.participants || []) {
+      if (typeof participant.country === "number") interestingCountries.add(participant.country);
+    }
+  }
+  // A brand-new subject of an already-interesting country (e.g. a player
+  // fully conquers an opponent's provinces and releases them straight into
+  // a new vassal instead of keeping them, a real EU5 peace-deal option) is
+  // otherwise invisible forever - it's not a player, and it was never a war
+  // participant since it didn't exist until the peace treaty created it.
+  for (const country of countrySummaries) {
+    if (typeof country.overlord === "number" && interestingCountries.has(country.overlord)) {
+      interestingCountries.add(country.number);
+    }
+  }
+  const countryLookup = {};
+  for (const number of interestingCountries) {
+    const country = countryByNumber.get(number);
+    if (country) countryLookup[number] = country;
+  }
+  let economyCountries = countryLookup;
+  if (config.storeAllEconomyCountries) {
+    economyCountries = {};
+    for (const country of countrySummaries) {
+      const compact = Object.assign({}, country);
+      delete compact.ownedLocations;
+      economyCountries[country.number] = compact;
+    }
+  }
+  return {
+    modifierStateSchemaVersion: seed.modifierStateSchemaVersion,
+    capturedAt: seed.capturedAt,
+    sourceFile: seed.sourceFile,
+    campaignKey: seed.campaignKey,
+    sourceHash: seed.sourceHash,
+    date: seed.date,
+    year: seed.year,
+    playthroughName: seed.playthroughName,
+    gameVersion: seed.gameVersion,
+    playerCountries: seed.playerCountries,
+    countries: countryLookup,
+    economyCountries,
+    wars: seed.wars,
+    warFilter: seed.warFilter,
+    warReparations: seed.warReparations,
+    parseWarning: seed.parseWarning,
+  };
+}
+
+function buildSnapshot(file, hash, result, config, previousWars) {
+  return finalizeSnapshotSeed(buildSnapshotSeed(file, hash, result, config), config, previousWars);
 }
 
 function classifyEvents(previousWars, snapshot) {
@@ -1791,17 +1829,35 @@ function pruneStaleCampaignState(state, config, keepCampaignKey) {
   }
 }
 
-async function processParsedFile(file, stat, hash, result, config, state, forceModifierStateRefresh) {
+function alreadyProcessed(file, stat, hash, state, forceModifierStateRefresh) {
   const known = state.files[file];
-  if (!forceModifierStateRefresh && known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) return false;
+  if (!forceModifierStateRefresh && known && known.mtimeMs === stat.mtimeMs && known.size === stat.size) return true;
   if (!forceModifierStateRefresh && state.hashes[hash]) {
     state.files[file] = { mtimeMs: stat.mtimeMs, size: stat.size, hash };
-    return false;
+    return true;
   }
+  return false;
+}
+
+async function processParsedFile(file, stat, hash, result, config, state, forceModifierStateRefresh) {
+  if (alreadyProcessed(file, stat, hash, state, forceModifierStateRefresh)) return false;
   state.activeWarsByCampaign = state.activeWarsByCampaign || {};
   const campaignKey = campaignKeyFromFile(file);
   const previousWars = state.activeWarsByCampaign[campaignKey] || {};
   const snapshot = buildSnapshot(file, hash, result, config, previousWars);
+  return processBuiltSnapshot(file, stat, hash, snapshot, config, state, previousWars);
+}
+
+async function processSnapshotSeed(file, stat, hash, seed, config, state, forceModifierStateRefresh) {
+  if (alreadyProcessed(file, stat, hash, state, forceModifierStateRefresh)) return false;
+  state.activeWarsByCampaign = state.activeWarsByCampaign || {};
+  const campaignKey = campaignKeyFromFile(file);
+  const previousWars = state.activeWarsByCampaign[campaignKey] || {};
+  const snapshot = finalizeSnapshotSeed(seed, config, previousWars);
+  return processBuiltSnapshot(file, stat, hash, snapshot, config, state, previousWars);
+}
+
+async function processBuiltSnapshot(file, stat, hash, snapshot, config, state, previousWars) {
   state.lastDateByCampaign = state.lastDateByCampaign || {};
   const lastDate = state.lastDateByCampaign[snapshot.campaignKey];
   ensureDir(campaignDir(config, snapshot.campaignKey));
@@ -1907,41 +1963,64 @@ async function processParsedFile(file, stat, hash, result, config, state, forceM
 // called. See parseFilesInParallel() below for why that mattered.
 function parseSaveInWorker(file, config) {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    let peakRssMb = process.memoryUsage().rss / (1024 * 1024);
+    let minimumFreeMb = systemFreeMb();
+    const memoryTimer = setInterval(() => {
+      peakRssMb = Math.max(peakRssMb, process.memoryUsage().rss / (1024 * 1024));
+      minimumFreeMb = Math.min(minimumFreeMb, systemFreeMb());
+    }, 250);
+    memoryTimer.unref();
+    function stopMemoryProbe() {
+      clearInterval(memoryTimer);
+      peakRssMb = Math.max(peakRssMb, process.memoryUsage().rss / (1024 * 1024));
+      minimumFreeMb = Math.min(minimumFreeMb, systemFreeMb());
+    }
     const worker = new Worker(path.join(__dirname, "parse-worker.js"), {
       workerData: { file, playerWarsOnly: !!config.playerWarsOnly },
       // The two-phase tape parser (js/clausewitz-binary.js) builds parallel
-      // arrays with one entry per token - measured peak ~4.3GB parsing a
-      // real 71MB save (tape values array is heterogeneous string/number/
-      // bool, so V8 can't pack it as a typed array and boxes most numeric
-      // entries). Worker threads default to the same old-space ceiling as
-      // the main process (~2-2.5GB observed), which a real, currently-
-      // growing live campaign's autosave already exceeds - crashed the
-      // whole app with "JavaScript heap out of memory" a few seconds after
-      // launch. Raised per-worker, not globally, since only this worker
-      // touches raw save bytes. 8192 (not the originally-measured-enough
-      // 6144) - the campaign keeps growing past when this was first
-      // measured, and a worker running right at the edge of its ceiling
-      // can spend a long time thrashing on repeated GC attempts before
-      // either succeeding or finally erroring, which can look like a hang
-      // from the outside; more headroom keeps it comfortably below that
-      // edge instead of just barely under it.
-      resourceLimits: { maxOldGenerationSizeMb: 8192 },
+      // arrays with one entry per token. A current real 77MB save reaches
+      // about 7.6GB process RSS while that tape exists. Keep the elevated
+      // ceiling on this short-lived worker only; the worker now compacts the
+      // raw result to a ~1MB snapshot seed before postMessage, so Electron's
+      // long-lived main process no longer needs its own raised heap or a
+      // second structured-cloned copy of the raw parser graph.
+      resourceLimits: { maxOldGenerationSizeMb: 12288 },
     });
     let settled = false;
-    worker.once("message", (msg) => {
+    worker.once("message", async (msg) => {
       settled = true;
-      worker.terminate();
-      if (msg.ok) resolve({ hash: msg.hash, result: msg.result });
+      stopMemoryProbe();
+      // Do not release the pool slot until the old worker has fully exited.
+      // Starting the next 7GB parse while terminate() is still pending can
+      // briefly overlap both workers and defeat the one-large-file cap.
+      try {
+        await worker.terminate();
+      } catch {
+        // It may already have exited naturally after posting the result.
+      }
+      if (msg.ok) {
+        const seedKb = Buffer.byteLength(JSON.stringify(msg.seed), "utf8") / 1024;
+        console.log(
+          `Parse memory (${path.basename(file)}): peak RSS ${peakRssMb.toFixed(0)}MB, minimum system free ${minimumFreeMb.toFixed(0)}MB, seed ${seedKb.toFixed(0)}KB, elapsed ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
+        );
+        resolve({ hash: msg.hash, seed: msg.seed });
+      }
       else {
         const err = new Error(msg.error);
         err.code = msg.code;
         reject(err);
       }
     });
-    worker.once("error", (err) => {
+    worker.once("error", async (err) => {
       if (settled) return;
       settled = true;
-      worker.terminate();
+      stopMemoryProbe();
+      try {
+        await worker.terminate();
+      } catch {
+        // Preserve the original worker error.
+      }
       reject(err);
     });
     // A worker that dies WITHOUT ever firing "message" or "error" (observed
@@ -1957,6 +2036,7 @@ function parseSaveInWorker(file, config) {
     worker.once("exit", (code) => {
       if (settled) return;
       settled = true;
+      stopMemoryProbe();
       reject(new Error(`worker exited (code ${code}) without completing`));
     });
   });
@@ -1968,9 +2048,10 @@ function parseSaveInWorker(file, config) {
 // updating state.json).
 const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
 
-// The two-phase tape parser (js/clausewitz-binary.js) needs roughly 60-70x
-// a save file's raw byte size in transient heap - measured directly: a
-// real 71MB save peaked at ~4.3GB. EU5's autosave rotation overwrites
+// The two-phase tape parser (js/clausewitz-binary.js) needs roughly 100x
+// a current save file's raw byte size in transient process memory - measured
+// directly after the campaign grew: a real 77MB save peaked at ~7.6GB. EU5's
+// autosave rotation overwrites
 // several ~70MB+ slot files while a long real campaign is actively being
 // played, so a single scan's candidate batch can genuinely contain 2-3+
 // such files at once (each one a real content change, not a caching bug -
@@ -2000,8 +2081,8 @@ const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
 // strictly one large file parses at a time, full stop, regardless of what
 // the byte-size math predicts for the others.
 const LARGE_FILE_THRESHOLD_MB = 15;
-const PARSE_MEMORY_BUDGET_MB = 8192;
-const PARSE_BYTES_TO_PEAK_MB = 70;
+const PARSE_MEMORY_BUDGET_MB = 12288;
+const PARSE_BYTES_TO_PEAK_MB = 110;
 function estimatedParsePeakMb(stat) {
   return (stat.size / (1024 * 1024)) * PARSE_BYTES_TO_PEAK_MB;
 }
@@ -2009,23 +2090,18 @@ function isLargeParseCandidate(stat) {
   return stat.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024;
 }
 
-// The hard 1-large-file-at-a-time cap above assumes a single large parse
-// will always fit - true today, but the campaign keeps growing (this same
-// investigation caught the save going from 65MB to 76MB over a few weeks),
-// and the ACTUAL running game competes for the same system RAM the whole
-// time. Rather than trust an internal assumption about how much memory is
-// available, check the real thing right before committing to a large
-// parse: `os.freemem()` is live, system-wide, and accounts for the game's
-// own usage automatically - no estimate involved. If the system is
-// genuinely tight RIGHT NOW, defer (leave the file queued - the next
-// scan(), ~5s later by default, tries again) instead of starting a
-// multi-GB allocation into an already-strained system, which is the exact
-// combination that caused the untraceable external kill this was built to
-// prevent (see this file's git history / binary_parser_version_fixes
-// project memory for the full incident).
-const MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE = 6144;
+// Check live system memory before committing to a large parse. The old fixed
+// 6144MB threshold was lower than one current save's measured 7.6GB peak, so
+// it could explicitly approve a parse that did not fit. Require the
+// size-derived peak estimate plus a reserve for Electron, Windows, and normal
+// measurement error. A deferred file remains unknown to state.files and is
+// retried on the next scan.
+const SYSTEM_MEMORY_RESERVE_MB = 2048;
 function systemFreeMb() {
   return os.freemem() / (1024 * 1024);
+}
+function requiredSystemFreeMb(stat) {
+  return estimatedParsePeakMb(stat) + SYSTEM_MEMORY_RESERVE_MB;
 }
 
 // Parses candidate files CONCURRENTLY across a small worker pool instead
@@ -2061,7 +2137,7 @@ async function parseFilesInParallel(candidates, config) {
           // what the size estimate says about the others (see comment
           // above this function - the estimate has been wrong in practice).
           if (largeInFlight > 0 || inFlightCount >= MAX_PARSE_WORKERS) break;
-          // Live system-memory gate (see MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE
+          // Live system-memory gate (see requiredSystemFreeMb
           // above) - defer to the next scan rather than start a multi-GB
           // parse while the system is already under real pressure (e.g.
           // the actual game using a lot of RAM right now).
@@ -2080,9 +2156,10 @@ async function parseFilesInParallel(candidates, config) {
           // never updated for it, so the very next scan() (~5s later,
           // rebuilding candidates from scratch) picks it right back up.
           const freeMb = systemFreeMb();
-          if (freeMb < MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE) {
+          const requiredMb = requiredSystemFreeMb(stat);
+          if (freeMb < requiredMb) {
             console.warn(
-              `Deferring large save parse (${path.basename(queue[0].file)}) - only ${freeMb.toFixed(0)}MB system memory free, want ${MIN_SYSTEM_FREE_MB_FOR_LARGE_PARSE}MB; will retry next scan`
+              `Deferring large save parse (${path.basename(queue[0].file)}) - only ${freeMb.toFixed(0)}MB system memory free, want ${requiredMb.toFixed(0)}MB for this ${(stat.size / (1024 * 1024)).toFixed(1)}MB save; will retry next scan`
             );
             queue.shift();
             continue;
@@ -2097,9 +2174,8 @@ async function parseFilesInParallel(candidates, config) {
         inFlightMb += cost;
         if (large) largeInFlight++;
         parseSaveInWorker(file, config)
-          .then(({ hash, result }) => {
-            const date = result.metadata && result.metadata.date;
-            results.push({ file, stat, hash, result, date, forceModifierStateRefresh });
+          .then(({ hash, seed }) => {
+            results.push({ file, stat, hash, seed, date: seed.date, forceModifierStateRefresh });
           })
           .catch((err) => {
             if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
@@ -2181,7 +2257,7 @@ async function scan(config, state) {
   const refreshFilesRemaining = new Set(refreshFiles);
   for (const item of parsed) {
     try {
-      if (await processParsedFile(item.file, item.stat, item.hash, item.result, config, state, item.forceModifierStateRefresh)) {
+      if (await processSnapshotSeed(item.file, item.stat, item.hash, item.seed, config, state, item.forceModifierStateRefresh)) {
         processed++;
         if (item.forceModifierStateRefresh) refreshFilesRemaining.delete(item.file);
       }
@@ -2287,8 +2363,11 @@ module.exports = {
   classifyEvents,
   dateKey,
   compareDates,
+  buildSnapshotSeed,
+  finalizeSnapshotSeed,
   buildSnapshot,
   processParsedFile,
+  processSnapshotSeed,
 };
 
 // Guarded so this file can be require()'d (e.g. from a test script) without

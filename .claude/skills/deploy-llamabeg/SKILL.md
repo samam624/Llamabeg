@@ -154,9 +154,9 @@ forcing a warm-cache reload) actually tests that path.
 
 ## Quick reference: where the real data lives
 
-- EU5 save files: `C:\Users\samca\Documents\Paradox Interactive\Europa Universalis V\save games`
+- EU5 save files: `%USERPROFILE%\Documents\Paradox Interactive\Europa Universalis V\save games`
 - Real Llama Score Dashboard install + its recorder ledger data:
-  `C:\Users\samca\Documents\Llama-Score-Dashboard-win32-x64\data\campaigns\<campaign-key>\`
+  `%USERPROFILE%\Documents\Llama-Score-Dashboard-win32-x64\data\campaigns\<campaign-key>\`
   (campaign key = the playthrough's UUID, same one embedded in a
   `?save=<uuid>_<date>` share link and in a real autosave's own filename
   - `autosave_<uuid>.eu5`)

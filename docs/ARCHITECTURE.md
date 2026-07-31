@@ -199,9 +199,11 @@ counts needing the same `dateFromHours()` conversion used elsewhere.
 
 ## Map (`js/map.js`, `map_data/`, `tools/`)
 
-Renders a pdx.tools-style province map with toggleable mapmodes (political, players,
-development, population, RGO, religion, culture), mouse-wheel zoom, drag-to-pan, and
-hover tooltips, using the game's own map bitmap plus per-location data pulled from the save.
+Renders a pdx.tools-style province map with toggleable mapmodes, mouse-wheel zoom,
+drag-to-pan, and hover tooltips, using the game's own map bitmap plus per-location data
+pulled from the save. Solo buttons: Political, Players, Development, Population. Grouped
+behind a collapsed dropdown each: Economy (Tax Base, Tax Gap, Prosperity, Control), Trade
+(Markets, Trade Network, RGO), Demographic (Religion, Culture).
 
 - **Sea vs. land.** `default.map`'s `sea_zones`/`lakes` lists mark each location as water or
   land; water always renders as blue regardless of mapmode, and a coastline is drawn wherever
@@ -270,6 +272,80 @@ location owner/controller from its province right after `locations.json` loads �
 `result.locations` in place so every consumer (map fill/borders, detail panels, tooltips,
 country table location counts) sees the corrected value. On a real save this affected
 ~10% of all locations (2,389 of 28,573).
+
+### Trade Network mapmode
+
+Draws every market's real established trade routes as curved lines between market
+"node" dots, decomposed hop-by-hop through the actual markets they physically relay
+across — not a straight line between a route's two endpoints. This matters because a
+`trade_path_manager` route's `from`/`to` fields name only the two markets a merchant's
+contract ultimately connects, but the goods can (and routinely do) relay through many
+intermediate markets to get there; drawing `from`↔`to` directly produced impossible-
+looking beams straight across the world (confirmed on a real save: a Beijing→
+Constantinople porcelain trade, `amount` 0.023/mo, decomposes via its own `path` waypoint
+list into a real 28-hop chain through Persia/the Middle East/Anatolia).
+
+- **Decomposition** (`decomposeTradeRouteMarketPath`): walks a route's `path` (the real
+  location-id waypoint list it physically traverses — mostly sea zones for naval legs),
+  mapping each waypoint through its own `location.market` and collapsing consecutive
+  repeats, to recover the real chain of markets a trade passes through.
+- **Aggregation** (`aggregateHopEdges`/`buildTradeHopIndex`): sums every hop's real
+  `amount` into one edge per unordered market pair — the full-world "overview" is every
+  currently-active hop in the save (~5,700 routes decompose+aggregate in single-digit
+  milliseconds). A market's own click-isolated view (`edgesForMarket`) walks only the
+  routes anchored (originating or landing) at that specific market.
+- **`market_manager`'s own `connectedMarkets` adjacency list is NOT exhaustive** and
+  must not be used to filter decomposed hops — an earlier version of this cross-checked
+  every hop against it (reasoning it was the authoritative trade-range graph) and it
+  silently deleted real hops, fracturing a market's own relay chain into disconnected-
+  looking orphan pieces (confirmed: Beijing's real path visits Baghdad then Acre
+  back-to-back, but `connectedMarkets` doesn't list that pair). Every hop here already
+  comes from a route's own real waypoint data and needs no second-guessing against a
+  separate, incomplete list.
+- **`trade_path_manager`'s `country` field is NOT the market's owner** — it's whichever
+  country's merchant established that specific route. An isolate view keyed on it
+  (rather than on which market a route's real path touches) was tried and reverted: it
+  hid real trade a foreign merchant routed through a player's own market (the exact
+  Beijing→Constantinople trade above was established by a different country entirely),
+  and it made ordinary "click this market" selection unreliable inside player territory
+  (every click there was diverted into the country view before the market check even
+  ran).
+- **Default view is the whole world's active network.** Clicking a market isolates the
+  view to just that market's own routes (`setTradeNetworkIsolate`); clicking open water,
+  pressing Escape, or closing the market panel clears back to the world view
+  (`clearTradeNetworkIsolate`). A country focused from ANY mapmode (`mapState
+  .focusCountry`, e.g. clicking a nation in Political mode and switching tabs) narrows
+  the default view instead to every market reachable via any chain of real trade from
+  one of that country's own markets (`marketsOwnedByCountry` + a breadth-first
+  `reachableMarketSet` walk of the world trade graph — deliberately NOT `route.country`,
+  for the same reason above). On a real save this reach is typically most of the world
+  (Eastern Rome: 137 of 139 active markets, including Beijing) since trade routes chain
+  through many hops — only genuinely disconnected markets get excluded.
+- **State is computed fresh every redraw, not cached.** `computeTradeNetworkView()` runs
+  inside `buildLUTs()` (already called on every click/focus-change/mode-switch) and
+  returns the edges/nodes/`connectedMarkets` to draw for the CURRENT `isolatedMarketId`/
+  `mapState.focusCountry` — there is no separately-mutated cache that could drift out of
+  sync with a focus set from a different mapmode. An earlier eager-mutation version did
+  exactly that: land (via the shared `marketAccessFillColor`, see below) already
+  respected a stale focus from another mapmode, but the trade edges/nodes only updated
+  on a Trade-Network-specific click, so the two visibly disagreed with each other.
+- **Unconnected markets grey out, both their node dot and their actual territory,
+  instead of disappearing.** `computeMarketNodes`'s node set is always every market with
+  real trade anywhere in the world (so the map keeps spatial context), with a
+  `highlightEdges` param marking each node `connected: true/false`; `mapState
+  .tradeNetworkConnectedMarkets` (set once per redraw, before the color LUT loop runs —
+  it has to be current *before* `colorFor()` is called for every location id, not after)
+  is the same set read by `tradeNetworkFillColor`, Trade Network's own `colorFor` (kept
+  separate from `marketAccessFillColor`, which Markets mode still uses unmodified), so
+  land and node greying can't disagree. Debugging note for next time a fix like this
+  "doesn't seem to work" in a screenshot: check where the camera is pointed before
+  assuming the render pipeline is broken — the connected/colored region is, by
+  definition, wherever the click happened, so a screenshot still zoomed there will never
+  show the (usually much larger) greyed-out majority of the map.
+- Both the land fill and the node dots ultimately source a market's color from the same
+  place (`marketRgb`/`marketColor`: the market's own real `market.color`, or a
+  deterministic fallback hue) — Markets mode and Trade Network share one fill function
+  precisely so a market's territory always visually matches its own node dot.
 
 ## Subject/overlord relationships (`dependency` records)
 

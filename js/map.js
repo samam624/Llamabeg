@@ -387,8 +387,6 @@
   const NO_DATA_COLOR = [107, 96, 74]; // unclaimed/no-data land - distinct from water so it still reads as land
   const WATER_COLOR = [26, 48, 78];
   const NON_PLAYER_MUTED = [58, 54, 46]; // "Players" mapmode: everyone else fades into the background
-  const TRADE_NETWORK_BG_COLOR = [32, 28, 22]; // Trade Network mapmode: quiet backdrop for locations outside any market
-  const TRADE_NETWORK_MEMBER_COLOR = [46, 41, 32]; // Trade Network mapmode: slightly lighter backdrop for a market member location
   const BORDER_DARKEN = -0.62; // player-realm outline: this much darker than the location's own political color
 
   // Culture/Religion mapmodes: a diagonal two-color hash over a location's
@@ -726,6 +724,40 @@
       return accessCurveColor(marketColor(marketId), t);
     }
 
+    // Shared by the Markets and Trade Network mapmodes so a market's
+    // territory reads in the exact same per-market hue/access-shaded color
+    // in both, matching the market node dots (which already use this same
+    // real market color via marketRgb) - per user request, Trade Network
+    // used to paint a flat quiet backdrop under its route lines/nodes,
+    // making it impossible to visually tie a node's color back to its
+    // actual territory on the map.
+    function marketAccessFillColor(id) {
+      const loc = locByNumber.get(id);
+      if (!loc || typeof loc.marketAccess !== "number") return NO_DATA_COLOR;
+      if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
+      if (loc.market === undefined || loc.market === null) return heatColor(loc.marketAccess, mapState.colorblind);
+      return marketAccessColor(loc.market, loc.marketAccess);
+    }
+
+    // Trade Network's own land fill: same per-market color as Markets mode,
+    // EXCEPT a location whose market isn't in the currently-isolated/
+    // focused set (mapState.tradeNetworkConnectedMarkets, kept in sync by
+    // computeTradeNetworkView every redraw - see createMapView) is muted
+    // the same as a non-focused country's territory. Per user request:
+    // greying out just the node dot for a market with no connection to the
+    // one selected wasn't enough - its actual territory on the map needed
+    // to grey out too, not just sit there in full color underneath a grey
+    // dot. `connected` is null in the default world view (nothing
+    // isolated/focused), so every market's territory renders normally.
+    function tradeNetworkFillColor(id) {
+      const connected = mapState.tradeNetworkConnectedMarkets;
+      if (connected) {
+        const loc = locByNumber.get(id);
+        if (loc && loc.market !== undefined && loc.market !== null && !connected.has(loc.market)) return NON_PLAYER_MUTED;
+      }
+      return marketAccessFillColor(id);
+    }
+
     function politicalColor(ownerNumber) {
       if (mapState.vassalShading && subjectToOverlord.has(ownerNumber)) {
         const overlord = subjectToOverlord.get(ownerNumber);
@@ -920,15 +952,7 @@
       },
       marketAccess: {
         label: "Markets",
-        colorFor(id) {
-          const loc = locByNumber.get(id);
-          if (!loc || typeof loc.marketAccess !== "number") return NO_DATA_COLOR;
-          if (!isFocusedLoc(loc)) return NON_PLAYER_MUTED;
-          // No market id on record for this location (rare) - fall back to
-          // the old single global gradient rather than showing flat grey.
-          if (loc.market === undefined || loc.market === null) return heatColor(loc.marketAccess, mapState.colorblind);
-          return marketAccessColor(loc.market, loc.marketAccess);
-        },
+        colorFor: marketAccessFillColor,
         tooltipFor(id) {
           const loc = locByNumber.get(id);
           const market = loc && marketName(loc.market);
@@ -949,16 +973,15 @@
       },
       tradeNetwork: {
         label: "Trade Network",
-        colorFor(id) {
-          const loc = locByNumber.get(id);
-          // A dim, uniform backdrop rather than the usual political/no-data
-          // fill - this mode's whole point is the overlay of trade-route
-          // lines and market nodes drawn on top (see drawLabelOverlay's
-          // tradeNetwork branch), which needs a quiet, low-contrast base to
-          // read against instead of competing with a data-driven per-
-          // location color underneath it.
-          return loc && loc.market !== undefined && loc.market !== null ? TRADE_NETWORK_MEMBER_COLOR : TRADE_NETWORK_BG_COLOR;
-        },
+        // Same per-market hue/access fill as the Markets mapmode (per user
+        // request) - a market's territory now visibly matches its own node
+        // dot's color (both ultimately come from marketRgb/marketColor's
+        // same real market.color), instead of the old flat quiet backdrop
+        // that gave no visual link between a node and its territory. Uses
+        // the Trade-Network-specific wrapper (not marketAccessFillColor
+        // directly) so a market's territory also greys out when its node
+        // does, not just the dot.
+        colorFor: tradeNetworkFillColor,
         tooltipFor(id) {
           const loc = locByNumber.get(id);
           const market = loc && marketName(loc.market);
@@ -968,7 +991,7 @@
           type: "categorical",
           items: [],
           overflow: 0,
-          note: "Line width/brightness = total trade volume between two markets; node size = total trade volume through that market. Click a market to see its trade stats.",
+          note: "Line width/brightness = total trade volume between two markets; node size = total trade volume through that market. Click a market to isolate its own routes (and everyone who trades with it, not just your own trades). Click open water or press Escape to return to the world view.",
         }),
       },
       trade: {
@@ -1988,8 +2011,8 @@
         // end and only the single largest as visible, same lesson as the
         // heat-gradient fields' own percentile/log handling above.
         const t = Math.log1p(e.amount) / Math.log1p(maxAmount);
-        const width = (0.6 + t * 3.4) * dpr;
-        const alpha = 0.22 + t * 0.66;
+        const width = (0.9 + t * 3.4) * dpr;
+        const alpha = 0.4 + t * 0.6;
         // A slight bow (quadratic curve) rather than a straight chord - one
         // of a handful of routes between the same two markets doesn't just
         // overdraw the others, and the whole diagram reads as a "flow"
@@ -2002,14 +2025,23 @@
         const bow = Math.min(len * 0.12, 60 * dpr);
         const cx = mx - (dy / len) * bow;
         const cy = my + (dx / len) * bow;
+        targetCtx.beginPath();
+        targetCtx.moveTo(ax, ay);
+        targetCtx.quadraticCurveTo(cx, cy, bx, by);
+        // A dark outline stroke UNDER the real gradient-colored line (same
+        // path, wider) - per user request, once the land fill under this
+        // overlay started using real per-market colors (see
+        // marketAccessFillColor), the thin colored lines alone got lost
+        // against an equally-colorful backdrop. Same technique the market
+        // node dots already use (a dark ring around a colored fill).
+        targetCtx.strokeStyle = "rgba(8,6,4,0.75)";
+        targetCtx.lineWidth = width + 2 * dpr;
+        targetCtx.stroke();
         const grad = targetCtx.createLinearGradient(ax, ay, bx, by);
         grad.addColorStop(0, `rgba(${e.aColor[0]},${e.aColor[1]},${e.aColor[2]},${alpha})`);
         grad.addColorStop(1, `rgba(${e.bColor[0]},${e.bColor[1]},${e.bColor[2]},${alpha})`);
         targetCtx.strokeStyle = grad;
         targetCtx.lineWidth = width;
-        targetCtx.beginPath();
-        targetCtx.moveTo(ax, ay);
-        targetCtx.quadraticCurveTo(cx, cy, bx, by);
         targetCtx.stroke();
       }
       targetCtx.restore();
@@ -2022,12 +2054,18 @@
           const y = n.y * s + oy;
           if (x < -20 || y < -20 || x > destW + 20 || y > destH + 20) continue;
           const r = (2.2 + Math.sqrt(n.volume / maxVolume) * 6) * dpr;
+          // Isolate mode (n.connected === false): keep every other real
+          // market visible for spatial context, but grey it out instead of
+          // drawing it in its own color - per user request, so it reads at
+          // a glance as "this market has no trade connection to whichever
+          // one I clicked" rather than disappearing entirely.
+          const muted = n.connected === false;
           targetCtx.beginPath();
           targetCtx.arc(x, y, r, 0, Math.PI * 2);
-          targetCtx.fillStyle = `rgb(${n.color[0]},${n.color[1]},${n.color[2]})`;
+          targetCtx.fillStyle = muted ? "rgba(120,115,106,0.5)" : `rgb(${n.color[0]},${n.color[1]},${n.color[2]})`;
           targetCtx.fill();
           targetCtx.lineWidth = Math.max(1, dpr);
-          targetCtx.strokeStyle = "rgba(10,8,6,0.85)";
+          targetCtx.strokeStyle = muted ? "rgba(10,8,6,0.5)" : "rgba(10,8,6,0.85)";
           targetCtx.stroke();
         }
         targetCtx.restore();
@@ -2218,31 +2256,63 @@
     return centers;
   }
 
-  // Aggregates result.tradeRoutes (one row per good/trade - see
-  // js/clausewitz.js's attachTradeRoutes) into one edge per unordered market
-  // pair, summing every good/country's real `amount` in either direction
-  // into a single trade-volume weight - the network mapmode draws one line
-  // per pair (colored/thickened by that total), not one per good, leaving
-  // per-good detail to the market stats popup instead. Endpoint pixel
+  // A route's `path` (see extractTradePathFields) is the real location-id
+  // waypoint list it physically relays through - mapping each waypoint
+  // through its own location.market and collapsing consecutive repeats
+  // recovers the actual chain of markets the trade hops across. Confirmed
+  // against a real save: a Beijing->Constantinople porcelain trade with
+  // route.from/to naming only those two endpoints decomposes into a ~28-hop
+  // chain through real intermediate markets, not one 8000km jump - drawing
+  // straight endpoint-to-endpoint lines (the old behavior) made every
+  // multi-hop relay look like an illegal direct connection. Sea/unclaimed
+  // waypoints (no location.market) are skipped rather than treated as a
+  // market of their own.
+  function decomposeTradeRouteMarketPath(route, locByNumber) {
+    const seq = [];
+    for (const locId of route.path || []) {
+      const loc = locByNumber.get(locId);
+      const mk = loc && loc.market;
+      if (mk === undefined || mk === null) continue;
+      if (seq.length === 0 || seq[seq.length - 1] !== mk) seq.push(mk);
+    }
+    return seq;
+  }
+
+  // Aggregates a set of decomposed routes into one edge per unordered
+  // market pair, summing every hop's real `amount` into a single
+  // trade-volume weight - shared by the full-network overview and the
+  // per-market isolate view below, which differ only in which routes they
+  // pass in. Every hop here already comes from a real route's own waypoint
+  // path (decomposeTradeRouteMarketPath), so it's not re-checked against
+  // market_manager's own `connectedMarkets` adjacency list - an earlier
+  // version did, but that discarded real, physically-grounded hops
+  // (confirmed on a real save: a Beijing->Athens porcelain trade's actual
+  // path visits Baghdad then Acre back-to-back, yet Baghdad/Acre aren't
+  // listed as connected - connectedMarkets isn't an exhaustive adjacency
+  // graph) and left an isolated market's own relay chain looking like
+  // disconnected orphan segments with no path back to it. Endpoint pixel
   // coordinates and each side's real market color are baked onto the edge
   // here (once, not per animation frame) so the per-frame draw call is a
-  // flat array walk with no further lookups. Drops any route whose market
-  // has no resolvable pixel center (shouldn't happen for a real market, but
-  // shouldn't crash the overlay if it ever does).
-  function computeTradeNetworkEdges(tradeRoutes, marketCenters, marketByNumber) {
+  // flat array walk with no further lookups.
+  function aggregateHopEdges(routes, marketCenters, marketByNumber) {
     const pairs = new Map();
-    for (const route of tradeRoutes || []) {
-      if (typeof route.from !== "number" || typeof route.to !== "number" || route.from === route.to) continue;
-      if (!marketCenters.has(route.from) || !marketCenters.has(route.to)) continue;
-      const a = Math.min(route.from, route.to);
-      const b = Math.max(route.from, route.to);
-      const key = `${a}:${b}`;
-      let edge = pairs.get(key);
-      if (!edge) {
-        edge = { a, b, amount: 0 };
-        pairs.set(key, edge);
+    for (const route of routes) {
+      const seq = route.marketPath;
+      for (let i = 0; i < seq.length - 1; i++) {
+        const x = seq[i];
+        const y = seq[i + 1];
+        if (x === y) continue;
+        const a = Math.min(x, y);
+        const b = Math.max(x, y);
+        if (!marketCenters.has(a) || !marketCenters.has(b)) continue;
+        const key = `${a}:${b}`;
+        let edge = pairs.get(key);
+        if (!edge) {
+          edge = { a, b, amount: 0 };
+          pairs.set(key, edge);
+        }
+        edge.amount += route.amount || 0;
       }
-      edge.amount += route.amount || 0;
     }
     const edges = [...pairs.values()].filter((e) => e.amount > 0);
     for (const e of edges) {
@@ -2259,19 +2329,123 @@
     return edges;
   }
 
-  // One node per market with a resolvable center pixel, sized by how much
-  // trade actually flows through it (sum of every edge touching it) - a
-  // market that's a real hub reads as a bigger node, not just a same-size
-  // dot with more lines.
-  function computeMarketNodes(marketCenters, marketByNumber, edges) {
+  // Builds the decomposed-route index once at load: the full-network
+  // overview edge set (every real hop currently carrying trade), plus an
+  // index of which routes are anchored (originate or land) at each market -
+  // what the trade-network mapmode's click-to-isolate view needs without
+  // re-decomposing several thousand routes on every click. (A parallel
+  // per-COUNTRY index was tried and removed same session - `route.country`
+  // is whichever country's MERCHANT established that route, not who owns
+  // the market it lands in, so isolating by a clicked market's owner hid
+  // real trade other countries routed through it - confirmed on a real
+  // save: Eastern Rome's own Beijing-sourced porcelain trade was
+  // established by a different country's merchant and vanished from an
+  // Eastern-Rome-scoped view even though it plainly still touches
+  // Constantinople's market. Isolating by MARKET has no such blind spot,
+  // since anchoring only cares which market a route's real decomposed path
+  // starts/ends at, never who established it.)
+  function buildTradeHopIndex(tradeRoutes, locByNumber, marketCenters, marketByNumber) {
+    const routesByMarket = new Map();
+    const decomposed = [];
+    for (const route of tradeRoutes || []) {
+      if (typeof route.amount !== "number" || route.amount <= 0) continue;
+      const marketPath = decomposeTradeRouteMarketPath(route, locByNumber);
+      if (marketPath.length < 2) continue;
+      const entry = { amount: route.amount, marketPath };
+      decomposed.push(entry);
+      const anchors = new Set([marketPath[0], marketPath[marketPath.length - 1]]);
+      for (const m of anchors) {
+        if (!routesByMarket.has(m)) routesByMarket.set(m, []);
+        routesByMarket.get(m).push(entry);
+      }
+    }
+    const overviewEdges = aggregateHopEdges(decomposed, marketCenters, marketByNumber);
+    return {
+      overviewEdges,
+      edgesForMarket(marketId) {
+        return aggregateHopEdges(routesByMarket.get(marketId) || [], marketCenters, marketByNumber);
+      },
+    };
+  }
+
+  // Every market a country has any real presence in (at least one owned
+  // location belonging to it) - the seed set for "this nation's reach"
+  // reachability, not just its capital's market, since a real empire's
+  // territory usually spans several.
+  function marketsOwnedByCountry(locByNumber, countryNumber) {
+    const set = new Set();
+    for (const loc of locByNumber.values()) {
+      if (loc.owner === countryNumber && loc.market !== undefined && loc.market !== null) set.add(loc.market);
+    }
+    return set;
+  }
+
+  // Breadth-first walk of the real trade-route graph (`edges`, an
+  // undirected market-to-market adjacency) starting from `seedMarkets` -
+  // every market reachable via ANY chain of real trade, however many hops,
+  // not just the seeds' own directly-anchored routes. This is what "this
+  // nation's trade network" actually means once a route can relay through
+  // many intermediate markets (see buildTradeHopIndex's own comment): a
+  // market three hops downstream of one of the nation's own markets is
+  // still part of its reach, even though no single route directly
+  // connects them.
+  function reachableMarketSet(seedMarkets, edges) {
+    const adjacency = new Map();
+    for (const e of edges) {
+      if (!adjacency.has(e.a)) adjacency.set(e.a, []);
+      if (!adjacency.has(e.b)) adjacency.set(e.b, []);
+      adjacency.get(e.a).push(e.b);
+      adjacency.get(e.b).push(e.a);
+    }
+    const visited = new Set(seedMarkets);
+    const queue = [...seedMarkets];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const next of adjacency.get(cur) || []) {
+        if (!visited.has(next)) {
+          visited.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    return visited;
+  }
+
+  // One node per market actually touched by `edges` (not every market in
+  // the save - per user request, only the markets currently being traded
+  // with should show a node at all), sized by how much trade actually flows
+  // through it (sum of every edge touching it) - a market that's a real hub
+  // reads as a bigger node, not just a same-size dot with more lines.
+  // `highlightEdges`, when given (isolate mode), marks each node
+  // `connected: true/false` depending on whether it's ALSO touched by that
+  // narrower set - per user request, the draw code greys out anything not
+  // connected to whichever market was clicked instead of hiding it, so the
+  // rest of the world's active markets stay visible for spatial context.
+  function computeMarketNodes(marketCenters, marketByNumber, edges, highlightEdges) {
     const volumeByMarket = new Map();
     for (const e of edges) {
       volumeByMarket.set(e.a, (volumeByMarket.get(e.a) || 0) + e.amount);
       volumeByMarket.set(e.b, (volumeByMarket.get(e.b) || 0) + e.amount);
     }
+    let connectedSet = null;
+    if (highlightEdges) {
+      connectedSet = new Set();
+      for (const e of highlightEdges) {
+        connectedSet.add(e.a);
+        connectedSet.add(e.b);
+      }
+    }
     const nodes = [];
-    for (const [marketId, xy] of marketCenters) {
-      nodes.push({ x: xy.x, y: xy.y, color: marketRgb(marketId, marketByNumber), volume: volumeByMarket.get(marketId) || 0 });
+    for (const [marketId, volume] of volumeByMarket) {
+      const xy = marketCenters.get(marketId);
+      if (!xy) continue;
+      nodes.push({
+        x: xy.x,
+        y: xy.y,
+        color: marketRgb(marketId, marketByNumber),
+        volume,
+        connected: connectedSet ? connectedSet.has(marketId) : true,
+      });
     }
     return nodes;
   }
@@ -2367,8 +2541,70 @@
     const playerLabels = computePlayerLabels(idGrid, countryByNumber, mapState.excludedPlayers);
     const tradeGoodLabels = computeTradeGoodLabels(idGrid, locByNumber, locationsMeta);
     const marketCenters = computeMarketCenters(idGrid, marketByNumber);
-    const tradeNetworkEdges = computeTradeNetworkEdges(result.tradeRoutes, marketCenters, marketByNumber);
-    const marketNodes = computeMarketNodes(marketCenters, marketByNumber, tradeNetworkEdges);
+    const tradeHopIndex = buildTradeHopIndex(result.tradeRoutes, locByNumber, marketCenters, marketByNumber);
+    // Trade Network mapmode opens on the full world network. Clicking a
+    // market narrows it down to just that market's own routes (every real
+    // hop of every route anchored there, regardless of which country
+    // established the route - see buildTradeHopIndex's comment on why a
+    // per-country view keyed on route.country was tried and reverted).
+    // Separately, whenever a country ends up focused (`mapState.focusCountry`
+    // - clicking a nation in ANY mapmode and switching to Trade Network
+    // keeps that focus, same as every other mapmode already respects it)
+    // and no specific market is isolated, the view narrows to every market
+    // reachable via ANY chain of real trade from one of that nation's own
+    // markets (reachableMarketSet over the world graph) - NOT the flawed
+    // "routes this nation's own merchants established" this session
+    // already tried and reverted, and not just its home market's own
+    // directly-anchored routes either, since a nation's trade reach is
+    // transitive. Clicking empty water (or Escape) clears both back to the
+    // world view. isolatedMarketId is the only piece of click-driven state
+    // kept here - the actual edges/nodes to draw are computed fresh in
+    // computeTradeNetworkView() every time buildLUTs() runs (already called
+    // on every state-changing action: a click, a focus change, a mode
+    // switch), so there's nowhere for this to go stale the way an eagerly-
+    // mutated cache could.
+    let isolatedMarketId = 0;
+
+    function clearTradeNetworkIsolate() {
+      isolatedMarketId = 0;
+    }
+
+    function setTradeNetworkIsolate(marketId) {
+      isolatedMarketId = marketId || 0;
+    }
+
+    // `connectedMarkets` (null in the default world view - no restriction)
+    // is the single source of truth for "is this market part of the
+    // current isolate/focus" - both the node-greying (computeMarketNodes'
+    // highlightEdges) and the land-greying (mapState.tradeNetworkConnected
+    // Markets, read by tradeNetworkFillColor) key off the SAME set, so a
+    // market's territory and its own node dot always agree with each
+    // other instead of drifting out of sync the way land vs. nodes did
+    // before this got centralized here.
+    function computeTradeNetworkView() {
+      if (isolatedMarketId) {
+        const edges = tradeHopIndex.edgesForMarket(isolatedMarketId);
+        const connectedMarkets = new Set([isolatedMarketId]);
+        for (const e of edges) {
+          connectedMarkets.add(e.a);
+          connectedMarkets.add(e.b);
+        }
+        return { edges, nodes: computeMarketNodes(marketCenters, marketByNumber, tradeHopIndex.overviewEdges, edges), connectedMarkets };
+      }
+      if (mapState.focusCountry) {
+        const seeds = marketsOwnedByCountry(locByNumber, mapState.focusCountry);
+        if (seeds.size) {
+          const reachable = reachableMarketSet(seeds, tradeHopIndex.overviewEdges);
+          const edges = tradeHopIndex.overviewEdges.filter((e) => reachable.has(e.a) && reachable.has(e.b));
+          return { edges, nodes: computeMarketNodes(marketCenters, marketByNumber, tradeHopIndex.overviewEdges, edges), connectedMarkets: reachable };
+        }
+      }
+      return {
+        edges: tradeHopIndex.overviewEdges,
+        nodes: computeMarketNodes(marketCenters, marketByNumber, tradeHopIndex.overviewEdges),
+        connectedMarkets: null,
+      };
+    }
 
     function countryLabel(countryNumber) {
       const country = countryByNumber.get(countryNumber);
@@ -2997,6 +3233,10 @@
       const needs = marketGoodRows(market, 1);
       const surplus = marketGoodRows(market, -1);
       const merchantRows = marketMerchantRows(market);
+      const isolateNote =
+        currentMode === modes.tradeNetwork
+          ? `<p class="market-isolate-note">Showing this market's own trade routes only, hop-by-hop through the real markets they relay across. Close this panel (or click open water/press Escape) to return to the world network.</p>`
+          : "";
 
       return `
         <div class="location-detail-head">
@@ -3006,6 +3246,7 @@
           </div>
           <button type="button" class="location-detail-close market-detail-close" title="Close market details">x</button>
         </div>
+        ${isolateNote}
         <h4 class="location-detail-stats-label">Market Stats</h4>
         <div class="location-detail-stats">${stats}</div>
         <section class="location-detail-section">
@@ -3129,15 +3370,20 @@
 
     function clearLocationDetails() {
       selectedLocationId = 0;
+      clearTradeNetworkIsolate();
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       updateMapBodyClasses();
-      render();
+      // redraw(), not render() - clearing the trade-network isolate needs a
+      // fresh buildLUTs() call to actually recompute the view (it's no
+      // longer an eagerly-mutated cache, see computeTradeNetworkView).
+      redraw();
     }
 
     function clearMarketDetailsOutsideMarketModes() {
       if ((currentMode === modes.marketAccess || currentMode === modes.tradeNetwork) || !details.querySelector(".market-detail-close")) return;
       selectedLocationId = 0;
+      clearTradeNetworkIsolate();
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
       updateMapBodyClasses();
@@ -3146,6 +3392,7 @@
     function clearCountryDetails() {
       selectedCountryId = 0;
       mapState.focusCountry = 0;
+      clearTradeNetworkIsolate();
       updateMetricScale(0);
       countryDetails.hidden = true;
       countryDetails.innerHTML = "";
@@ -3158,6 +3405,7 @@
       selectedCountryId = 0;
       mapState.focusCountry = 0;
       mapState.focusTradeGood = null;
+      clearTradeNetworkIsolate();
       updateMetricScale(0);
       details.hidden = true;
       details.innerHTML = '<div class="location-detail-empty">Click a land location to inspect ownership, population, tax, buildings, and local metrics.</div>';
@@ -3201,13 +3449,22 @@
       // popup instead of the usual per-location panel - per the user's ask,
       // clicking a market should surface trade volume/rank/needs-surplus,
       // not development/population/tax for whichever location happened to
-      // be under the cursor.
+      // be under the cursor. Deliberately NOT filtered by owner/country -
+      // an isolate-by-owning-country variant was tried and reverted same
+      // session (see buildTradeHopIndex's comment): it made market
+      // selection inside player territory unreliable and hid real trade
+      // other countries routed through a player's own markets.
       if ((currentMode === modes.marketAccess || currentMode === modes.tradeNetwork) && loc && loc.market !== undefined && loc.market !== null) {
         if (selectedCountryId) clearCountryDetails();
         selectedLocationId = id;
         showMarketDetails(loc.market);
         return;
       }
+      // Trade Network: nothing left but open water/an unmarketed location -
+      // clear any isolate back to the world view rather than leaving a
+      // stale market's routes highlighted while looking at something
+      // unrelated.
+      if (currentMode === modes.tradeNetwork && isolatedMarketId) clearTradeNetworkIsolate();
       if (loc && loc.owner) showCountryDetails(loc.owner, false);
       // A sea/lake tile is never owned, so it can't ever hit the branch
       // above - but a nation view from a PREVIOUS click can still be open.
@@ -3224,6 +3481,10 @@
 
     function showMarketDetails(marketId) {
       if (!marketByNumber.has(marketId)) return;
+      // Trade Network mapmode: clicking a market narrows the drawn edges to
+      // just its own routes (see setTradeNetworkIsolate) - Market Access
+      // mode reuses this same popup but has no edges to isolate.
+      if (currentMode === modes.tradeNetwork) setTradeNetworkIsolate(marketId);
       details.hidden = false;
       details.innerHTML = marketDetailsHtml(marketId);
       const close = details.querySelector(".market-detail-close");
@@ -3339,6 +3600,13 @@
       const borderR = new Uint8ClampedArray(maxId + 1);
       const borderG = new Uint8ClampedArray(maxId + 1);
       const borderB = new Uint8ClampedArray(maxId + 1);
+      // Computed BEFORE the color loop below (not after, where it used to
+      // live) - tradeNetworkFillColor (called from that loop, via
+      // currentMode.colorFor) reads mapState.tradeNetworkConnectedMarkets,
+      // so it has to already be current by the time the loop runs, not
+      // updated only once the loop (and the LUTs it produced) is done.
+      const tnView = currentMode === modes.tradeNetwork ? computeTradeNetworkView() : null;
+      mapState.tradeNetworkConnectedMarkets = tnView ? tnView.connectedMarkets : null;
       for (let id = 0; id <= maxId; id++) {
         const water = isWaterLUT[id];
         const c = water ? WATER_COLOR : currentMode.colorFor(id);
@@ -3383,8 +3651,8 @@
           currentMode === modes.trade && mapState.focusTradeGood
             ? tradeGoodLabels.filter((label) => label.material === mapState.focusTradeGood)
             : null,
-        tradeNetworkEdges: currentMode === modes.tradeNetwork ? tradeNetworkEdges : null,
-        marketNodes: currentMode === modes.tradeNetwork ? marketNodes : null,
+        tradeNetworkEdges: tnView ? tnView.edges : null,
+        marketNodes: tnView ? tnView.nodes : null,
       };
     }
 

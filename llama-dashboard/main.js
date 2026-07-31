@@ -8,28 +8,28 @@
 // snapshots.jsonl/war-events.jsonl/state.json concurrently, which can
 // interleave writes and corrupt the ledger.
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, crashReporter } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const DataPaths = require("./data-paths.js");
+const UpdatePolicy = require("./update-policy.js");
+const handlingSquirrelEvent = require("electron-squirrel-startup");
 
-// A real, currently-growing live campaign's save file (74MB+, 2500+
-// countries) needs several GB of transient heap to parse (see
-// llama-log-machine.js's parseSaveInWorker, which already raises ITS OWN
-// worker's ceiling) - but the main process receives that same parsed
-// result back over IPC from up to 4 concurrent workers and holds/re-
-// serializes it for the renderer, and Electron's main-process V8 old-space
-// ceiling is smaller than a worker's and NOT changeable via
-// app.commandLine.appendSwitch("js-flags", ...) once the process is
-// already running (confirmed empirically - that only configures newly-
-// spawned child/renderer processes, not the already-initialized main
-// isolate) - observed to OOM-crash the whole app around ~1.4GB regardless.
-// The only way to actually raise the MAIN process's own ceiling is to pass
-// --js-flags as a real startup argument, so relaunch once with it added
-// (guarded so this can't loop forever) before doing anything else.
-if (!process.argv.some((a) => a.startsWith("--js-flags"))) {
-  app.relaunch({ args: process.argv.slice(1).concat(["--js-flags=--max-old-space-size=6144"]) });
-  app.exit(0);
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.squirrel.LlamaScoreDashboard.LlamaScoreDashboard");
 }
+// `productName` makes the installer user-facing name readable, but changing
+// Electron's default userData folder with it would strand settings from the
+// existing portable app. Keep the original application identity for settings
+// and diagnostics across the migration.
+app.setPath("userData", path.join(app.getPath("appData"), "llama-score-dashboard"));
+
+// Keep local crash dumps even when the process disappears before JavaScript
+// can report an error. Nothing is uploaded; a future diagnostics/export flow
+// can include these only with the user's explicit action.
+crashReporter.start({ uploadToServer: false, compress: true });
+app.setAppLogsPath();
+const persistentLogFile = path.join(app.getPath("logs"), "dashboard.log");
 
 // Two copies of this app (e.g. one launched from an old unzipped folder, one
 // from a fresh re-download elsewhere) polling and writing to the same
@@ -51,14 +51,28 @@ if (!gotSingleInstanceLock) {
   });
 }
 
-// Ledger lives next to the exe in a packaged (unzipped-and-run) install, so
-// a fresh download "just works" - the web app's "Connect campaign folder..."
-// picker then points at that same sibling `data` folder to share one ledger
-// instead of starting a second, disconnected one. In dev (`npm start`),
-// falls back to the repo's shared recorder data dir instead.
+function knownLegacyDataDirs() {
+  const documentsDir = app.getPath("documents");
+  return [
+    path.join(path.dirname(process.execPath), "data"),
+    path.join(documentsDir, "Llama-Score-Dashboard-win32-x64", "data"),
+    path.join(documentsDir, "Llama Score Dashboard-win32-x64", "data"),
+  ];
+}
+
+// Packaged builds use one stable Documents folder, independent of wherever
+// the executable is installed or extracted. The known old release locations
+// are checked on first run so moving from the portable ZIP to Setup.exe keeps
+// the same history. Development still uses the repo's recorder data.
 function defaultDataDir() {
-  if (app.isPackaged) return path.join(path.dirname(process.execPath), "data");
-  return path.join(__dirname, "..", "llama-score-automatic-logging-machine", "data");
+  return DataPaths.resolveDefaultDataDir({
+    isPackaged: app.isPackaged,
+    execPath: process.execPath,
+    documentsDir: app.getPath("documents"),
+    legacyDirs: knownLegacyDataDirs(),
+    devDataDir: path.join(__dirname, "..", "llama-score-automatic-logging-machine", "data"),
+    log: (line) => console.log(line),
+  });
 }
 
 function vendorPath(...parts) {
@@ -104,7 +118,14 @@ function buildConfig() {
   // longer exist. Only honor a saved dataDir if it still actually exists;
   // otherwise fall through to a fresh defaultDataDir() for THIS exe, same as
   // if nothing had ever been saved.
-  const cachedDataDirValid = typeof settings.dataDir === "string" && settings.dataDir && fs.existsSync(settings.dataDir);
+  const cachedDataDirIsKnownLegacy =
+    typeof settings.dataDir === "string" &&
+    knownLegacyDataDirs().some((legacyDir) => path.resolve(legacyDir) === path.resolve(settings.dataDir));
+  const cachedDataDirValid =
+    typeof settings.dataDir === "string" &&
+    settings.dataDir &&
+    fs.existsSync(settings.dataDir) &&
+    !cachedDataDirIsKnownLegacy;
   if (cachedDataDirValid) args.dataDir = settings.dataDir;
   const config = Recorder.readConfig(args);
   if (!cachedDataDirValid) config.dataDir = defaultDataDir();
@@ -116,20 +137,86 @@ function buildConfig() {
 
 const LOG_LIMIT = 300;
 const logLines = [];
-function pushLog(line) {
-  logLines.push({ at: new Date().toISOString(), line: String(line) });
+function pushLog(line, level) {
+  const at = new Date().toISOString();
+  const text = String(line);
+  logLines.push({ at, line: text });
   if (logLines.length > LOG_LIMIT) logLines.shift();
+  try {
+    fs.mkdirSync(path.dirname(persistentLogFile), { recursive: true });
+    fs.appendFileSync(persistentLogFile, `${at} ${level || "INFO"} ${text}\n`, "utf8");
+  } catch {
+    // Logging must never take down the recorder it is meant to diagnose.
+  }
 }
 const realConsoleLog = console.log.bind(console);
 const realConsoleWarn = console.warn.bind(console);
 console.log = (...a) => {
-  pushLog(a.map(String).join(" "));
+  pushLog(a.map(String).join(" "), "INFO");
   realConsoleLog(...a);
 };
 console.warn = (...a) => {
-  pushLog("WARN: " + a.map(String).join(" "));
+  pushLog("WARN: " + a.map(String).join(" "), "WARN");
   realConsoleWarn(...a);
 };
+process.on("uncaughtExceptionMonitor", (err, origin) => {
+  pushLog(`FATAL (${origin}): ${err && err.stack ? err.stack : String(err)}`, "FATAL");
+});
+
+let autoUpdateStartTimer = null;
+let stopAutoUpdates = null;
+
+function updaterLogValue(value) {
+  if (value instanceof Error) return value.stack || value.message;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function startAutoUpdates() {
+  const eligibility = UpdatePolicy.updateEligibility({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    execPath: process.execPath,
+    argv: process.argv,
+    handlingSquirrelEvent,
+  });
+  if (!eligibility.enabled) {
+    pushLog(`Automatic updates disabled: ${eligibility.reason}`);
+    return;
+  }
+
+  const begin = () => {
+    autoUpdateStartTimer = null;
+    try {
+      const { updateElectronApp, UpdateSourceType } = require("update-electron-app");
+      const controller = updateElectronApp({
+        updateSource: {
+          type: UpdateSourceType.ElectronPublicUpdateService,
+          repo: UpdatePolicy.UPDATE_REPOSITORY,
+        },
+        updateInterval: "1 hour",
+        logger: {
+          log: (...values) => pushLog(`[updater] ${values.map(updaterLogValue).join(" ")}`),
+        },
+      });
+      stopAutoUpdates = controller.stopUpdates;
+      pushLog(`Automatic updates enabled via ${UpdatePolicy.UPDATE_REPOSITORY}`);
+    } catch (err) {
+      pushLog(`Automatic updater failed to start: ${err && err.stack ? err.stack : String(err)}`, "ERROR");
+    }
+  };
+
+  if (eligibility.delayMs) {
+    pushLog(`Automatic update check delayed ${eligibility.delayMs / 1000}s while Squirrel finishes first-run setup`);
+    autoUpdateStartTimer = setTimeout(begin, eligibility.delayMs);
+  } else {
+    begin();
+  }
+}
 
 // --- recorder state + scan loop ---
 
@@ -790,19 +877,32 @@ ipcMain.handle("players:setCountryOverride", (_event, countryNumber, playerName)
   return true;
 });
 
-app.whenReady().then(async () => {
-  createWindow();
-  await initRecorder();
-  await tick();
-  startPolling();
+if (!handlingSquirrelEvent) {
+  app.whenReady().then(async () => {
+    createWindow();
+    startAutoUpdates();
+    await initRecorder();
+    await tick();
+    startPolling();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
+}
 
 app.on("before-quit", () => {
   app.isQuitting = true;
+  if (autoUpdateStartTimer) clearTimeout(autoUpdateStartTimer);
+  autoUpdateStartTimer = null;
+  if (stopAutoUpdates) stopAutoUpdates();
+  stopAutoUpdates = null;
+});
+
+app.on("child-process-gone", (_event, details) => {
+  console.warn(
+    `Electron child process gone: type=${details.type || "unknown"} reason=${details.reason || "unknown"} exitCode=${details.exitCode}`
+  );
 });
 
 app.on("window-all-closed", () => {

@@ -11,6 +11,12 @@ const os = require("os");
 const path = require("path");
 const packager = require("electron-packager");
 
+const certificateFile = process.env.WINDOWS_CERTIFICATE_FILE;
+const certificatePassword = process.env.WINDOWS_CERTIFICATE_PASSWORD;
+if (Boolean(certificateFile) !== Boolean(certificatePassword)) {
+  throw new Error("WINDOWS_CERTIFICATE_FILE and WINDOWS_CERTIFICATE_PASSWORD must either both be set or both be omitted.");
+}
+
 const root = path.join(__dirname, "..");
 const releaseDir = path.join(root, "release");
 const packagedDir = path.join(releaseDir, "Llama Score Dashboard-win32-x64");
@@ -40,9 +46,22 @@ let dataRestored = !hadData;
       out: releaseDir,
       overwrite: true,
       icon: path.join(root, "assets", "llama-logo.ico"),
+      ...(certificateFile
+        ? {
+            windowsSign: {
+              certificateFile,
+              certificatePassword,
+              hashes: ["sha256"],
+              timestampServer: process.env.WINDOWS_TIMESTAMP_URL || "http://timestamp.digicert.com",
+              description: "Llama Score Dashboard",
+              website: "https://llamabeg.netlify.app",
+            },
+          }
+        : {}),
       ignore: [
         /^\/release(?:\/|$)/,
-        /^\/(?!main\.js$|preload\.js$|renderer(?:\/|$)|package\.json$|vendor(?:\/|$)|assets(?:\/|$))/,
+        /^\/(?!main\.js$|preload\.js$|data-paths\.js$|update-policy\.js$|renderer(?:\/|$)|package\.json$|vendor(?:\/|$)|assets(?:\/|$)|node_modules(?:\/|$))/,
+        /^\/node_modules\/(?!(?:electron-squirrel-startup|update-electron-app|github-url-to-object|is-url|ms)(?:\/|$))/,
       ],
     });
     packaged = true;

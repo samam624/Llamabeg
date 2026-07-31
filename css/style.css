@@ -1455,6 +1455,16 @@ body.map-view-active #mapContainer {
   text-transform: capitalize;
 }
 
+.market-isolate-note {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
 .location-context-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(7.4rem, 1fr));

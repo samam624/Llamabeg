@@ -113,7 +113,7 @@ without credentials. The workflow uploads only Setup.exe, the `.nupkg`,
 `RELEASES`, and the empty-data portable ZIP; settings, saves, and ledger data
 remain outside the repository and packaged artifacts.
 
-Configure these repository secrets:
+Optionally configure these repository secrets:
 
 - `WINDOWS_CERTIFICATE_PFX_BASE64`: base64 contents of the trusted Windows
   code-signing `.pfx`.
@@ -122,8 +122,11 @@ Configure these repository secrets:
 The workflow's built-in `GITHUB_TOKEN` publishes the release to this
 repository; no personal access token or second release repository is needed.
 `.github/workflows/desktop-release.yml` supports unsigned manual CI builds,
-but a tagged release refuses to publish unless the binaries have valid
-Authenticode signatures.
+and publishes a verified unsigned tagged release when no certificate is
+configured. If both secrets are present, it signs the application and
+installer and requires valid Authenticode signatures before publishing.
+Unsigned installers trigger Windows's unknown-publisher warning on first
+installation.
 
 ### Does every push update installed apps?
 
@@ -135,7 +138,8 @@ Installed clients change only when all of these conditions are satisfied:
 2. That source and `.github/workflows/desktop-release.yml` are committed and
    pushed to the public repository.
 3. A matching tag such as `v1.0.2` is pushed.
-4. The tagged Windows workflow succeeds, including Authenticode verification.
+4. The tagged Windows workflow succeeds, including Authenticode verification
+   when signing credentials are configured.
 5. The resulting GitHub Release contains Setup.exe, the versioned full
    `.nupkg`, `RELEASES`, and the empty-data portable ZIP.
 

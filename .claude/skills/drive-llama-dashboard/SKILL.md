@@ -111,7 +111,7 @@ node .claude/skills/drive-llama-dashboard/driver.js quit
   in the app's own `window`/`localStorage`.
 - If you changed `saveDir`/`dataDir` via `set-settings` for a scratch test,
   **restore the real values before finishing** (real `saveDir` is
-  `C:\Users\samca\Documents\Paradox Interactive\Europa Universalis V\save
+  `%USERPROFILE%\Documents\Paradox Interactive\Europa Universalis V\save
   games`; pass `dataDir` as `""` to clear an override back to the
   packaged-app default rather than leaving a scratch path pinned - an empty
   string deletes the override key rather than writing an empty string, per

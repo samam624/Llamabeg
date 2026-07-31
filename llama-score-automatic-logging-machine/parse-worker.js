@@ -12,6 +12,17 @@ const crypto = require("crypto");
 
 const Clausewitz = require(path.join(__dirname, "../js/clausewitz.js"));
 const ClausewitzBinary = require(path.join(__dirname, "../js/clausewitz-binary.js"));
+const Recorder = require(path.join(__dirname, "llama-log-machine.js"));
+
+function compactResult(file, hash, result, playerWarsOnly) {
+  return {
+    hash,
+    seed: Recorder.buildSnapshotSeed(file, hash, result, {
+      playerWarsOnly: !!playerWarsOnly,
+      storeAllEconomyCountries: false,
+    }),
+  };
+}
 
 async function parseOne(file, playerWarsOnly) {
   const bytes = fs.readFileSync(file);
@@ -26,31 +37,27 @@ async function parseOne(file, playerWarsOnly) {
   // needed even though this recorder has no direct use for map data).
   if (formatCode === "00") {
     const text = bytes.toString("utf8");
-    return {
-      hash,
-      result: Clausewitz.parseSave(text, {
+    const result = Clausewitz.parseSave(text, {
         includeWars: true,
         includeLocations: true,
         includeModifierState: true,
         playerWarsOnly: !!playerWarsOnly,
-      }),
-    };
+      });
+    return compactResult(file, hash, result, playerWarsOnly);
   }
   if (formatCode === "03") {
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    return {
-      hash,
-      result: await ClausewitzBinary.parseCompressedSave(buffer, {
+    const result = await ClausewitzBinary.parseCompressedSave(buffer, {
         includeWars: true,
         includeLocations: true,
         includeModifierState: true,
         playerWarsOnly: !!playerWarsOnly,
-      }),
-    };
+      });
+    return compactResult(file, hash, result, playerWarsOnly);
   }
   throw new Error(`Unsupported save format code ${formatCode}`);
 }
 
 parseOne(workerData.file, workerData.playerWarsOnly)
-  .then(({ hash, result }) => parentPort.postMessage({ ok: true, hash, result }))
+  .then(({ hash, seed }) => parentPort.postMessage({ ok: true, hash, seed }))
   .catch((err) => parentPort.postMessage({ ok: false, error: err.message, code: err.code }));

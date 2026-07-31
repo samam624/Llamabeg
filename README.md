@@ -84,8 +84,9 @@ push the matching version tag. The Windows release workflow then builds and veri
 installer, Squirrel package, update manifest, and portable fallback before publishing a
 GitHub Release.
 
-Once that signed release is public, Squirrel-installed copies discover it at startup or
-during the hourly check, download it in the background, and ask before restarting.
+Once that release is public, Squirrel-installed copies discover it at startup or during
+the hourly check, download it in the background, and ask before restarting. Unsigned
+installers still trigger Windows's unknown-publisher warning on first installation.
 Portable ZIP and development copies never auto-update. See the
 [desktop release checklist](llama-dashboard/README.md#automatic-updates-and-github-releases)
 for the exact prerequisites and commands.

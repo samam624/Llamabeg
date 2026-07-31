@@ -15,7 +15,7 @@ them:
    over from the website later"). It has its own real recorded campaign data
    in a sibling `data/` folder (2+ real campaigns as of 2026-07-19 - treat
    that data as real, not disposable).
-2. **`C:\Users\samca\Documents\Llama-Score-Dashboard-win32-x64`** - the
+2. **`%USERPROFILE%\Documents\Llama-Score-Dashboard-win32-x64`** - the
    user's actual day-to-day live install, entirely separate, does NOT
    auto-update from either the repo or build #1. Only touch this if
    explicitly asked to deploy there - it's a bigger, separate step (build,
