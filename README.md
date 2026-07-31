@@ -1,13 +1,15 @@
 # Llamabeg
 
 A browser-based analyzer for Europa Universalis V save files — players, countries, world
-stats, and multiplayer war scoring — in the spirit of [pdx.tools](https://pdx.tools) and
-[Skanderbeg](https://www.skanderbeg.pm/) (neither of which support EU5). Everything runs
-client-side: no build step to view it, and parsing happens entirely in your browser — a
-save you open never leaves it. The one exception is opt-in: on a configured deploy, an
-explicit **Share link** uploads a compressed copy of that one save so you can hand a
-viewable link to someone who doesn't have the file (see "Sharing a save" below). Nothing
-is uploaded automatically, ever.
+stats, and multiplayer war scoring — in the spirit of tools like [pdx.tools](https://pdx.tools)
+and [Skanderbeg](https://www.skanderbeg.pm/). pdx.tools already supports EU5 itself
+(Skanderbeg doesn't); this project's own binary save parser follows the same two-phase
+tape architecture as [jomini](https://github.com/rakaly/jomini), the Rust parsing library
+pdx.tools is built on. Everything runs client-side: no build step to view it, and parsing
+happens entirely in your browser — a save you open never leaves it. The one exception is
+opt-in: on a configured deploy, an explicit **Share link** uploads a compressed copy of
+that one save so you can hand a viewable link to someone who doesn't have the file (see
+"Sharing a save" below). Nothing is uploaded automatically, ever.
 
 Comes with two companion pieces for tracking a multiplayer campaign's wars over time (EU5
 purges a concluded war from the save faster than most autosave intervals, so a single save
@@ -27,14 +29,39 @@ White Peace).
 
 - Drop in a `.eu5` save — compressed (straight from the game's save folder) or melted
   (plaintext) — and get an overview of countries, players, and world stats.
-- **Map** with toggleable mapmodes (political, players, development, population, trade
-  goods, religion, culture), pan/zoom, and hover detail.
+- **Map** with toggleable mapmodes — Political, Players, Development, Population, an
+  Economy group (Tax Base, Tax Gap, Prosperity, Control), a Trade group (Markets, Trade
+  Network, RGO), and a Demographic group (Religion, Culture) — pan/zoom, and hover
+  detail. Trade Network draws each market's real established trade routes (decomposed
+  hop-by-hop through the actual markets they relay across, not a straight line between
+  two distant endpoints) with click-to-isolate a single market's own connections.
 - **Metrics** tables for every country and player (economy, military, demographics,
   estates), sortable and filterable.
 - **Graphs** of population and tax base over time.
 - **Black Death** tracker — real per-country death tolls, not a population-diff guess.
 - **Llama Score / Alpaca Score** — multiplayer war scoring, PvP and PvE modes, backed by
   the campaign-ledger recorder above.
+
+## Windows desktop app
+
+The recommended recorder is the normal per-user Windows installation:
+
+1. Download [`Llama-Score-Dashboard-Setup.exe`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Setup.exe)
+   from the latest GitHub Release.
+2. Run the installer. It does not require administrator access.
+3. Open **Llama Score Dashboard** from the Start menu.
+
+Campaign history is stored independently of the application under
+`Documents\Llamabeg\Campaign Data`, so replacing or updating the installed app does not
+replace its ledger. On first packaged launch, an older extracted dashboard's sibling
+`data/` folder is copied through a hash-verified migration and the original is retained
+as a backup.
+
+Squirrel-installed builds check for updates at startup and hourly, download them in the
+background, and ask before restarting. The portable ZIP remains available as a fallback,
+but portable and development builds deliberately do not update themselves. See
+[llama-dashboard/README.md](llama-dashboard/README.md) for build, release, and migration
+details.
 
 ## Running locally
 
