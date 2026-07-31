@@ -8,6 +8,7 @@ const execPath = path.join("C:\\", "Users", "Tester", "AppData", "Local", "Llama
 const expectedUpdateExe = path.resolve(path.dirname(execPath), "..", "Update.exe");
 
 assert.strictEqual(UpdatePolicy.UPDATE_REPOSITORY, "samam624/Llamabeg");
+assert.match(UpdatePolicy.RELEASE_API_URL, /samam624\/Llamabeg\/releases\/latest$/);
 assert.strictEqual(UpdatePolicy.squirrelUpdateExe(execPath), expectedUpdateExe);
 
 assert.deepStrictEqual(
@@ -41,6 +42,7 @@ const installed = UpdatePolicy.updateEligibility({
   existsSync: (candidate) => candidate === expectedUpdateExe,
 });
 assert.strictEqual(installed.enabled, true);
+assert.strictEqual(installed.mode, "automatic");
 assert.strictEqual(installed.delayMs, 0);
 
 const firstRun = UpdatePolicy.updateEligibility({
@@ -65,5 +67,22 @@ assert.strictEqual(
   }).enabled,
   false
 );
+
+for (const platform of ["darwin", "linux"]) {
+  const eligibility = UpdatePolicy.updateEligibility({
+    isPackaged: true,
+    platform,
+    execPath: "/Applications/Llama Score Dashboard",
+    argv: [],
+    handlingSquirrelEvent: false,
+  });
+  assert.strictEqual(eligibility.enabled, true);
+  assert.strictEqual(eligibility.mode, "manual");
+}
+
+assert.strictEqual(UpdatePolicy.isNewerVersion("1.0.2", "v1.1.0"), true);
+assert.strictEqual(UpdatePolicy.isNewerVersion("1.1.0", "v1.1.0"), false);
+assert.strictEqual(UpdatePolicy.isNewerVersion("2.0.0", "v1.9.9"), false);
+assert.strictEqual(UpdatePolicy.isNewerVersion("invalid", "v1.1.0"), false);
 
 console.log("desktop update policy: ok");

@@ -43,7 +43,10 @@
 /llama-dashboard/node_modules/
 /llama-dashboard/out/
 /llama-dashboard/release/
+/llama-dashboard/release-assets/
 /llama-dashboard/vendor/
+/llama-dashboard/assets/llama-logo.icns
+/llama-dashboard/assets/llama-logo.iconset/
 
 # Internal dev notes - session diaries / infra notes with personal data,
 # not meant for public view. Kept locally, just not shipped.

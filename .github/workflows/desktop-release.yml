@@ -70,37 +70,203 @@ jobs:
             npm.cmd run verify-update-release
           }
 
-      - name: Retain verified CI artifacts
+      - name: Stage Windows release assets
+        run: |
+          $tagArguments = @()
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tagArguments = @("--tag", $env:GITHUB_REF_NAME)
+          }
+          npm.cmd run stage-platform-release -- --platform win32 --arch x64 @tagArguments
+
+      - name: Retain verified Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-score-dashboard-${{ github.ref_name }}-${{ github.run_number }}
+          name: llama-score-dashboard-windows-x64-${{ github.run_number }}
           if-no-files-found: error
-          retention-days: 14
-          path: |
-            llama-dashboard/out/make/squirrel.windows/x64/Llama-Score-Dashboard-Setup.exe
-            llama-dashboard/out/make/squirrel.windows/x64/LlamaScoreDashboard-*-full.nupkg
-            llama-dashboard/out/make/squirrel.windows/x64/RELEASES
-            llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip
+          retention-days: 1
+          path: llama-dashboard/release-assets/*
 
-      - name: Publish verified update release
-        if: github.ref_type == 'tag'
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: llama-dashboard
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: llama-dashboard/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build macOS application icon
+        run: |
+          set -euo pipefail
+          iconset="assets/llama-logo.iconset"
+          source_icon="assets/llama-logo-avatar.png"
+          mkdir -p "$iconset"
+          sips -z 16 16 "$source_icon" --out "$iconset/icon_16x16.png" >/dev/null
+          sips -z 32 32 "$source_icon" --out "$iconset/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32 "$source_icon" --out "$iconset/icon_32x32.png" >/dev/null
+          sips -z 64 64 "$source_icon" --out "$iconset/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128 "$source_icon" --out "$iconset/icon_128x128.png" >/dev/null
+          sips -z 256 256 "$source_icon" --out "$iconset/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256 "$source_icon" --out "$iconset/icon_256x256.png" >/dev/null
+          sips -z 512 512 "$source_icon" --out "$iconset/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 "$source_icon" --out "$iconset/icon_512x512.png" >/dev/null
+          sips -z 1024 1024 "$source_icon" --out "$iconset/icon_512x512@2x.png" >/dev/null
+          iconutil -c icns "$iconset" -o assets/llama-logo.icns
+
+      - name: Build macOS DMG and portable ZIP
+        run: npm run make-platform -- --platform=darwin --arch=${{ matrix.arch }}
+
+      - name: Verify and stage macOS release assets
+        run: |
+          set -euo pipefail
+          tag_arguments=()
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_arguments=(--tag "$GITHUB_REF_NAME")
+          fi
+          npm run stage-platform-release -- --platform darwin --arch "${{ matrix.arch }}" "${tag_arguments[@]}"
+
+      - name: Retain verified macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-score-dashboard-macos-${{ matrix.arch }}-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 1
+          path: llama-dashboard/release-assets/*
+
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: llama-dashboard
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fakeroot rpm
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: llama-dashboard/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build Linux DEB, RPM, and portable ZIP
+        run: npm run make-platform -- --platform=linux --arch=${{ matrix.arch }}
+
+      - name: Verify and stage Linux release assets
+        run: |
+          set -euo pipefail
+          tag_arguments=()
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            tag_arguments=(--tag "$GITHUB_REF_NAME")
+          fi
+          npm run stage-platform-release -- --platform linux --arch "${{ matrix.arch }}" "${tag_arguments[@]}"
+
+      - name: Retain verified Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-score-dashboard-linux-${{ matrix.arch }}-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 1
+          path: llama-dashboard/release-assets/*
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs:
+      - build-windows
+      - build-macos
+      - build-linux
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Download all verified platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: llama-score-dashboard-*-${{ github.run_number }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify complete release set and write checksums
+        run: |
+          set -euo pipefail
+          expected=(
+            Llama-Score-Dashboard-Setup.exe
+            Llama-Score-Dashboard-win32-x64.zip
+            LlamaScoreDashboard-${GITHUB_REF_NAME#v}-full.nupkg
+            RELEASES
+            Llama-Score-Dashboard-macOS-x64.dmg
+            Llama-Score-Dashboard-macOS-x64.zip
+            Llama-Score-Dashboard-macOS-arm64.dmg
+            Llama-Score-Dashboard-macOS-arm64.zip
+            Llama-Score-Dashboard-Linux-x64.deb
+            Llama-Score-Dashboard-Linux-x64.rpm
+            Llama-Score-Dashboard-Linux-x64.zip
+            Llama-Score-Dashboard-Linux-arm64.deb
+            Llama-Score-Dashboard-Linux-arm64.rpm
+            Llama-Score-Dashboard-Linux-arm64.zip
+          )
+          for artifact in "${expected[@]}"; do
+            test -s "release-assets/$artifact"
+          done
+          (
+            cd release-assets
+            sha256sum "${expected[@]}" > SHA256SUMS.txt
+          )
+          test "$(find release-assets -maxdepth 1 -name 'verification-*.json' | wc -l)" -eq 5
+
+      - name: Publish verified multi-platform release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $signatureDescription = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_FILE)) {
-            "Verified unsigned Windows installer"
-          } else {
-            "Verified signed Windows installer"
-          }
-          $assets = @(
-            "out/make/squirrel.windows/x64/Llama-Score-Dashboard-Setup.exe",
-            "out/make/squirrel.windows/x64/LlamaScoreDashboard-$((Get-Content package.json -Raw | ConvertFrom-Json).version)-full.nupkg",
-            "out/make/squirrel.windows/x64/RELEASES",
-            "release/Llama-Score-Dashboard-win32-x64.zip"
+          set -euo pipefail
+          mapfile -t assets < <(
+            find release-assets -maxdepth 1 -type f \
+              ! -name 'verification-*.json' \
+              -printf '%p\n' | sort
           )
-          gh release create $env:GITHUB_REF_NAME @assets `
-            --repo $env:RELEASE_REPOSITORY `
-            --verify-tag `
-            --title "Llama Score Dashboard $env:GITHUB_REF_NAME" `
-            --notes "$signatureDescription, Squirrel update package, and portable fallback for $env:GITHUB_REF_NAME." `
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --verify-tag \
+            --title "Llama Score Dashboard $GITHUB_REF_NAME" \
+            --notes "Verified Windows x64, macOS Intel/Apple Silicon, and Linux x64/ARM64 packages. Windows, macOS, and Linux artifacts are currently unsigned; see the README for first-launch instructions. Windows Squirrel installs update automatically. macOS and Linux builds notify users when a new release is available." \
             --latest

@@ -1,6 +1,6 @@
 {
   "name": "llama-score-dashboard",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "private": true,
   "productName": "Llama Score Dashboard",
   "author": "Llamabeg",
@@ -12,17 +12,23 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --check main.js && node --check data-paths.js && node --check update-policy.js && node --check scripts/verify-update-release.js && node --check scripts/validate-desktop-workflow.js && node --check ../llama-score-automatic-logging-machine/llama-log-machine.js && node --check ../llama-score-automatic-logging-machine/parse-worker.js && node ../test/recorder-snapshot-seed.js && node ../test/dashboard-data-paths.js && node ../test/desktop-update-policy.js && node ../test/update-release-wrapper.js && node scripts/validate-desktop-workflow.js",
+    "test": "node --check main.js && node --check data-paths.js && node --check platform-paths.js && node --check update-policy.js && node --check scripts/stage-platform-release.js && node --check scripts/verify-update-release.js && node --check scripts/validate-desktop-workflow.js && node --check ../llama-score-automatic-logging-machine/llama-log-machine.js && node --check ../llama-score-automatic-logging-machine/parse-worker.js && node ../test/recorder-snapshot-seed.js && node ../test/dashboard-data-paths.js && node ../test/desktop-platform-paths.js && node ../test/desktop-update-policy.js && node ../test/update-release-wrapper.js && node scripts/validate-desktop-workflow.js",
     "prepare-vendor": "node scripts/prepare-vendor.js",
     "dist": "npm run prepare-vendor && node scripts/package-dashboard.js",
     "package-zip": "node scripts/package-release-zip.js",
     "release": "npm test && npm run dist && npm run package-zip",
     "make-installer": "npm test && npm run prepare-vendor && electron-forge make --platform=win32 --arch=x64",
+    "make-platform": "npm test && npm run prepare-vendor && electron-forge make",
+    "stage-platform-release": "node scripts/stage-platform-release.js",
     "verify-update-release": "node scripts/verify-update-release.js"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-deb": "^7.11.2",
+    "@electron-forge/maker-dmg": "^7.11.2",
+    "@electron-forge/maker-rpm": "^7.11.2",
     "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
     "archiver": "^7.0.1",
     "electron": "^43.2.0",
     "electron-packager": "^17.1.2",

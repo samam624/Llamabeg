@@ -152,6 +152,7 @@ $runtimeFiles = @(
   "main.js",
   "preload.js",
   "data-paths.js",
+  "platform-paths.js",
   "update-policy.js",
   "vendor\llama-score-automatic-logging-machine\llama-log-machine.js",
   "vendor\llama-score-automatic-logging-machine\parse-worker.js"

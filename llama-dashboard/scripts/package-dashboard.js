@@ -60,7 +60,7 @@ let dataRestored = !hadData;
         : {}),
       ignore: [
         /^\/release(?:\/|$)/,
-        /^\/(?!main\.js$|preload\.js$|data-paths\.js$|update-policy\.js$|renderer(?:\/|$)|package\.json$|vendor(?:\/|$)|assets(?:\/|$)|node_modules(?:\/|$))/,
+        /^\/(?!main\.js$|preload\.js$|data-paths\.js$|platform-paths\.js$|update-policy\.js$|renderer(?:\/|$)|package\.json$|vendor(?:\/|$)|assets(?:\/|$)|node_modules(?:\/|$))/,
         /^\/node_modules\/(?!(?:electron-squirrel-startup|update-electron-app|github-url-to-object|is-url|ms)(?:\/|$))/,
       ],
     });

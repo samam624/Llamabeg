@@ -42,52 +42,67 @@ White Peace).
 - **Llama Score / Alpaca Score** — multiplayer war scoring, PvP and PvE modes, backed by
   the campaign-ledger recorder above.
 
-## Windows desktop app
+## Desktop app downloads
 
-The recommended recorder is the normal per-user Windows installation:
+Download the package for your computer from the
+[latest GitHub Release](https://github.com/samam624/Llamabeg/releases/latest):
 
-1. Download [`Llama-Score-Dashboard-Setup.exe`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Setup.exe)
-   from the latest GitHub Release.
-2. Run the installer. It installs silently for the current Windows user, immediately
-   opens the installed copy, and does not require administrator access. There is no
-   setup wizard.
-3. Open **Llama Score Dashboard** from the Start menu.
+| Platform | Recommended download |
+| --- | --- |
+| Windows x64 | [`Llama-Score-Dashboard-Setup.exe`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Setup.exe) |
+| macOS Apple Silicon | [`Llama-Score-Dashboard-macOS-arm64.dmg`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-macOS-arm64.dmg) |
+| macOS Intel | [`Llama-Score-Dashboard-macOS-x64.dmg`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-macOS-x64.dmg) |
+| Ubuntu/Debian x64 | [`Llama-Score-Dashboard-Linux-x64.deb`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Linux-x64.deb) |
+| Fedora/RHEL x64 | [`Llama-Score-Dashboard-Linux-x64.rpm`](https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Linux-x64.rpm) |
+| Linux ARM64 | Choose the ARM64 `.deb` or `.rpm` on the latest release |
 
-The installed files and user-owned data are deliberately separated:
+Windows Setup installs silently for the current user, opens the installed copy, and
+adds **Llamabeg → Llama Score Dashboard** to the Start menu. There is no setup wizard.
 
-- Application and updater: `%LOCALAPPDATA%\LlamaScoreDashboard`
-- Settings, logs, and crash reports: `%APPDATA%\llama-score-dashboard`
-- Campaign history: `%USERPROFILE%\Documents\Llamabeg\Campaign Data`
-- Start-menu shortcut: **Llamabeg → Llama Score Dashboard**
+On macOS, open the DMG and drag **Llama Score Dashboard** into Applications. These free
+builds are not Apple-notarized, so first launch may require Control-clicking the app,
+choosing **Open**, and confirming once in macOS Privacy & Security.
 
-After the first installation, launch the app from the Start menu rather than running
-Setup.exe again. Uninstall it through **Windows Settings → Apps → Installed apps**; the
-campaign-data folder is independent of the application installation.
+On Linux, install the downloaded package with your graphical package manager or:
 
-Campaign history is stored independently of the application under
-`Documents\Llamabeg\Campaign Data`, so replacing or updating the installed app does not
-replace its ledger. On first packaged launch, an older extracted dashboard's sibling
-`data/` folder is copied through a hash-verified migration and the original is retained
-as a backup.
+```bash
+sudo apt install ./Llama-Score-Dashboard-Linux-x64.deb
+# Fedora/RHEL:
+sudo dnf install ./Llama-Score-Dashboard-Linux-x64.rpm
+```
 
-Squirrel-installed builds check for updates at startup and hourly, download them in the
-background, and ask before restarting. The portable ZIP remains available as a fallback,
-but portable and development builds deliberately do not update themselves. See
-[llama-dashboard/README.md](llama-dashboard/README.md) for build, release, and migration
-details.
+Application files and user-owned data are deliberately separated. Campaign history
+always lives under the operating system's Documents folder at
+`Llamabeg/Campaign Data`; replacing or uninstalling the app does not replace that
+ledger. Settings, logs, and crash reports use the standard per-user application-data
+folder (`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and
+`~/.config` on Linux).
+
+EU5 itself is officially Windows-only. Linux users running EU5 through Steam Proton are
+supported: the dashboard detects the common Steam, Flatpak Steam, and Proton locations.
+On macOS, or for a custom Steam/compatibility-prefix location, use **Settings → EU5 save
+folder** and select the folder containing the `.eu5` saves.
+
+Windows Squirrel installations update in place. macOS and Linux builds check the public
+release feed at startup and hourly and open the new release when the user chooses
+**Download**; installation remains explicit because Electron has no Linux auto-updater
+and macOS automatic replacement requires paid Apple signing. Portable ZIP and
+development copies do not update themselves. See
+[llama-dashboard/README.md](llama-dashboard/README.md) for build and release details.
 
 ### How updates reach installed apps
 
 A normal branch push updates source code on GitHub but does **not** update installed
 applications. A maintainer must bump the desktop package version, push the change, and
-push the matching version tag. The Windows release workflow then builds and verifies the
-installer, Squirrel package, update manifest, and portable fallback before publishing a
-GitHub Release.
+push the matching version tag. The desktop release workflow then builds and verifies
+Windows x64, macOS Intel/Apple Silicon, and Linux x64/ARM64 packages before publishing
+one GitHub Release.
 
-Once that release is public, Squirrel-installed copies discover it at startup or during
-the hourly check, download it in the background, and ask before restarting. Unsigned
-installers still trigger Windows's unknown-publisher warning on first installation.
-Portable ZIP and development copies never auto-update. See the
+Once that release is public, Squirrel-installed Windows copies download it in the
+background and ask before restarting. macOS and Linux copies notify the user and open
+the release page. Unsigned Windows and macOS packages can trigger operating-system
+security warnings on first installation. Portable ZIP and development copies never
+auto-update. See the
 [desktop release checklist](llama-dashboard/README.md#automatic-updates-and-github-releases)
 for the exact prerequisites and commands.
 

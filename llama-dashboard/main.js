@@ -8,12 +8,14 @@
 // snapshots.jsonl/war-events.jsonl/state.json concurrently, which can
 // interleave writes and corrupt the ledger.
 
-const { app, BrowserWindow, ipcMain, dialog, shell, crashReporter } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, crashReporter, net } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const DataPaths = require("./data-paths.js");
+const PlatformPaths = require("./platform-paths.js");
 const UpdatePolicy = require("./update-policy.js");
-const handlingSquirrelEvent = require("electron-squirrel-startup");
+const handlingSquirrelEvent = process.platform === "win32" ? require("electron-squirrel-startup") : false;
 
 if (process.platform === "win32") {
   app.setAppUserModelId("com.squirrel.LlamaScoreDashboard.LlamaScoreDashboard");
@@ -75,6 +77,23 @@ function defaultDataDir() {
   });
 }
 
+function defaultSaveDir() {
+  return PlatformPaths.defaultSaveDir({
+    platform: process.platform,
+    homeDir: os.homedir(),
+    documentsDir: app.getPath("documents"),
+  });
+}
+
+function defaultGameDir() {
+  return PlatformPaths.defaultGameDir({
+    platform: process.platform,
+    homeDir: os.homedir(),
+    programFilesX86: process.env["ProgramFiles(x86)"],
+    programFiles: process.env.ProgramFiles,
+  });
+}
+
 function vendorPath(...parts) {
   return app.isPackaged ? path.join(process.resourcesPath, "app", "vendor", ...parts) : path.join(__dirname, "..", ...parts);
 }
@@ -107,7 +126,7 @@ function saveSettingsToDisk(settings) {
 function buildConfig() {
   const settings = loadSettings();
   const args = {};
-  if (settings.saveDir) args.saveDir = settings.saveDir;
+  args.saveDir = settings.saveDir || defaultSaveDir();
   // A saved dataDir can point at a NOW-GONE extraction of this app - e.g. the
   // user unzipped a fresh copy somewhere else and deleted the old one. Simply
   // opening Settings once (even without changing anything - see settings:get/
@@ -165,6 +184,7 @@ process.on("uncaughtExceptionMonitor", (err, origin) => {
 
 let autoUpdateStartTimer = null;
 let stopAutoUpdates = null;
+let notifiedManualUpdateVersion = null;
 
 function updaterLogValue(value) {
   if (value instanceof Error) return value.stack || value.message;
@@ -173,6 +193,47 @@ function updaterLogValue(value) {
     return JSON.stringify(value);
   } catch {
     return String(value);
+  }
+}
+
+async function checkForManualUpdate() {
+  try {
+    const response = await net.fetch(UpdatePolicy.RELEASE_API_URL, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": `LlamaScoreDashboard/${app.getVersion()}`,
+      },
+    });
+    if (!response.ok) throw new Error(`GitHub Releases returned HTTP ${response.status}`);
+    const release = await response.json();
+    if (
+      release.draft ||
+      release.prerelease ||
+      !UpdatePolicy.isNewerVersion(app.getVersion(), release.tag_name) ||
+      notifiedManualUpdateVersion === release.tag_name
+    ) {
+      return;
+    }
+
+    notifiedManualUpdateVersion = release.tag_name;
+    const options = {
+      type: "info",
+      title: "Llama Score Dashboard update",
+      message: `${release.name || release.tag_name} is available`,
+      detail: "Download the package for your operating system, close this app, and install the new version. Your campaign data is stored separately and will be preserved.",
+      buttons: ["Open download page", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    };
+    const result = mainWindow
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    if (result.response === 0) {
+      await shell.openExternal(release.html_url || UpdatePolicy.RELEASE_PAGE_URL);
+    }
+  } catch (err) {
+    pushLog(`Manual update check failed: ${err && err.stack ? err.stack : String(err)}`, "ERROR");
   }
 }
 
@@ -186,6 +247,14 @@ function startAutoUpdates() {
   });
   if (!eligibility.enabled) {
     pushLog(`Automatic updates disabled: ${eligibility.reason}`);
+    return;
+  }
+
+  if (eligibility.mode === "manual") {
+    pushLog(`Update notifications enabled: ${eligibility.reason}`);
+    void checkForManualUpdate();
+    const interval = setInterval(() => void checkForManualUpdate(), UpdatePolicy.UPDATE_INTERVAL_MS);
+    stopAutoUpdates = () => clearInterval(interval);
     return;
   }
 
@@ -722,9 +791,9 @@ ipcMain.handle("settings:get", () => {
     saveDir: settings.saveDir || "",
     dataDir: settings.dataDir || "",
     gameDir: settings.gameDir || "",
-    defaultSaveDir: Recorder.DEFAULT_CONFIG.saveDir,
+    defaultSaveDir: defaultSaveDir(),
     defaultDataDir: defaultDataDir(),
-    defaultGameDir: ModifierScanner.DEFAULT_GAME_ROOT,
+    defaultGameDir: defaultGameDir(),
   };
 });
 
@@ -758,7 +827,7 @@ ipcMain.handle("shell:open-path", (_event, targetPath) => shell.openPath(targetP
 
 function modifierGameDir() {
   const settings = loadSettings();
-  return settings.gameDir || ModifierScanner.DEFAULT_GAME_ROOT;
+  return settings.gameDir || defaultGameDir();
 }
 
 function cachedSocietalAxes(gameDir) {
@@ -906,6 +975,8 @@ app.on("child-process-gone", (_event, details) => {
 });
 
 app.on("window-all-closed", () => {
-  if (pollTimer) clearInterval(pollTimer);
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin") {
+    if (pollTimer) clearInterval(pollTimer);
+    app.quit();
+  }
 });

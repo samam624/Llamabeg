@@ -15,11 +15,11 @@
       <h1>Llamabeg</h1>
       <p class="subtitle">A Europa Universalis V save analyzer and automatic multiplayer scoring system</p>
     </div>
-    <a class="app-download-btn" href="https://github.com/samam624/Llamabeg/releases/latest/download/Llama-Score-Dashboard-Setup.exe" download>
+    <a class="app-download-btn" href="https://github.com/samam624/Llamabeg/releases/latest">
       <span aria-hidden="true">&#128421;&#65039;</span>
       <span class="app-download-btn-text">
         <strong>Get the Llama Score Dashboard</strong>
-        <small>Windows desktop app &middot; automatic updates &middot; one-click installer</small>
+        <small>Windows &middot; macOS &middot; Linux &middot; native installers</small>
       </span>
     </a>
     <button type="button" id="themeToggleBtn" class="theme-toggle-btn" title="Switch to light mode" aria-label="Switch to light mode">&#9728;</button>
@@ -163,22 +163,20 @@
             <summary>Llama Score User Manual</summary>
             <ol class="llama-manual-steps">
               <li>
-                Download the <strong>Llama Score Dashboard</strong> (the button at the top of this page). It comes as a .zip - unzip the
-                whole thing into a permanent folder first (e.g. your <code>Desktop</code> or <code>Documents</code>), not left inside
-                Downloads or a still-zipped view. Everything in that folder needs to stay together and stay put, since it's where the
-                Dashboard will also keep its recorded ledger.
+                Download the <strong>Llama Score Dashboard</strong> (the button at the top of this page) and choose the installer for
+                your computer: <code>Setup.exe</code> on Windows, the matching Intel/Apple Silicon <code>.dmg</code> on macOS, or the
+                matching <code>.deb</code>/<code>.rpm</code> on Linux.
               </li>
               <li>
-                Run <code>Llama Score Dashboard.exe</code> from that folder and leave it running in the background while you play
-                (right-click the exe &rarr; "Send to" &rarr; "Desktop (create shortcut)" if you want it easy to relaunch next time). Its
-                <strong>Settings</strong> button controls two folders, both already defaulted for a typical install:
+                Install and open <strong>Llama Score Dashboard</strong>, then leave it running while you play. Its
+                <strong>Settings</strong> button controls the watched save, game-install, and campaign-data folders:
                 <ul>
                   <li><strong>EU5 save folder</strong> - where it watches for new autosaves. Defaults to your own
                     <code>Documents\Paradox Interactive\Europa Universalis V\save games</code>. Only change this if your saves live
                     somewhere non-default (a different drive, a custom Documents location, etc).</li>
-                  <li><strong>Ledger data folder</strong> - where it records what it sees. Defaults to a <code>data</code> folder it
-                    creates right next to the .exe - this is the same folder you'll point this webpage at in the next step. Only change
-                    this if you specifically want the ledger stored somewhere else; most people never need to touch it.</li>
+                  <li><strong>Ledger data folder</strong> - where it records what it sees. Defaults to
+                    <code>Documents/Llamabeg/Campaign Data</code>, independent of the application installation, so updates and
+                    uninstallation do not remove campaign history.</li>
                 </ul>
               </li>
               <li>
@@ -188,9 +186,8 @@
               </li>
               <li>
                 Come back to this tab any time you want to check scores. Click <strong>"Connect campaign folder&hellip;"</strong> below
-                (one-time per browser) and pick the <code>data</code> folder that appeared next to <code>Llama Score Dashboard.exe</code>
-                once you ran it - after that, loading any save from a linked campaign shows its Llama Score automatically, no more
-                picking required.
+                (one-time per browser) and pick <code>Documents/Llamabeg/Campaign Data</code> - after that, loading any save from a
+                linked campaign shows its Llama Score automatically, no more picking required.
               </li>
               <li>
                 <strong>Multiplayer note:</strong> there's no server and no automatic syncing between different players' computers -
@@ -212,16 +209,16 @@
               <span
                 class="info-badge"
                 tabindex="0"
-                title="In the folder picker, choose the folder named &quot;data&quot; - next to &quot;Llama Score Dashboard.exe&quot; if you used the Dashboard app, or directly inside &quot;llama-score-automatic-logging-machine&quot; if you ran the CLI recorder script. Do NOT pick a specific campaign's folder (the long id folder inside data/campaigns), and don't pick its parent folder - one level too high or too low and nothing will be found. The app looks for a campaigns subfolder inside whatever you select."
+                title="In the folder picker, choose Documents/Llamabeg/Campaign Data if you used the installed Dashboard app, or the data folder inside llama-score-automatic-logging-machine if you ran the CLI recorder. Do NOT pick a specific campaign's long-id folder. The web app looks for a campaigns subfolder inside the folder you select."
                 >&#9432;</span
               >
               <button type="button" id="llamaDisconnectBtn" class="link-btn" hidden>Disconnect</button>
               <span id="llamaLinkStatus" class="llama-link-status" hidden>&#9989; Linked!</span>
             </div>
             <p class="panel-note llama-connect-hint">
-              Pick the recorder's <code>data</code> folder &mdash; next to <code>Llama Score Dashboard.exe</code> if you used the Dashboard app,
-              or directly inside <code>llama-score-automatic-logging-machine</code> if you ran the CLI recorder script. Don't pick its parent
-              folder, and not one specific campaign's folder inside <code>data/campaigns</code>.
+              Pick <code>Documents/Llamabeg/Campaign Data</code> if you used the installed Dashboard app, or the
+              <code>data</code> folder inside <code>llama-score-automatic-logging-machine</code> if you ran the CLI recorder. Don't pick
+              one specific campaign's folder inside <code>campaigns</code>.
             </p>
             <div id="llamaManualLoader" class="ledger-loader">
               <label>Snapshots <input type="file" id="llamaSnapshotsInput" accept=".jsonl,.txt,.gz,application/jsonl,application/gzip"></label>

@@ -48,145 +48,146 @@ First run downloads Electron itself (~150 MB). After that, `npm start` opens
 the window directly against the real save folder/data folder - no build step
 needed while iterating on the UI.
 
-## Build the Windows desktop distributions
+## Build desktop distributions
+
+Electron Forge must build each native installer on its matching operating
+system. The tagged GitHub Actions workflow is the canonical way to produce
+the complete release:
+
+- Windows x64: Squirrel `Setup.exe`, `.nupkg`, `RELEASES`, and portable ZIP.
+- macOS Intel and Apple Silicon: DMG installers and portable ZIPs.
+- Linux x64 and ARM64: `.deb`, `.rpm`, and portable ZIPs.
+
+Windows maintainers can still rebuild and verify the canonical Windows
+artifacts locally:
 
 ```powershell
 cd llama-dashboard
 npm run make-installer
 npm run release
 npm run verify-update-release
+npm run stage-platform-release -- --platform win32 --arch x64
 ```
 
-`make-installer` produces the normal, no-admin Squirrel installation and its
-update metadata:
+On macOS or Linux, install the locked dependencies and run Forge for the
+current machine's platform and architecture:
 
-```text
-llama-dashboard/out/make/squirrel.windows/x64/
-  Llama-Score-Dashboard-Setup.exe
-  LlamaScoreDashboard-<version>-full.nupkg
-  RELEASES
+```bash
+cd llama-dashboard
+npm ci
+npm run make-platform -- --platform=darwin --arch=arm64
+# or: npm run make-platform -- --platform=linux --arch=x64
+npm run stage-platform-release -- --platform darwin --arch arm64
 ```
 
-`release` keeps the legacy portable fallback current at the two canonical
-paths:
+The Windows verifier checks Squirrel's manifest hash/size, version and tag,
+canonical release names, packaged runtime hashes, optional Authenticode
+signatures, and zero campaign data. The platform staging verifier performs
+the equivalent package-version, production-dependency, runtime-hash, and
+zero-campaign-data checks for every macOS and Linux architecture before any
+artifact reaches the publish job. The final release includes
+`SHA256SUMS.txt`.
 
-```text
-llama-dashboard/release/Llama Score Dashboard-win32-x64/
-llama-dashboard/release/Llama-Score-Dashboard-win32-x64.zip
-```
+All packaged apps use the operating system's Documents folder at
+`Llamabeg/Campaign Data`. The Windows local release build preserves the
+canonical app's sibling `data/` folder byte-for-byte, and packaged artifacts
+always contain zero campaign-data files.
 
-The release verifier checks Squirrel's manifest hash/size, version and tag,
-the exact canonical release names, packaged runtime hashes, signatures when
-required, and that both public archives contain zero campaign-data files.
-The canonical app's local `data/` ledger is held outside the replacement
-path during a rebuild and restored afterward.
+## Updates and GitHub releases
 
-Installed and portable apps use
-`Documents\Llamabeg\Campaign Data`. On first packaged launch, data from the
-old extracted `Documents\Llama-Score-Dashboard-win32-x64\data` location is
-copied through a hash-verified staging directory; the original is retained
-as a backup.
+Squirrel-installed Windows builds confirm that the installation's parent
+`Update.exe` exists, check at startup and hourly, download updates in the
+background, and ask before restarting. macOS and Linux builds check the same
+public GitHub release at startup and hourly, then offer to open the download
+page when a newer version exists.
 
-## Automatic updates and GitHub releases
+macOS and Linux deliberately use notification-based updates for now:
+Electron has no built-in Linux auto-updater, and Squirrel.Mac requires the app
+to be signed with a paid Apple Developer certificate. Portable and
+development builds do not update themselves.
 
-Only the Squirrel-installed app enables automatic updates. It confirms that
-the installation's parent `Update.exe` exists, checks once at startup and
-then hourly, downloads in the background, and asks before restarting.
-Development and portable builds deliberately do not update themselves.
+Setup.exe uses Squirrel's silent per-user installation flow. macOS users open
+the architecture-matched DMG and drag the app to Applications. Linux users
+install the architecture-matched `.deb` or `.rpm`. Settings/logs use each
+platform's standard application-data folder; campaign history remains in
+Documents independently of application updates and uninstallation.
 
-Setup.exe uses Squirrel's silent per-user installation flow. It shows no
-wizard: running it installs under `%LOCALAPPDATA%\LlamaScoreDashboard` and
-immediately launches the installed version. Subsequent launches should use
-the **Llamabeg → Llama Score Dashboard** Start-menu shortcut. Runtime
-settings/logs live under `%APPDATA%\llama-score-dashboard`, while campaign
-history remains under `%USERPROFILE%\Documents\Llamabeg\Campaign Data`.
-
-Public downloads and Electron's update service use this repository's GitHub
-Releases:
+Public downloads and update checks use:
 
 ```text
 https://github.com/samam624/Llamabeg/releases
 ```
 
-The repository must remain public so installed clients can check releases
-without credentials. The workflow uploads only Setup.exe, the `.nupkg`,
-`RELEASES`, and the empty-data portable ZIP; settings, saves, and ledger data
-remain outside the repository and packaged artifacts.
+The repository must remain public so clients can check releases without
+credentials. The workflow's built-in `GITHUB_TOKEN` publishes to this
+repository; no personal token or second repository is needed.
 
-Optionally configure these repository secrets:
+Windows signing is optional through:
 
 - `WINDOWS_CERTIFICATE_PFX_BASE64`: base64 contents of the trusted Windows
   code-signing `.pfx`.
 - `WINDOWS_CERTIFICATE_PASSWORD`: password for that certificate.
 
-The workflow's built-in `GITHUB_TOKEN` publishes the release to this
-repository; no personal access token or second release repository is needed.
-`.github/workflows/desktop-release.yml` supports unsigned manual CI builds,
-and publishes a verified unsigned tagged release when no certificate is
-configured. If both secrets are present, it signs the application and
-installer and requires valid Authenticode signatures before publishing.
-Unsigned installers trigger Windows's unknown-publisher warning on first
-installation.
+Without those secrets, Windows artifacts are verified but unsigned. macOS
+artifacts are also unsigned and unnotarized until Apple Developer signing is
+configured, so first launch can require the documented operating-system
+override.
 
 ### Does every push update installed apps?
 
-No. Pushing a commit or merging a branch only updates the source repository.
-Installed clients change only when all of these conditions are satisfied:
+No. A commit or merged branch only updates source. A release reaches users
+only when all of these conditions are satisfied:
 
 1. `llama-dashboard/package.json` and `package-lock.json` contain the same
    newer SemVer version.
-2. That source and `.github/workflows/desktop-release.yml` are committed and
-   pushed to the public repository.
-3. A matching tag such as `v1.0.2` is pushed.
-4. The tagged Windows workflow succeeds, including Authenticode verification
-   when signing credentials are configured.
-5. The resulting GitHub Release contains Setup.exe, the versioned full
-   `.nupkg`, `RELEASES`, and the empty-data portable ZIP.
+2. The intended source and workflow are committed and pushed publicly.
+3. A matching tag such as `v1.1.0` is pushed.
+4. All five native build jobs pass: Windows x64, two macOS architectures, and
+   two Linux architectures.
+5. The publish job verifies the complete asset set, writes checksums, and
+   creates the latest GitHub Release.
 
-If any condition fails, no update is published and existing installations
-continue running their current version. Users who are offline or have the app
-closed receive the update the next time an installed copy can perform a
-check. Portable and development builds are never eligible.
+If any platform fails, nothing is published and existing users remain on the
+current version.
 
 ### Maintainer release checklist
 
-To publish an update:
-
-1. Update `llama-dashboard/package.json` and `package-lock.json` to the same
-   SemVer version, which must be greater than the last published version.
+1. Bump `llama-dashboard/package.json` and `package-lock.json` to the same
+   version.
 2. Run `npm.cmd test` from `llama-dashboard/`.
-3. Commit and push all intended application and workflow changes.
-4. Create and push the matching tag:
+3. On Windows, close the dashboard, hash the live campaign ledger, run
+   `npm.cmd run release`, and confirm the ledger is unchanged.
+4. Commit and push the intended application, documentation, and workflow.
+5. Create and push the matching tag:
 
    ```powershell
-   git tag v1.0.2
-   git push origin v1.0.2
+   git tag v1.1.0
+   git push origin v1.1.0
    ```
 
-5. The Windows workflow builds, verifies, signs, and publishes the four
-   assets to this repository's GitHub Release.
-6. Confirm the release is marked latest and contains all four expected
-   assets before announcing it.
-
-The website download button uses this repository's
-`releases/latest/download/Llama-Score-Dashboard-Setup.exe` URL.
+6. Wait for every platform job and the single publish job to pass.
+7. Confirm the release is latest, contains the 14 platform artifacts plus
+   `SHA256SUMS.txt`, and that anonymous download links resolve.
 
 ## Settings
 
 The **Settings** button in the app lets you point it at a different save
 folder or data folder (persisted to this app's own user-data folder, not
-this repo). Defaults, no configuration needed for a typical single-PC
-install:
+this repo). Defaults require no configuration for a typical Windows or Steam
+Proton install:
 
-- **EU5 save folder** - `Documents\Paradox Interactive\Europa Universalis V\save games`
+- **EU5 save folder** - the normal Documents path on Windows/macOS; on Linux
+  the app checks standard Steam, Flatpak Steam, and EU5 Proton-prefix paths.
 - **EU5 install folder** - used only by Modifier Optimizer to read game
-  definitions; defaults to the standard Steam install path.
-  under the current Windows user, same default the CLI recorder uses.
-- **Ledger data folder** - `Documents\Llamabeg\Campaign Data`, independent
+  definitions; detects the standard Windows, macOS Steam, and Linux Steam
+  locations.
+- **Ledger data folder** - `Documents/Llamabeg/Campaign Data`, independent
   of the installed application version - the same folder the web app's
   "Connect campaign folder..." should be pointed at.
 
-Changing either restarts the embedded watcher.
+EU5 is officially Windows-only, so macOS compatibility-layer and unusual
+Proton installations may need both EU5 folders selected manually. Changing
+any setting restarts the embedded watcher.
 
 ## Architecture notes
 
@@ -200,6 +201,6 @@ Changing either restarts the embedded watcher.
 - "Ongoing wars" come straight from the latest snapshot's own war list
   (`concluded: false` entries) - concluded/scored wars come from
   `war-events.jsonl`'s `war-disappeared` events, same as the web app.
-- The portable fallback uses Electron Packager; the normal installer and
-  update package use Electron Forge's Squirrel.Windows maker. Both use the
-  same vendored recorder/parser runtime and optional signing certificate.
+- Windows's portable fallback uses Electron Packager. Native installers use
+  Electron Forge: Squirrel.Windows, DMG/ZIP on macOS, and DEB/RPM/ZIP on
+  Linux. Every package uses the same vendored recorder/parser runtime.
