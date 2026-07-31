@@ -6,6 +6,34 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Get-FileDigest {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$LiteralPath,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("SHA1", "SHA256")]
+    [string]$Algorithm
+  )
+
+  $hashAlgorithm = if ($Algorithm -eq "SHA1") {
+    [Security.Cryptography.SHA1]::Create()
+  } else {
+    [Security.Cryptography.SHA256]::Create()
+  }
+  $stream = [IO.File]::Open($LiteralPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    return ([BitConverter]::ToString($hashAlgorithm.ComputeHash($stream)) -replace "-", "")
+  } finally {
+    $stream.Dispose()
+    $hashAlgorithm.Dispose()
+  }
+}
+
+$authenticodeCommand = Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue
+if ($RequireSigned -and -not $authenticodeCommand) {
+  throw "Signed verification requires Get-AuthenticodeSignature, but this PowerShell host does not provide it."
+}
+
 $dashboardRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $package = Get-Content -LiteralPath (Join-Path $dashboardRoot "package.json") -Raw | ConvertFrom-Json
 $version = [string]$package.version
@@ -47,7 +75,7 @@ $nupkgInfo = Get-Item -LiteralPath $nupkgPath
 if ([int64]$releaseMatch.Groups["size"].Value -ne $nupkgInfo.Length) {
   throw "RELEASES size does not match $nupkgName."
 }
-$nupkgSha1 = (Get-FileHash -LiteralPath $nupkgPath -Algorithm SHA1).Hash
+$nupkgSha1 = Get-FileDigest -LiteralPath $nupkgPath -Algorithm SHA1
 if ($releaseMatch.Groups["sha"].Value -ne $nupkgSha1) {
   throw "RELEASES SHA-1 does not match $nupkgName."
 }
@@ -130,23 +158,27 @@ $runtimeFiles = @(
   "vendor\llama-score-automatic-logging-machine\parse-worker.js"
 )
 foreach ($relativePath in $runtimeFiles) {
-  $sourceHash = (Get-FileHash -LiteralPath (Join-Path $dashboardRoot $relativePath) -Algorithm SHA256).Hash
+  $sourceHash = Get-FileDigest -LiteralPath (Join-Path $dashboardRoot $relativePath) -Algorithm SHA256
   foreach ($appRoot in @($portableAppPath, $installerAppPath)) {
-    $packagedHash = (Get-FileHash -LiteralPath (Join-Path $appRoot $relativePath) -Algorithm SHA256).Hash
+    $packagedHash = Get-FileDigest -LiteralPath (Join-Path $appRoot $relativePath) -Algorithm SHA256
     if ($sourceHash -ne $packagedHash) {
       throw "Packaged runtime does not match source: $relativePath in $appRoot"
     }
   }
 }
 
-$setupSignature = Get-AuthenticodeSignature -LiteralPath $setupPath
-if ($RequireSigned -and $setupSignature.Status -ne "Valid") {
-  throw "Setup.exe is not validly signed: $($setupSignature.Status)"
+$setupSignatureStatus = if ($authenticodeCommand) {
+  [string](Get-AuthenticodeSignature -LiteralPath $setupPath).Status
+} else {
+  "Unavailable"
+}
+if ($RequireSigned -and $setupSignatureStatus -ne "Valid") {
+  throw "Setup.exe is not validly signed: $setupSignatureStatus"
 }
 
 foreach ($artifact in @($setupPath, $nupkgPath, $releasesPath, $portableZipPath)) {
   $item = Get-Item -LiteralPath $artifact
-  $sha256 = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+  $sha256 = Get-FileDigest -LiteralPath $artifact -Algorithm SHA256
   Write-Output "VERIFIED|$($item.Name)|$($item.Length)|SHA256=$sha256"
 }
-Write-Output "VERIFIED|version=$version|tag=$expectedTag|signature=$($setupSignature.Status)|campaignDataFiles=0"
+Write-Output "VERIFIED|version=$version|tag=$expectedTag|signature=$setupSignatureStatus|campaignDataFiles=0"
