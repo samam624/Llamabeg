@@ -139,11 +139,11 @@ jobs:
       - name: Verify and stage macOS release assets
         run: |
           set -euo pipefail
-          tag_arguments=()
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            tag_arguments=(--tag "$GITHUB_REF_NAME")
+            npm run stage-platform-release -- --platform darwin --arch "${{ matrix.arch }}" --tag "$GITHUB_REF_NAME"
+          else
+            npm run stage-platform-release -- --platform darwin --arch "${{ matrix.arch }}"
           fi
-          npm run stage-platform-release -- --platform darwin --arch "${{ matrix.arch }}" "${tag_arguments[@]}"
 
       - name: Retain verified macOS artifacts
         uses: actions/upload-artifact@v4
@@ -193,11 +193,11 @@ jobs:
       - name: Verify and stage Linux release assets
         run: |
           set -euo pipefail
-          tag_arguments=()
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            tag_arguments=(--tag "$GITHUB_REF_NAME")
+            npm run stage-platform-release -- --platform linux --arch "${{ matrix.arch }}" --tag "$GITHUB_REF_NAME"
+          else
+            npm run stage-platform-release -- --platform linux --arch "${{ matrix.arch }}"
           fi
-          npm run stage-platform-release -- --platform linux --arch "${{ matrix.arch }}" "${tag_arguments[@]}"
 
       - name: Retain verified Linux artifacts
         uses: actions/upload-artifact@v4
