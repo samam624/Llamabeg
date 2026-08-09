@@ -1,0 +1,29 @@
+name: Supabase heartbeat
+
+# Free-tier Supabase projects auto-pause after 7 days with no API activity.
+# This just makes one real read against the project's REST API every few
+# days so it never goes idle long enough to trigger that.
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase REST API
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://wkylbxozlppqovlwjxsy.supabase.co/rest/v1/eu5_campaigns?select=id&limit=1" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+          echo "Response status: $status"
+          # 2xx/4xx both mean the DB answered (a 4xx here would be a query-shape
+          # error, not an unreachable project) - only fail on no response at all.
+          if [ "$status" = "000" ]; then
+            echo "Supabase project did not respond - it may be paused." >&2
+            exit 1
+          fi
+        env:
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
