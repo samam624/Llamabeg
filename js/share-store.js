@@ -95,38 +95,67 @@
     return JSON.parse(json);
   }
 
-  // Fetch a campaign's full recorder ledger (snapshots + war-events) via the
-  // eu5_get_campaign_ledger() RPC (see supabase/migrations/20260711020000_
-  // eu5_llama_ledgers.sql) - the server-side twin of js/ledger-connect.js's
-  // readCampaignLedger, for whenever a browser has no local recorder folder
-  // connected (e.g. someone opening a ?save= link who was never running the
-  // Dashboard themselves). Rows only exist here once the campaign's owner
-  // has run `npm run data:import` - a manual, service-role-keyed step
-  // deliberately kept out of the browser (the anon key used here only ever
-  // gets read/SELECT access, per that migration's RLS policies).
+  // Fetch a campaign's full recorder ledger (snapshots + war-events) via
+  // eu5_get_campaign/eu5_get_campaign_snapshots_page/eu5_get_campaign_events_page
+  // (see supabase/migrations/20260809190000_eu5_get_campaign_ledger_chunked_rpc.sql)
+  // - the server-side twin of js/ledger-connect.js's readCampaignLedger, for
+  // whenever a browser has no local recorder folder connected (e.g. someone
+  // opening a ?save= link who was never running the Dashboard themselves).
+  // Rows only exist here once the campaign's owner has run `npm run
+  // data:import` - a manual, service-role-keyed step deliberately kept out
+  // of the browser (the anon key used here only ever gets read/SELECT
+  // access, per that migration's RLS policies).
+  // Paginated rather than one combined call: a real campaign that grew to
+  // 103 snapshots + 179 events (~14MB combined) blew the anon role's
+  // statement timeout when eu5_get_campaign_ledger tried to jsonb_agg both
+  // in a single query (confirmed directly: 57014 canceling statement due to
+  // statement timeout) - silently breaking "Share link" for any recipient
+  // of a long-running campaign, with no error surfaced anywhere. Each half
+  // alone easily succeeds (measured: 103-row snapshots page ~2.6s/12MB,
+  // 179-row events page ~0.8s/1.8MB), so paging comfortably below that,
+  // rather than matching today's exact sizes, keeps this from recurring as
+  // the same still-active campaign keeps growing.
   // Returns null if unconfigured, the campaign isn't imported, or the
   // request fails - callers treat null as "no shared ledger, fall back."
-  async function fetchCampaignLedger(campaignKey) {
+  const LEDGER_READ_SNAPSHOT_PAGE_SIZE = 25;
+  const LEDGER_READ_EVENT_PAGE_SIZE = 100;
+
+  async function callReadRpc(fn, body) {
     const c = config();
-    if (!c || !c.supabaseUrl || !c.supabaseAnonKey || !campaignKey) return null;
-    const url = `${c.supabaseUrl}/rest/v1/rpc/eu5_get_campaign_ledger`;
-    const res = await fetch(url, {
+    const res = await fetch(`${c.supabaseUrl}/rest/v1/rpc/${fn}`, {
       method: "POST",
       headers: {
         apikey: c.supabaseAnonKey,
         Authorization: `Bearer ${c.supabaseAnonKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ p_campaign_key: campaignKey }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    if (!data || !data.campaign) return null; // no campaign row for this key
-    return {
-      campaign: data.campaign,
-      snapshots: Array.isArray(data.snapshots) ? data.snapshots : [],
-      events: Array.isArray(data.events) ? data.events : [],
-    };
+    if (!res.ok) throw new Error(`${fn} failed (${res.status})`);
+    return res.json();
+  }
+
+  async function fetchAllPages(fn, campaignKey, pageSize) {
+    const all = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await callReadRpc(fn, { p_campaign_key: campaignKey, p_offset: offset, p_limit: pageSize });
+      if (!Array.isArray(page) || !page.length) break;
+      all.push(...page);
+      if (page.length < pageSize) break; // last page
+    }
+    return all;
+  }
+
+  async function fetchCampaignLedger(campaignKey) {
+    const c = config();
+    if (!c || !c.supabaseUrl || !c.supabaseAnonKey || !campaignKey) return null;
+    const campaign = await callReadRpc("eu5_get_campaign", { p_campaign_key: campaignKey });
+    if (!campaign) return null; // no campaign row for this key
+    const [snapshots, events] = await Promise.all([
+      fetchAllPages("eu5_get_campaign_snapshots_page", campaignKey, LEDGER_READ_SNAPSHOT_PAGE_SIZE),
+      fetchAllPages("eu5_get_campaign_events_page", campaignKey, LEDGER_READ_EVENT_PAGE_SIZE),
+    ]);
+    return { campaign, snapshots, events };
   }
 
   // Chunk sizes mirror scripts/import-llama-ledgers-to-supabase.js's
