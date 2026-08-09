@@ -185,20 +185,49 @@
     }
   }
 
+  // Runs `tasks` (a list of zero-arg functions returning promises) with at
+  // most `limit` in flight at once, instead of either all-at-once (can
+  // overload the anon connection pool) or fully sequential (each chunk
+  // waits on the full round-trip of the one before it, for no reason - the
+  // chunk size itself, not the concurrency, is what keeps any one request
+  // safe). This is what turns "Share link" on a real 100+-snapshot campaign
+  // from 100+ sequential round-trips into ~limit-at-a-time.
+  async function runWithLimit(tasks, limit) {
+    const executing = new Set();
+    for (const task of tasks) {
+      const p = task().finally(() => executing.delete(p));
+      executing.add(p);
+      if (executing.size >= limit) await Promise.race(executing);
+    }
+    await Promise.all(executing);
+  }
+
+  const LEDGER_UPLOAD_CONCURRENCY = 6;
+
   // Push a campaign's ledger (already shaped by js/app.js's
   // shapeCampaignLedgerForUpload to match the eu5_campaigns/
   // eu5_campaign_snapshots/eu5_war_events row shapes) via three narrow
   // RPCs - the write-side twin of fetchCampaignLedger above. Anon-callable
   // by design (see that migration's comment) so "Share link" can push this
   // browser's own currently-linked ledger with no service-role key involved.
+  // The campaign row must land first (snapshots/events both foreign-key to
+  // it); the snapshot/event chunks themselves don't depend on each other,
+  // so they're queued together and run with bounded concurrency - each
+  // individual request is still exactly as small (and as safe under the
+  // anon statement timeout) as before, this just stops waiting for each
+  // one to fully finish before starting the next.
   async function uploadCampaignLedger(campaign, snapshots, events) {
     await callLedgerRpc("eu5_upsert_campaign", { p_campaign: campaign });
+    const tasks = [];
     for (let i = 0; i < snapshots.length; i += LEDGER_SNAPSHOT_CHUNK_SIZE) {
-      await callLedgerRpc("eu5_upsert_campaign_snapshots", { p_snapshots: snapshots.slice(i, i + LEDGER_SNAPSHOT_CHUNK_SIZE) });
+      const chunk = snapshots.slice(i, i + LEDGER_SNAPSHOT_CHUNK_SIZE);
+      tasks.push(() => callLedgerRpc("eu5_upsert_campaign_snapshots", { p_snapshots: chunk }));
     }
     for (let i = 0; i < events.length; i += LEDGER_EVENT_CHUNK_SIZE) {
-      await callLedgerRpc("eu5_upsert_campaign_events", { p_events: events.slice(i, i + LEDGER_EVENT_CHUNK_SIZE) });
+      const chunk = events.slice(i, i + LEDGER_EVENT_CHUNK_SIZE);
+      tasks.push(() => callLedgerRpc("eu5_upsert_campaign_events", { p_events: chunk }));
     }
+    await runWithLimit(tasks, LEDGER_UPLOAD_CONCURRENCY);
   }
 
   // Persist a Black Death per-country death breakdown the moment a save
