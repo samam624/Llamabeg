@@ -69,7 +69,21 @@
         apikey: c.supabaseAnonKey,
         Authorization: `Bearer ${c.supabaseAnonKey}`,
         "Content-Type": "application/gzip",
-        "Cache-Control": "public, max-age=31536000, immutable",
+        // Was "public, max-age=31536000, immutable" - reasonable-looking
+        // for a save that "never changes once shared," except it's wrong:
+        // deriveSaveId is playthrough+date, not content-hashed, so a real
+        // live campaign re-shared under the SAME id CAN carry genuinely
+        // different content (a player's roster attribution changing
+        // between two shares of "the same" date - a real report). With
+        // `immutable`, the CDN in front of Storage (Cloudflare) kept
+        // serving the FIRST version's bytes after a later overwrite -
+        // confirmed directly: re-uploading under one id and re-fetching
+        // moments later, even with the request itself forcing a real
+        // network round-trip (no browser-cache involvement at all,
+        // verified via response timing), still returned the old
+        // Last-Modified/content. `no-store` stops any cache - browser or
+        // CDN - from serving a stale copy after a re-share ever again.
+        "Cache-Control": "no-store",
         "x-upsert": "true",
       },
       body: gz,
@@ -87,8 +101,24 @@
   async function fetchShared(saveId) {
     if (!isConfigured()) return null;
     const c = config();
-    const url = `${c.supabaseUrl}/storage/v1/object/public/${BUCKET}/${objectPath(saveId)}`;
-    const res = await fetch(url);
+    // Query-string cache-bust, not just `cache: "no-store"` on the request:
+    // confirmed directly (repeated live tests, not just reasoning) that
+    // neither the object's own upload-time Cache-Control NOR this request's
+    // own cache mode stops the CDN in front of Storage (Cloudflare) from
+    // continuing to serve an EARLIER upload's cached body after a same-id
+    // re-share - it caches per exact URL and, empirically, never
+    // re-validates that specific cache entry regardless of what either side
+    // asks for. A HEAD to the SAME url, in every test, reliably returned
+    // the CURRENT Last-Modified even while the plain GET stayed stuck -
+    // so use that as the busting key: append it as a query string, making
+    // an actually-changed upload resolve to a genuinely different URL (a
+    // guaranteed cache MISS, always correct), while a re-fetch of
+    // unchanged content still hits a real, valid cache entry (fast, and
+    // correctly so, since it truly is the same bytes).
+    const meta = await headMeta(saveId);
+    const bust = meta && meta.lastModified ? `?t=${encodeURIComponent(meta.lastModified)}` : "";
+    const url = `${c.supabaseUrl}/storage/v1/object/public/${BUCKET}/${objectPath(saveId)}${bust}`;
+    const res = await fetch(url, { cache: "no-store" });
     if (res.status === 404 || res.status === 400) return null; // not shared / missing bucket
     if (!res.ok) throw new Error(`Could not load shared save (${res.status})`);
     const json = await gunzip(await res.arrayBuffer());
@@ -287,7 +317,15 @@
     if (!isConfigured()) return null;
     const c = config();
     const url = `${c.supabaseUrl}/storage/v1/object/public/${BUCKET}/${objectPath(saveId)}`;
-    const res = await fetch(url, { method: "HEAD" }).catch(() => null);
+    // no-store is essential here, not just tidy: the object is served
+    // `Cache-Control: immutable` (see fetchShared's comment), so a plain
+    // HEAD would silently return a PREVIOUSLY-CACHED response's headers
+    // instead of asking the server - making this whole freshness check
+    // compare a stale cached marker against itself and always report
+    // "still fresh" even when the server has genuinely changed. Confirmed
+    // live: this was the actual reason the fix first shipped without
+    // no-store didn't recover a browser that had cached an older version.
+    const res = await fetch(url, { method: "HEAD", cache: "no-store" }).catch(() => null);
     if (!res || !res.ok) return null;
     return { lastModified: res.headers.get("last-modified") || null, contentLength: res.headers.get("content-length") || null };
   }
