@@ -109,7 +109,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.12";
+  const ASSET_VERSION = "v1.3.13";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -3421,6 +3421,20 @@
     if (!latestResult) return;
     updateShareUrl();
     const saveId = typeof SaveLibrary !== "undefined" ? SaveLibrary.deriveSaveId(latestResult) : null;
+    const url = location.href;
+
+    // Copy right away, synchronously off this click - the Clipboard API
+    // requires the document to still have focus/a live user gesture, which
+    // the upload below (a real network round-trip, historically tens of
+    // seconds for a large campaign's ledger) can easily outlast if the user
+    // switches windows/tabs while it's in flight. A deferred copy after the
+    // await chain would then silently reject ("Document is not focused"),
+    // previously swallowed here while still claiming "Link copied" - so a
+    // failed copy looked identical to a real one, and pasting afterward
+    // just showed whatever was on the clipboard before (a real report: a
+    // stray leftover space). The URL itself never depends on the upload
+    // succeeding, so there's no reason to wait for it before copying.
+    const copied = await copyToClipboard(url).then(() => true).catch(() => false);
 
     if (shareBackendOn && saveId) {
       copyLinkBtn.disabled = true;
@@ -3429,11 +3443,9 @@
         latestResult.__schemaVersion = RESULT_SCHEMA_VERSION;
         await ShareStore.upload(saveId, latestResult);
         await uploadCurrentLlamaLedger();
-        await copyToClipboard(location.href).catch(() => {});
-        flashCopyLink("Link copied — anyone can view");
+        flashCopyLink(copied ? "Link copied — anyone can view" : "Shared, but couldn't copy - copy the address bar");
       } catch (err) {
-        await copyToClipboard(location.href).catch(() => {});
-        flashCopyLink("Upload failed — copied local link");
+        flashCopyLink(copied ? "Upload failed — copied local link" : "Upload and copy both failed - copy the address bar");
         if (typeof console !== "undefined") console.warn("Shared-save upload failed:", err);
       } finally {
         copyLinkBtn.disabled = false;
@@ -3441,9 +3453,7 @@
       return;
     }
 
-    copyToClipboard(location.href)
-      .then(() => flashCopyLink("Copied!"))
-      .catch(() => {});
+    flashCopyLink(copied ? "Copied!" : "Couldn't copy - copy the address bar");
   });
 
   // "Copy image" buttons on each table/chart panel - separate from the save-
