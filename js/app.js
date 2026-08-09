@@ -109,7 +109,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.13";
+  const ASSET_VERSION = "v1.3.14";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -3377,11 +3377,42 @@
     return Promise.reject(new Error("clipboard unavailable"));
   }
 
+  // Reverts copyLinkBtn back to its default label 2 seconds after the user
+  // actually SEES the confirmation, not 2 seconds after it was set - a plain
+  // setTimeout fires on the wall clock regardless of tab visibility, so a
+  // user who tabs away right after clicking (e.g. to go paste the link
+  // somewhere) could come back to find the confirmation already expired,
+  // making a real success look like nothing happened (a real report: "the
+  // button just resets after you focus another tab"). Only one of these is
+  // ever pending at a time - a new call cancels whatever the previous one
+  // was waiting on.
+  let pendingRevert = null;
   function flashCopyLink(msg) {
+    if (pendingRevert) pendingRevert();
     copyLinkBtn.textContent = msg;
-    setTimeout(() => {
+    const revert = () => {
       copyLinkBtn.textContent = copyLinkBtn.dataset.label || "Copy link";
-    }, 2000);
+    };
+    let timer = null;
+    function onVisible() {
+      if (document.hidden) return;
+      document.removeEventListener("visibilitychange", onVisible);
+      timer = setTimeout(cleanupAndRevert, 2000);
+    }
+    function cleanupAndRevert() {
+      document.removeEventListener("visibilitychange", onVisible);
+      pendingRevert = null;
+      revert();
+    }
+    pendingRevert = () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+    if (document.hidden) {
+      document.addEventListener("visibilitychange", onVisible);
+    } else {
+      timer = setTimeout(cleanupAndRevert, 2000);
+    }
   }
 
   // Pushes whatever campaign ledger is CURRENTLY DISPLAYED on the Llama
@@ -3441,8 +3472,16 @@
       copyLinkBtn.textContent = "Sharing…";
       try {
         latestResult.__schemaVersion = RESULT_SCHEMA_VERSION;
-        await ShareStore.upload(saveId, latestResult);
-        await uploadCurrentLlamaLedger();
+        // The save itself (Storage) and the Llama Score ledger (three RPCs)
+        // go to entirely independent tables/buckets and share no data - ran
+        // one after the other before for no reason, which on a real large
+        // campaign (measured: 13MB compressed save + a 100+-snapshot
+        // ledger) meant paying both wait times back to back. Running them
+        // together bounds the total wait by whichever is slower instead of
+        // their sum. uploadCurrentLlamaLedger() already swallows its own
+        // errors (best-effort - a ledger hiccup shouldn't fail the share),
+        // so only ShareStore.upload can actually reject this Promise.all.
+        await Promise.all([ShareStore.upload(saveId, latestResult), uploadCurrentLlamaLedger()]);
         flashCopyLink(copied ? "Link copied — anyone can view" : "Shared, but couldn't copy - copy the address bar");
       } catch (err) {
         flashCopyLink(copied ? "Upload failed — copied local link" : "Upload and copy both failed - copy the address bar");
