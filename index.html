@@ -209,7 +209,7 @@
               <span
                 class="info-badge"
                 tabindex="0"
-                title="In the folder picker, choose Documents/Llamabeg/Campaign Data if you used the installed Dashboard app, or the data folder inside llama-score-automatic-logging-machine if you ran the CLI recorder. Do NOT pick a specific campaign's long-id folder. The web app looks for a campaigns subfolder inside the folder you select."
+                title="Looks for a campaigns subfolder inside the folder you select - don't pick one specific campaign's folder directly."
                 >&#9432;</span
               >
               <button type="button" id="llamaDisconnectBtn" class="link-btn" hidden>Disconnect</button>
@@ -232,22 +232,19 @@
               <dd><code>(27 &minus; Great&nbsp;Power&nbsp;Rank + 1) &times; 75</code>, floored at 0 for rank 28+. Rank 1 (strongest) scores highest; only the top 27 ranked countries score anything.</dd>
               <dt>War Score</dt>
               <dd>
-                Per finished war: reward for winning against more <code>Enemies</code> with fewer <code>Allies</code> to share credit with; penalty
-                for losing scaled the same way. A war with no real combatant on either side (a hired condottieri contract) uses a flat
-                <code>&plusmn;2</code> instead. In PVE mode, a vassal/subject fighting alongside its own overlord on the same side doesn't count
-                as a separate Enemy or Ally - beating "the Ottomans + 3 vassals" scores the same as beating just "the Ottomans", since it's really
-                one fight against one empire. A vassal fighting entirely on its own (its overlord isn't in that war) still counts normally.
+                <code>10&middot;E&middot;W/(A+1) + 10&middot;(W&minus;1)&middot;(A+1)/(2&middot;E)</code> (E = Enemies, A = Allies, W = 1 if
+                won else 0) - or a flat <code>&plusmn;2</code> when E=0 (a condottieri contract with no real combatant). PVE: a vassal
+                fighting alongside its own overlord isn't a separate Enemy/Ally (beating "the Ottomans + 3 vassals" = beating "the
+                Ottomans"); a vassal fighting entirely on its own still counts normally.
               </dd>
               <dt>How a winner is decided</dt>
               <dd>
-                EU5 clears the in-game war score once a war concludes, so nothing in the save directly says who won. Only three things are
-                ever trusted to call a winner, in this order: an enforced <strong>war reparations</strong> payment (read straight from the
-                peace treaty - the payer lost, the receiver won), a war whose goal was literally <strong>independence</strong> (decided by
-                whether the vassal is still subject to its former overlord afterward), or a real <strong>land transfer</strong> between the
-                war's two original sides (their territory measurably shrank/grew - not land merely occupied mid-war, which doesn't mean it
-                was kept). Everything else - the in-game war score, battle losses, who's occupying what when the war disappears, treasury
-                swing, prestige swing - is shown as a "considered but not decisive" factor on that war's row, never used to pick a side,
-                because each one produced real false positives on tested campaign data even when it looked one-sided.
+                EU5 clears the in-game war score once a war concludes, so nothing in the save directly says who won. Only three signals
+                ever decide a winner, in priority order: an enforced <strong>war reparations</strong> payment (peace-treaty term - the payer
+                lost), a war goal of literal <strong>independence</strong> (is the vassal still subject afterward?), or a real
+                <strong>land transfer</strong> between the war's two original sides (territory that measurably changed hands, not just
+                occupied mid-war). Everything else - war score, battle losses, occupation, treasury/prestige swing - shows as "considered
+                but not decisive," never used to pick a side: each produced real false positives on tested campaign data.
               </dd>
               <dt>Llama Points / Alpaca Points</dt>
               <dd>
@@ -257,35 +254,27 @@
               </dd>
               <dt>White Peace</dt>
               <dd>
-                When none of the three decisive signals above fire - no reparations, no independence, no territory actually changing hands
-                between the war's original sides - the war is scored as a flat <code>0</code> for both sides rather than guessing, shown
-                separately below from wars that were actually decided. This is the expected result for a war fought mostly through
-                allies/vassals with nothing conclusive between the two original combatants, not a sign the algorithm gave up - the "How
-                decided" column's tooltip still shows what it considered, and a manual override in "Edit war corrections" fixes any case
-                where the real outcome was clearer in-game than the data shows.
+                None of the three decisive signals fire &rarr; flat <code>0</code> for both sides, shown separately from decided wars.
+                Expected for a war fought mostly through allies/vassals, not a sign the algorithm gave up - the "How decided" tooltip still
+                shows what it considered, and "Edit war corrections" overrides any case where the real outcome was clearer in-game.
               </dd>
               <dt>Which wars come out clearest</dt>
               <dd>
-                A clean conquest (one side's territory measurably shrinks, the other's grows) is the single most reliable case. An
-                indemnity peace or an independence war is just as reliable and needs no territory to change hands at all, since both are
-                read from a direct peace-treaty fact rather than inferred. A war that ends with nothing above resolving between the two
-                original sides - fought entirely through allies, or genuinely inconclusive - falls to White Peace by design, even if the
-                in-game war score or battle losses "look" one-sided.
+                Clean conquest (territory shrinks/grows) is most reliable. Indemnity peace and independence wars are equally reliable since
+                both read a direct peace-treaty fact, needing no territory to change hands at all. A war resolved only through allies, or
+                genuinely inconclusive, falls to White Peace by design - even if war score or battle losses "look" one-sided.
               </dd>
               <dt>Single save vs. a connected campaign ledger</dt>
               <dd>
-                Loading just one save with no Dashboard/recorder data connected gives the signals above nothing to compare against - there's
-                no "before the war" snapshot to diff. In that mode, scoring falls back to a much rougher guess (whichever side is occupying
-                more of the war's contested land right now), so treat those numbers as an estimate.
-                <strong>Connecting the Llama Score Dashboard's campaign folder is what unlocks the real detection above</strong> - the
-                recorder snapshots each war right before and after it disappears from the save, which is exactly the before/after comparison
-                reparations, independence, and land transfer need, and it catches wars EU5 purges from the save before your next autosave
-                would otherwise have caught them as concluded.
+                A single save with no Dashboard/recorder data has no "before the war" snapshot to diff, so scoring falls back to a rough
+                guess (whoever occupies more contested land right now) - treat those numbers as estimates.
+                <strong>Connecting the Llama Score Dashboard's campaign folder unlocks the real detection above</strong>: it snapshots each
+                war right before/after it disappears from the save (exactly the before/after comparison reparations, independence, and land
+                transfer need) and catches wars EU5 purges before your next autosave otherwise would.
               </dd>
               <dt>Why is a war greyed out / marked "auto"?</dt>
               <dd>
-                A war row is automatically excluded from scoring (an <code>auto</code> badge - hover it for the exact reason) rather than
-                counted, when:
+                A war row is auto-excluded from scoring (an <code>auto</code> badge - hover it for the exact reason) when:
                 <ul>
                   <li><strong>Not a PvP result</strong> - the opposing side was never player-controlled.</li>
                   <li><strong>Not a PvE result</strong> (PVE mode only) - the opposing side had a real player.</li>

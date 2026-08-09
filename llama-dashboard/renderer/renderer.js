@@ -63,13 +63,13 @@ function reasonLabel(reason) {
 // with the web app - see main.js's players:hide handler) or the web app's
 // own manual Hide list.
 const AUTO_EXCLUDE_TITLES = {
-  "vs-ai": "No country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score.",
-  "vs-player": "The opposing side had a real player - this is a PvP war, so it isn't scored under PvE/Alpaca Points.",
-  "player-departed": "This player had already stopped controlling this country (the recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it.",
-  "opponent-departed": "Every enemy in this war had already left the campaign before this war even began - a war fought against a real opponent still counts even if they left partway through it.",
-  "player-hidden": "This player was marked departed - wars that started before that point still count, only later ones are excluded.",
-  revolt: "This is a revolt (independence war or civil war) against your own rebels/pretender, not a fight against a foreign AI nation - the winner is still tracked correctly, but it never moves PVE/Alpaca Points either direction.",
-  "no-battle-losses": "This country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought.",
+  "vs-ai": "Opposing side was never player-controlled - not a PvP result.",
+  "vs-player": "Opposing side had a real player - not a PvE result, doesn't count under Alpaca Points.",
+  "player-departed": "This player had already reverted to AI before this war began. A war they were playing when it started still counts, even if they left partway through.",
+  "opponent-departed": "Every enemy had already left the campaign before this war began. A war against a real opponent still counts even if they left partway through.",
+  "player-hidden": "This player was marked departed - wars that started before that point still count.",
+  revolt: "A revolt (independence/civil war) against your own rebels/pretender, not a fight against a foreign AI nation - winner still tracked, but never moves PVE/Alpaca Points.",
+  "no-battle-losses": "Never recorded a Battle/Capture loss in this PvP war - joined but never fought.",
 };
 function autoExcludeLabel(reason) {
   return AUTO_EXCLUDE_TITLES[reason] ? reason.replace(/-/g, " ") : "excluded";
@@ -779,35 +779,35 @@ function renderModifierReport(report, societal) {
   const contribution = report.valueFormat === "monthly_points" ? fmtMonthlyValue(report.knownActiveContribution) : fmtModifierValue(report.knownActiveContribution);
   const activeEstateNote =
     report.country && Array.isArray(report.country.activeEstates)
-      ? `Active estates: <strong>${escapeHtml(report.country.activeEstates.map((estate) => estate.label || prettifyId(estate.id)).join(", ") || "None")}</strong>. Estate privileges for inactive estates are excluded from Eligible actions now.`
-      : "Active estates could not be verified from this snapshot, so estate privileges are withheld from Eligible actions now until a fresh autosave is captured.";
+      ? `Active estates: <strong>${escapeHtml(report.country.activeEstates.map((estate) => estate.label || prettifyId(estate.id)).join(", ") || "None")}</strong> - privileges for inactive estates are excluded from Eligible actions.`
+      : "Active estates unverified from this snapshot - estate privileges withheld from Eligible actions until a fresh autosave is captured.";
   let contributionNote;
   if (societal) {
     const equilibrium = societal.equilibrium;
     const equilibriumText = equilibrium.position < 0.000001 ? "centered at 0" : `${equilibrium.position.toLocaleString(undefined, { maximumFractionDigits: 2 })} toward ${prettifyId(equilibrium.directionId)}`;
     contributionNote =
-      `Confirmed active push: <strong>${escapeHtml(fmtMonthlyValue(equilibrium.selectedRate))}</strong> toward ${escapeHtml(prettifyId(societal.directionId))} ` +
-      `minus <strong>${escapeHtml(fmtMonthlyValue(equilibrium.opposingRate))}</strong> toward ${escapeHtml(prettifyId(societal.opposingDirectionId))}. ` +
-      `The net is <strong>${escapeHtml(fmtMonthlyValue(Math.abs(equilibrium.netRate)))}</strong> toward ${escapeHtml(prettifyId(equilibrium.directionId))}, ` +
-      `giving an equilibrium of <strong>${escapeHtml(equilibriumText)}</strong>. Active sources come from the snapshot; automatic engine scalars that EU5 does not serialize exactly are explicitly labeled as save-backed estimates, and temporary sources are excluded.`;
+      `Active push: <strong>${escapeHtml(fmtMonthlyValue(equilibrium.selectedRate))}</strong> toward ${escapeHtml(prettifyId(societal.directionId))} ` +
+      `&minus; <strong>${escapeHtml(fmtMonthlyValue(equilibrium.opposingRate))}</strong> toward ${escapeHtml(prettifyId(societal.opposingDirectionId))} ` +
+      `= <strong>${escapeHtml(fmtMonthlyValue(Math.abs(equilibrium.netRate)))}</strong> net toward ${escapeHtml(prettifyId(equilibrium.directionId))} ` +
+      `&rarr; equilibrium <strong>${escapeHtml(equilibriumText)}</strong>. Sources come from the snapshot; unserialized engine scalars are labeled as estimates, temporary sources excluded.`;
   } else {
-    contributionNote = `Confirmed active contribution from modeled sources: <strong>${escapeHtml(contribution)}</strong>. Event-granted modifiers are temporary/informational and are excluded from this optimizer total.`;
+    contributionNote = `Active contribution from modeled sources: <strong>${escapeHtml(contribution)}</strong> (event-granted modifiers are temporary/informational, excluded from this total).`;
   }
   results.innerHTML = `
     <div class="panel-header"><h2>${escapeHtml(title)}</h2><span class="tag-badge">${escapeHtml(countryLabel)}</span></div>
     <p class="note">${contributionNote}</p>
     <p class="note">${activeEstateNote}</p>
     <h3>Eligible actions now</h3>
-    <p class="note">Ranked positive actions whose captured game requirements pass for this country. This checks eligibility, not whether you currently have enough points or currency to pay the action cost.</p>
+    <p class="note">Ranked positive actions whose captured requirements pass for this country - checks eligibility only, not whether you can currently afford the cost.</p>
     ${renderModifierGroups(report.recommendations, true)}
     <details><summary>Blocked actions (${report.blockedSources.length})</summary>${renderModifierGroups(report.blockedSources, true)}</details>
-    <details><summary>Needs more data or trigger support (${report.unknownSources.length})</summary><p class="note">These stay out of the eligible list because at least one requirement could not be proven from the current snapshot and supported trigger set.</p>${renderModifierGroups(report.unknownSources, true)}</details>
+    <details><summary>Needs more data or trigger support (${report.unknownSources.length})</summary><p class="note">Stays out of Eligible actions because at least one requirement couldn't be proven from the current snapshot/trigger set.</p>${renderModifierGroups(report.unknownSources, true)}</details>
     <h3>${societal ? "What's currently pushing it" : "Confirmed active sources"}</h3>
     ${renderModifierGroups(report.activeSources, false)}
     ${societal ? `<h3>What's pushing the other way - toward ${escapeHtml(prettifyId(societal.opposingDirectionId))}</h3>${renderModifierGroups(societal.opposingReport.activeSources, false)}` : ""}
-    <details><summary>Other direct sources (${report.otherSources.length})</summary><p class="note">These affect the value but are not one of the four player-choice systems currently optimized.</p>${renderModifierGroups(report.otherSources, false)}</details>
-    <details><summary>Temporary event bonuses (${report.eventSources.length})</summary><p class="note">These modifier bundles are granted by events. They are shown for context only and never enter the eligible-action list or optimizer total.</p>${renderModifierGroups(report.eventSources, true)}</details>
-    <details><summary>Other informational/scripted sources (${report.otherIndirectSources.length})</summary><p class="note">Mission rewards, decisions, situations, and other scripted grants are categorized here but remain outside the optimizer until their action and eligibility rules are modeled.</p>${renderModifierGroups(report.otherIndirectSources, true)}</details>`;
+    <details><summary>Other direct sources (${report.otherSources.length})</summary><p class="note">Affects the value, but not one of the four player-choice systems currently optimized.</p>${renderModifierGroups(report.otherSources, false)}</details>
+    <details><summary>Temporary event bonuses (${report.eventSources.length})</summary><p class="note">Granted by events - shown for context only, never enter Eligible actions or the optimizer total.</p>${renderModifierGroups(report.eventSources, true)}</details>
+    <details><summary>Other informational/scripted sources (${report.otherIndirectSources.length})</summary><p class="note">Mission/decision/situation/scripted grants, categorized but outside the optimizer until their eligibility rules are modeled.</p>${renderModifierGroups(report.otherIndirectSources, true)}</details>`;
   results.classList.remove("hidden");
 }
 

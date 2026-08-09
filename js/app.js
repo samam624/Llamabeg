@@ -852,13 +852,13 @@
   }
 
   const AUTO_EXCLUDE_TITLES = {
-    "vs-ai": "Auto-excluded: no country on the opposing side was ever recorded as player-controlled - a fight against AI isn't a PvP result, so it's kept visible but doesn't score. Uncheck to score it anyway.",
-    "vs-player": "Auto-excluded: the opposing side had a real player in this war, so it isn't a PvE result and doesn't count under Alpaca Points. Uncheck to score it anyway.",
-    "player-departed": "Auto-excluded: this player had already stopped controlling this country (recorder saw it revert to AI) before this war even began - a war they were actually playing when it started still counts, even if they later left partway through it. Uncheck to score it anyway.",
-    "opponent-departed": "Auto-excluded: every enemy in this war had already left the campaign before this war even began (fighting an abandoned country doesn't score) - a war fought against a real opponent still counts even if they left partway through it. Uncheck to score it anyway.",
-    "player-hidden": "Auto-excluded: this player was marked departed (Hide button here, or in the Llamabeg desktop dashboard) - wars that started before that point still count, only later ones are excluded. Unhide them to include everything again.",
-    revolt: "Auto-excluded: this is a revolt (independence war or civil war) against your own rebels/pretender, not a fight against a foreign AI nation - it's shown for reference (and the winner is still tracked correctly) but never moves PVE/Alpaca Points either direction. Uncheck to score it anyway.",
-    "no-battle-losses": "Auto-excluded: this country never recorded a Battle or Capture loss in this PvP war (attrition doesn't count) - joined but never actually fought, so it doesn't score and isn't counted as an enemy/ally for anyone else's score either. PvP-only (not applied to PvE, where a win engineered through your vassals doing the fighting should still count). Uncheck to score it anyway.",
+    "vs-ai": "Auto-excluded: opposing side was never player-controlled - not a PvP result. Uncheck to score anyway.",
+    "vs-player": "Auto-excluded: opposing side had a real player - not a PvE result, doesn't count under Alpaca Points. Uncheck to score anyway.",
+    "player-departed": "Auto-excluded: this player had already reverted to AI before this war began. A war they were playing when it started still counts, even if they left partway through. Uncheck to score anyway.",
+    "opponent-departed": "Auto-excluded: every enemy had already left the campaign before this war began. A war against a real opponent still counts even if they left partway through. Uncheck to score anyway.",
+    "player-hidden": "Auto-excluded: this player was marked departed (Hide button here or in the desktop dashboard). Wars that started before that point still count. Unhide to include everything again.",
+    revolt: "Auto-excluded: a revolt (independence/civil war) against your own rebels/pretender, not a fight against a foreign AI nation - winner still tracked, but never moves PVE/Alpaca Points. Uncheck to score anyway.",
+    "no-battle-losses": "Auto-excluded: never recorded a Battle/Capture loss in this PvP war - joined but never fought, so doesn't count as an enemy/ally for anyone else either. PvP-only (a PvE win engineered through vassals still counts). Uncheck to score anyway.",
   };
   function autoExcludeBadge(reason) {
     if (!reason || !AUTO_EXCLUDE_TITLES[reason]) return "";
@@ -1996,55 +1996,53 @@
   // like "Treasury" or "Tag" are skipped) - a column with no entry here
   // just gets no tooltip, not a placeholder one.
   const COLUMN_DESCRIPTIONS = {
-    scorePlace: "The game's own overall world rank for this country (score.score_place in the save) - lower is better, combines the ADM/DIP/MIL rank-in-category scores below.",
-    admScore: "Administrative score rating (score.score_rating.ADM) - one of the game's three per-country competency scores; see the DIP/MIL tooltips for the other two.",
-    dipScore: "Diplomatic score rating (score.score_rating.DIP) - one of the game's three per-country competency scores.",
-    milScore: "Military score rating (score.score_rating.MIL) - one of the game's three per-country competency scores.",
-    totalDevelopment: "Sum of the Development stat across every location this country owns.",
-    avgDevelopment: "Total Development divided by number of owned locations - average development per location, independent of how large the country is.",
-    lastMonthGoldIncome: "Gold income from last month (last_month_gold_income in the save) - the game's own single \"how much did I make\" figure.",
-    income: "Gross income - all sources of income added together, before any expenses are subtracted.",
-    expense: "Gross expense - all outgoing spending added together, before weighing it against income.",
-    tradeIncome: "The Crown's actual state revenue from trade for the last completed month, read from the country's save-backed last_months_trade_income field. This already reflects the government's trade-income share; it does not sum the estates' separate private trade wealth. The live in-game Economy panel can differ because it previews the current month's routes.",
-    taxIncome: "The Crown's actual state tax revenue for the last completed month, read from the country's save-backed last_months_tax_income field. It equals the sum of every estate's paid_taxes records. The live in-game Economy panel can differ because it recalculates the current month's estate tax projection after loading.",
-    profit: "Income minus Expense - what's actually left over each month after paying for everything.",
-    efficiency: "Profit divided by Income - the share of gross income kept as profit rather than spent. 100% = no expenses at all; 0% = spending exactly what you make; negative = spending more than you make.",
+    scorePlace: "Game's own overall world rank (score.score_place) - lower is better; combines the ADM/DIP/MIL ranks below.",
+    admScore: "Administrative score rating (score.score_rating.ADM) - one of 3 per-country competency scores.",
+    dipScore: "Diplomatic score rating (score.score_rating.DIP).",
+    milScore: "Military score rating (score.score_rating.MIL).",
+    totalDevelopment: "Sum of Development across every owned location.",
+    avgDevelopment: "Total Development ÷ owned locations.",
+    lastMonthGoldIncome: "Gold income last month (last_month_gold_income) - the game's own \"how much did I make\" figure.",
+    income: "Gross income - every income source added together, before expenses.",
+    expense: "Gross expense - every outgoing cost added together.",
+    tradeIncome: "Crown's state trade revenue last month (last_months_trade_income) - already net of the government's trade share, excludes estates' private trade wealth. The live in-game panel previews the current month instead.",
+    taxIncome: "Crown's state tax revenue last month (last_months_tax_income) = Σ each estate's paid_taxes. The live in-game panel recalculates the current month instead.",
+    profit: "Income − Expense.",
+    efficiency: "Profit ÷ Income. 100% = no expenses; 0% = spending everything made; negative = spending more than made.",
     lastMonthsArmyMaintenance: "Gold spent maintaining the standing army last month.",
     lastMonthsNavyMaintenance: "Gold spent maintaining the navy last month.",
-    // Verified 2026-07-16 against the game's own Countries-tab ledger (a
-    // "Sort by GDP" tooltip on that column) across all 15 rows of a real
-    // save: raw gold-income / raw-population-field matched the game's
-    // displayed figure to 3-4 significant digits every time (e.g. France
-    // 825.46 / 10570 = 0.0781 vs the game's shown 0.0780) - this IS the
-    // game's own GDP stat, just computed here rather than read from a saved
-    // field (no literal "gdp" field exists anywhere in the save format).
-    incomePerPop: "Last month's gold income divided by population - the game's own \"GDP\" figure (verified to match its Countries-tab ledger) - how much this country earns per person, independent of its total size.",
-    taxBasePerPop: "Latest tax base value divided by population - how much taxable value this country generates per person.",
-    latestTaxBase: "Base Tax - the country's current total tax base (from the last entry of its historical tax base, which is always \"now\"). The taxable value the crown draws its tax income from.",
-    latestEconomicalBase: "Economic Base - the country's current total economic base (last entry of its historical economical base). A broader measure of the economy's size than tax base alone. Blank on older saves (pre-1.3), which don't record this.",
+    // Verified 2026-07-16 against the game's own Countries-tab "Sort by GDP"
+    // tooltip across all 15 rows of a real save (France 825.46/10570 = 0.0781
+    // vs the game's shown 0.0780) - this IS the game's own GDP stat, just
+    // computed here rather than read from a saved field (no literal "gdp"
+    // field exists anywhere in the save format).
+    incomePerPop: "GDP = Income/mo ÷ (Population/1000) - matches the game's own \"Sort by GDP\" figure.",
+    taxBasePerPop: "Base Tax ÷ Population.",
+    latestTaxBase: "Base Tax - current total tax base (last historical_tax_base entry, always \"now\").",
+    latestEconomicalBase: "Economic Base - current total economic base (last historical_economical_base entry), a broader measure than tax base alone. Blank pre-1.3 (not recorded).",
     buildingsValue:
-      "Total ducat value of this country's flat-priced buildings (cathedrals, plantations, the HRE armory, etc.), using each building's real game-file price and level. Ordinary economic buildings (workshops, temples, guild halls, ...) are NOT included - their only game-file cost is a monthly goods upkeep rate, not a one-time purchase price, so there is no real ducat cost to count for them. This is a narrower \"special buildings value\", not a full \"everything this country built\" figure.",
+      "Ducat value of this country's buildings, priced from game files: explicit price where the game sets one (cathedrals, plantations, ...), else the age-tier default for the building's unlock age. Cost to level L = baseCost × ((1+r)^L − 1) / r. Buildings gated \"always = no\" (event/decision wonders) are excluded - never normally built, no real cost to infer.",
     lastMonthsBuildingMaintenance:
-      "Total gold spent maintaining ALL buildings last month (last_months_building_maintenance) - the game's own total, matching the Economy tab's \"Building Maintenance\" expense line exactly. Unlike Building Maintenance Efficiency, this is raw spend - a bigger empire with more/higher-level buildings naturally pays more in total, which isn't the same as paying inefficiently for what it has.",
+      "Gold spent maintaining ALL buildings last month - the game's own last_months_building_maintenance total. Raw spend, not adjusted for empire size (see Building Maintenance Efficiency for that).",
     maintenanceEfficiency:
-      "How cheaply this country maintains its buildings compared to the field, isolating market-price effects rather than raw spend (a bigger empire naturally pays more total upkeep - that's not inefficiency). For each building type, compares this country's real per-level upkeep cost against the level-weighted average per-level cost across the comparison group, then rolls every type up into one score weighted by how many levels of each type this country actually owns. Positive = cheaper than average (more efficient); negative = pricier than average. On the Players table, the comparison group is just the other visible players (AI-run countries build unevenly and would only add noise); on the Countries table, it's every real country in the save.",
-    manpowerPerPop: "Manpower divided by population - how much of this country's population is available as army reinforcements, per person.",
-    greatPowerRank: "This country's rank on the game's Great Power standings (lower is better) - factors in population, income, advances, stability, prestige, markets, military, and more per the game's own Great Power Score.",
+      "How cheaply this country maintains buildings vs. a benchmark, isolating price from raw spend. efficiency = 1 − actualUpkeep / expectedUpkeep, where expectedUpkeep = Σ(your levels × benchmark ducats/level) per building type. Benchmark = level-weighted average upkeep/level across the comparison group: other visible players (Players table) or every real country (Countries table). Positive = cheaper than benchmark; negative = pricier.",
+    manpowerPerPop: "Manpower ÷ Population.",
+    greatPowerRank: "Rank on the game's Great Power standings (lower is better) - the game's own Great Power Score (population, income, advances, stability, prestige, markets, military, ...).",
     popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
-    deaths: "The game's own recorded death count for this country from this specific Black Death outbreak (disease_outbreak_manager's per-country tally) - not a population-before/after estimate, so land gained or lost during the outbreak doesn't distort it.",
-    popLossPct: "Black Death deaths divided by population at the start of the outbreak - what share of this country's people the plague actually killed.",
-    E: "Enemies - count of distinct enemy countries on the other side of this war (players only, for a scored PvP row).",
-    A: "Allies - count of distinct allied countries on this player's own side of the war, not counting themselves.",
-    warScore: "This war's contribution to the player's Llama/Alpaca Points, from the formula: 10·E·W/(A+1) + 10·(W−1)·(A+1)/(2·E) - bigger for beating more enemies with fewer allies helping.",
-    navyShips: "Real ship count from subunit_manager (built warships only) - levy ships (conscripted fishing boats/birlinns) are excluded, since nobody counts those as real naval strength. Blank if this save has no naval subunit data to count from.",
-    armyTotal: "Regiment COUNT from subunit_manager: Levies + Regulars + Mercenaries added together - one regiment counts the same whether it's full-strength or nearly wiped out. See the (k) columns for real troop headcounts. Blank if this save has no subunit data to count from.",
-    armyLevies: "Feudal/tribal levy regiment COUNT, raised from estates (peasant levies, noble/tribal cavalry, etc.) - identified by carrying a levies block in the save, same signal used to separate levy ships from built ones in Navy Size.",
-    armyRegulars: "Professionally built standing-army regiment COUNT - not raised from a levy, not a hired mercenary company.",
-    armyMercenaries: "Hired mercenary company COUNT from the mercenary pool. Counted by whoever currently controls/employs them, not the save's own owner field for a mercenary unit - that field is always a constant placeholder, not the hiring country.",
-    armyTotalK: "Real total troop headcount (thousands), not a bare regiment count - summed from each regiment's own current troop count (the save's per-regiment strength figure, e.g. a Byzantine cataphract regiment at 400 men), across Levies + Regulars + Mercenaries. Blank if this save has no subunit data.",
-    armyLeviesK: "Real CURRENTLY-MUSTERED levy troop headcount (thousands) - summed per-regiment troop counts, restricted to levy regiments. Correctly 0 for a country at peace with no levies raised.",
-    armyRegularsK: "Real regular troop headcount (thousands) - summed per-regiment troop counts, restricted to professionally-built regiments.",
-    armyMercenariesK: "Real mercenary troop headcount (thousands) - summed per-regiment troop counts, restricted to hired mercenary companies.",
+    deaths: "Game's own recorded Black Death death count for this outbreak (disease_outbreak_manager) - not a population-diff estimate, so land gained/lost during the outbreak doesn't distort it.",
+    popLossPct: "Black Death deaths ÷ population at outbreak start.",
+    E: "Enemies - distinct enemy countries on the other side of this war (players only, scored PvP rows).",
+    A: "Allies - distinct allied countries on this player's own side, not counting themselves.",
+    warScore: "This war's contribution to Llama/Alpaca Points: 10·E·W/(A+1) + 10·(W−1)·(A+1)/(2·E) - bigger for beating more enemies with fewer allies helping.",
+    navyShips: "Built warship count (subunit_manager) - levy ships (conscripted fishing boats/birlinns) excluded, since nobody counts those as real naval strength.",
+    armyTotal: "Regiment count: Levies + Regulars + Mercenaries - a full and a nearly-wiped regiment count the same. See the (k) columns for real troop headcounts.",
+    armyLevies: "Feudal/tribal levy regiment count, raised from estates (peasant levies, noble/tribal cavalry, ...).",
+    armyRegulars: "Professionally built standing-army regiment count - not levy, not mercenary.",
+    armyMercenaries: "Hired mercenary company count, credited to whoever currently controls/employs them (the save's owner field is a constant placeholder, not the hiring country).",
+    armyTotalK: "Real troop headcount (k) = Σ each regiment's own strength field, across Levies + Regulars + Mercenaries - not a bare regiment count.",
+    armyLeviesK: "Real mustered levy troop headcount (k) - 0 for a country at peace with no levies raised.",
+    armyRegularsK: "Real regular troop headcount (k).",
+    armyMercenariesK: "Real mercenary troop headcount (k).",
   };
 
   const COUNTRY_COLUMNS = [
