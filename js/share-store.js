@@ -271,10 +271,32 @@
     return rows[0].deaths_by_country;
   }
 
+  // Cheap freshness check for a browser's own locally-cached copy of a
+  // shared save (see js/save-library.js's remoteMarker field). deriveSaveId
+  // is playthrough+date, not content-hashed, so re-sharing under the SAME
+  // id with genuinely different content (a real live campaign: a player's
+  // roster attribution can differ between two shares of "the same" game
+  // date) silently overwrites the server object while a browser that
+  // already cached the old version has no way to notice - confirmed live:
+  // a recipient kept seeing a player as missing indefinitely after a
+  // sender re-shared and the server copy was already fixed. A HEAD request
+  // is enough to compare against without re-downloading the multi-MB body.
+  // Returns null (never blocks - callers treat null as "can't verify, fall
+  // back to trusting the cache") if unconfigured or the request fails.
+  async function headMeta(saveId) {
+    if (!isConfigured()) return null;
+    const c = config();
+    const url = `${c.supabaseUrl}/storage/v1/object/public/${BUCKET}/${objectPath(saveId)}`;
+    const res = await fetch(url, { method: "HEAD" }).catch(() => null);
+    if (!res || !res.ok) return null;
+    return { lastModified: res.headers.get("last-modified") || null, contentLength: res.headers.get("content-length") || null };
+  }
+
   root.ShareStore = {
     isConfigured,
     upload,
     fetch: fetchShared,
+    headMeta,
     fetchCampaignLedger,
     uploadCampaignLedger,
     captureBlackDeath,

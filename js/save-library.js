@@ -38,7 +38,14 @@
     return `${playthroughId}_${date}`;
   }
 
-  async function put(fileName, result) {
+  // remoteMarker (lastModified/contentLength of the Supabase Storage object
+  // this result came from, when it did - see js/share-store.js's headMeta)
+  // lets a later ?save= visit tell whether the server's copy has since
+  // changed out from under this cached one, instead of trusting it forever
+  // just because the id (playthrough+date, not content-hashed) still
+  // matches. null for a save cached from a raw local file upload, which
+  // has no remote object to compare against in the first place.
+  async function put(fileName, result, remoteMarker) {
     if (!available) return null;
     const db = await openDb();
     const id = deriveSaveId(result);
@@ -50,6 +57,7 @@
       gameDate: meta.date || null,
       playthroughName: meta.playthrough_name || null,
       playerCountryName: meta.player_country_name || null,
+      remoteMarker: remoteMarker || null,
       result,
     };
     await new Promise((resolve, reject) => {

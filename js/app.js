@@ -109,7 +109,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.14";
+  const ASSET_VERSION = "v1.3.15";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -542,7 +542,7 @@
     // Loading a save back out of the local history (see save-library.js)
     // re-parses nothing and shouldn't bump its "uploaded" timestamp - only
     // a fresh parse (options.persist left at its default) gets saved.
-    if (options.persist !== false && !staleParsedResult) saveResultToLibrary(displayName, result);
+    if (options.persist !== false && !staleParsedResult) saveResultToLibrary(displayName, result, options.remoteMarker);
 
     // If the page loaded from a ?save=<id> link that wasn't in this
     // browser's history yet (see initFromShareUrl()), and the save that
@@ -3196,10 +3196,10 @@
   // last_month.trade_income pools.
   const RESULT_SCHEMA_VERSION = 13;
 
-  function saveResultToLibrary(fileName, result) {
+  function saveResultToLibrary(fileName, result, remoteMarker) {
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) return;
     result.__schemaVersion = RESULT_SCHEMA_VERSION;
-    SaveLibrary.put(fileName, result)
+    SaveLibrary.put(fileName, result, remoteMarker)
       .then(refreshSavesLibraryUI)
       .catch((err) => {
         if (typeof console !== "undefined") console.warn("Could not save to local save history:", err);
@@ -3318,15 +3318,38 @@
     // upload, or a previous visit to this link that cached it) - no network.
     const local = typeof SaveLibrary !== "undefined" && SaveLibrary.available ? SaveLibrary.get(id) : Promise.resolve(null);
     local
-      .then((record) => {
+      .then(async (record) => {
         if (record) {
-          onParsed(record.result, { persist: false, displayName: record.fileName });
-          activateTab(pendingShareTab);
-          return;
+          // deriveSaveId is playthrough+date, not content-hashed, so a real
+          // live campaign re-shared under the SAME id (a player's session
+          // attribution can genuinely differ between two shares of "the
+          // same" in-game date) silently overwrites the server object -
+          // this browser's cached copy would otherwise never notice and
+          // serve the stale roster forever, no matter how many times the
+          // sender re-shares. One cheap HEAD compares the cached record's
+          // own remoteMarker (set when it was written - see
+          // save-library.js) against the current server object; a mismatch
+          // (or a legacy/local-upload record with no marker to compare)
+          // falls through to a real fetch instead of trusting blindly.
+          // headMeta returning null (offline, unconfigured, request
+          // failed) means "can't verify" - trust the cache rather than
+          // block on a failed check.
+          const fresh = typeof ShareStore !== "undefined" && ShareStore.headMeta ? await ShareStore.headMeta(id).catch(() => null) : null;
+          const stillFresh = !fresh || markersMatch(record.remoteMarker, fresh);
+          if (stillFresh) {
+            onParsed(record.result, { persist: false, displayName: record.fileName });
+            activateTab(pendingShareTab);
+            return;
+          }
         }
         return loadSharedSaveOrPrompt(id);
       })
       .catch(() => loadSharedSaveOrPrompt(id));
+  }
+
+  function markersMatch(a, b) {
+    if (!a || !b) return false;
+    return a.lastModified === b.lastModified && a.contentLength === b.contentLength;
   }
 
   // Local miss: try the shared-save backend (someone handed this link to a
@@ -3346,14 +3369,20 @@
     pendingShareNoticeEl.hidden = false;
     pendingShareNoticeEl.textContent = "Loading shared save…";
     return ShareStore.fetch(id)
-      .then((result) => {
+      .then(async (result) => {
         if (!result) {
           pendingShareId = id;
           showPendingShareNotice(id);
           return;
         }
         pendingShareNoticeEl.hidden = true;
-        onParsed(result, { displayName: sharedDisplayName(id, result) });
+        // Stamp this fetch with the server object's current marker so a
+        // LATER visit to this same link can tell whether it's since been
+        // re-shared with different content - see initFromShareUrl's
+        // freshness check. One extra cheap HEAD, not on the critical path
+        // for showing the result (fire it after, don't block rendering).
+        const remoteMarker = await ShareStore.headMeta(id).catch(() => null);
+        onParsed(result, { displayName: sharedDisplayName(id, result), remoteMarker });
         activateTab(pendingShareTab);
       })
       .catch((err) => {
