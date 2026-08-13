@@ -202,7 +202,8 @@ counts needing the same `dateFromHours()` conversion used elsewhere.
 Renders a pdx.tools-style province map with toggleable mapmodes, mouse-wheel zoom,
 drag-to-pan, and hover tooltips, using the game's own map bitmap plus per-location data
 pulled from the save. Solo buttons: Political, Players, Development, Population. Grouped
-behind a collapsed dropdown each: Economy (Tax Base, Tax Gap, Prosperity, Control), Trade
+behind a collapsed dropdown each: Economy (Tax Base, Tax Gap, Rural Production Efficiency,
+Urban Production Efficiency, Prosperity, Control), Trade
 (Markets, Trade Network, RGO), Demographic (Religion, Culture).
 
 - **Sea vs. land.** `default.map`'s `sea_zones`/`lakes` lists mark each location as water or
@@ -459,6 +460,14 @@ anywhere — the game derives it live from population/estates/subjects at render
 and per-estate `gold` treasuries, which sum ~9× too high) — so it's deliberately not offered;
 Economic Base is the stored aggregate it feeds.
 
+**Trade Capacity** is summed by country from each market's compact merchant rows
+(`market_manager.database.*.merchant.capacity`). **Literacy** joins each location's pop IDs
+to top-level `population.database` records and population-weights the saved literacy values
+first per location, then across each country's owned locations. Both paths are shared by text
+and binary parses and finalized in `js/additional-metrics.js`. See
+[PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md](PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md)
+for their exact aggregation and units.
+
 ### Troop headcounts vs. regiment counts (`subunit_manager`)
 
 The Military tab's Navy Size and the "Active Regiments / Levy Regiments / …" columns are
@@ -615,6 +624,23 @@ per-table-different field) `PLAYER_COUNTRY_SORT_KEYS`, in addition to the Countr
 equivalents.
 
 Not yet deployed to production — verified against `localhost:8000` only.
+
+### Building Production Efficiency
+
+The Production Efficiency percentage shown by EU5 is not serialized directly. The browser
+estimates it from compact `building_manager` records, current location/market data, and the
+derived `game_data/production-methods.json` recipe table. The save's
+`last_months_profit` is normalized to fully staffed active levels, so the reconstruction
+uses constructed levels rather than the current employed fraction. Buildings with current
+input shortages are excluded because that shortage snapshot cannot be combined safely with
+normalized last-month profit.
+
+Aggregation is level-weighted and split by location rank: `rural_settlement` feeds Rural;
+`town`, `city`, and `megalopolis` feed Urban. The two mapmodes have independent scales, and
+the Players/Countries Economy tables expose separate national averages. See
+[PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md](PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md)
+for the exact formula, Lavenham/Shaharah failure analysis, field path, exclusions, and
+real-save validation.
 
 ## Black Death analyzer
 
@@ -933,6 +959,12 @@ nav, `js/app.js`'s `tabPanels`/`activateTab`). Load Save is the only tab shown p
 (`setResultTabsAvailable()`); loading a save auto-jumps to Metrics if you were on Load Save,
 but doesn't yank you away from Map/Graphs/Llama if you were already looking at something
 else.
+
+The wide Players metric table opts into `stickyFirstColumn`; its player-name header and cells
+use CSS `position: sticky; left: 0` so the name remains visible while horizontally scrolling
+through metric groups. The opaque sticky-cell background and elevated header z-index prevent
+underlying metric cells from bleeding through. This is intentionally enabled for Players,
+where the first column is the identity being compared.
 
 ## Visual design — the "Campaign Ledger" reskin
 

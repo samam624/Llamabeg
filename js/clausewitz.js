@@ -677,6 +677,29 @@
 
   function extractBuildingFields(number, obj) {
     if (!obj || typeof obj !== "object") return null;
+    // A building's selected production method is serialized as a dynamic
+    // child block named after the method, rather than in a fixed `method =`
+    // field. Every such block has `missing = { demand = <method> ... }`;
+    // the remaining entries are the quantities of inputs the market could
+    // not supply in the saved snapshot. Keep this compact shape so the UI
+    // can identify the method and reject shortage/profit basis mismatches
+    // while estimating Production Efficiency, without retaining the
+    // enormous raw manager object.
+    const productionMethods = [];
+    for (const [fallbackKey, value] of Object.entries(obj)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const missing = value.missing;
+      if (!missing || typeof missing !== "object" || Array.isArray(missing) || typeof missing.demand !== "string") continue;
+      const shortages = {};
+      for (const [good, amount] of Object.entries(missing)) {
+        if (good === "demand" || typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) continue;
+        shortages[good] = amount;
+      }
+      productionMethods.push({
+        key: missing.demand || fallbackKey,
+        shortages,
+      });
+    }
     return {
       number,
       type: obj.type,
@@ -688,6 +711,7 @@
       owner: obj.owner,
       lastMonthsProfit: obj.last_months_profit,
       upkeep: obj.upkeep,
+      productionMethods,
     };
   }
 

@@ -30,13 +30,16 @@ White Peace).
 - Drop in a `.eu5` save — compressed (straight from the game's save folder) or melted
   (plaintext) — and get an overview of countries, players, and world stats.
 - **Map** with toggleable mapmodes — Political, Players, Development, Population, an
-  Economy group (Tax Base, Tax Gap, Prosperity, Control), a Trade group (Markets, Trade
+  Economy group (Tax Base, Tax Gap, Rural Production Efficiency, Urban Production Efficiency,
+  Prosperity, Control), a Trade group (Markets, Trade
   Network, RGO), and a Demographic group (Religion, Culture) — pan/zoom, and hover
   detail. Trade Network draws each market's real established trade routes (decomposed
   hop-by-hop through the actual markets they relay across, not a straight line between
   two distant endpoints) with click-to-isolate a single market's own connections.
 - **Metrics** tables for every country and player (economy, military, demographics,
-  estates), sortable and filterable.
+  estates), sortable and filterable. The wide Players sheet freezes player names while
+  scrolling and includes Trade Capacity, population-weighted Literacy, and separate
+  level-weighted Rural/Urban Production Efficiency averages.
 - **Graphs** of population and tax base over time.
 - **Black Death** tracker — real per-country death tolls, not a population-diff guess.
 - **Llama Score / Alpaca Score** — multiplayer war scoring, PvP and PvE modes, backed by
@@ -178,17 +181,24 @@ scoring's winner-detection actually works internally, and the validation results
 of it. The government-versus-estate income distinction and the exact BYZ benchmark are
 documented separately in
 [docs/STATE_TRADE_AND_TAX_INCOME.md](docs/STATE_TRADE_AND_TAX_INCOME.md).
+Production Efficiency's formula, rural/urban split, exclusions, real-save validation, plus
+the Literacy and Trade Capacity field paths are documented in
+[docs/PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md](docs/PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md).
 
 ## Deploying (Netlify)
 
 ```
+node tools/build-building-costs.js
+node tools/build-production-methods.js
 npm run build   # -> dist/ (index.html + css/ + js/ + assets/)
 ```
 
 `netlify.toml` points Netlify at this same build command and serves `dist/`. The build only
 copies `map_data/location_ids.png` and `map_data/locations.json` (if present locally) into
 `dist/` — never the original `locations.png`/`definitions.txt`/`named_locations/` — see
-"License / data note" below.
+"License / data note" below. It also copies the two compact, derived runtime tables in
+`game_data/` when present: `building-costs.json` and `production-methods.json`. Regenerate
+those from the same current EU5 install used for the release before building.
 
 ## License / data note
 

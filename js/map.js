@@ -37,6 +37,8 @@
     // with `curl -sL -w "%{content_type}"` (not just the status code) before
     // picking them - both come back image/png.
     taxGap: wikiIcon("Tax efficiency.png"),
+    ruralProductionEfficiency: wikiIcon("Building category rgo building category.png"),
+    urbanProductionEfficiency: wikiIcon("Tab production.png"),
     tradeNetwork: wikiIcon("Trade capacity.png"),
   };
 
@@ -51,7 +53,7 @@
   // because a brand new standalone mapmode gets added later.
   const TOOLBAR_SOLO_MODES = ["political", "players", "development", "population"];
   const TOOLBAR_GROUPS = [
-    { label: "Economy", keys: ["tax", "taxGap", "prosperity", "control"] },
+    { label: "Economy", keys: ["tax", "taxGap", "ruralProductionEfficiency", "urbanProductionEfficiency", "prosperity", "control"] },
     { label: "Trade", keys: ["marketAccess", "tradeNetwork", "trade"] },
     { label: "Demographic", keys: ["religion", "culture"] },
   ];
@@ -485,7 +487,16 @@
     // Scaling min -> max instead (per user request) uses the FULL color
     // range for the actual spread of values that exist, so real
     // differences between locations are visible rather than compressed.
-    const HEAT_SCALE_FIELDS = ["development", "population", "tax", "control", "prosperity", "taxGap"];
+    const HEAT_SCALE_FIELDS = [
+      "development",
+      "population",
+      "tax",
+      "control",
+      "prosperity",
+      "taxGap",
+      "averageRuralBuildingProductionEfficiency",
+      "averageUrbanBuildingProductionEfficiency",
+    ];
     // development/population/tax get colored by PERCENTILE RANK among this
     // scope's locations, not by where the value sits between min and max
     // (even in log space) - see the note above filteredHeatColor for why:
@@ -628,6 +639,12 @@
     // every other heat field, rather than guessing a control value.
     function ownedNumericOrZero(loc, field) {
       if (!loc || isImpassable(loc)) return undefined;
+      // No operating/resolvable producing building is "no data", not 0%
+      // efficiency. Filling every empty owned location with zero would swamp
+      // both the gradient and the visual meaning of this building-only mode.
+      if (field === "averageRuralBuildingProductionEfficiency" || field === "averageUrbanBuildingProductionEfficiency") {
+        return typeof loc[field] === "number" ? loc[field] : undefined;
+      }
       if (field === "taxGap") {
         if (typeof loc.tax === "number" && typeof loc.control === "number") return Math.max(0, loc.tax * (1 - loc.control));
         return hasAnyLocationData(loc) && typeof loc.owner === "number" ? 0 : undefined;
@@ -918,6 +935,42 @@
         legend: () => {
           const s = scaleFor("taxGap");
           return gradientLegend(s.min, s.max, (v) => fmtNum(v, 2) + " tax");
+        },
+      },
+      ruralProductionEfficiency: {
+        label: "Rural Production Efficiency",
+        colorFor(id) {
+          return filteredHeatColor(locByNumber.get(id), "averageRuralBuildingProductionEfficiency");
+        },
+        tooltipFor(id) {
+          const loc = locByNumber.get(id);
+          const value = ownedNumericOrZero(loc, "averageRuralBuildingProductionEfficiency");
+          if (typeof value !== "number") return null;
+          const samples = loc.ruralBuildingProductionEfficiencySamples || 0;
+          const levels = loc.ruralBuildingProductionEfficiencyLevels || 0;
+          return `Rural Avg Building Production Efficiency: ${value >= 0 ? "+" : ""}${fmtPercent(value, 1)} (${fmtNum(levels, 0)} levels across ${fmtNum(samples, 0)} buildings)`;
+        },
+        legend: () => {
+          const s = scaleFor("averageRuralBuildingProductionEfficiency");
+          return gradientLegend(s.min, s.max, (v) => `${v >= 0 ? "+" : ""}${fmtPercent(v, 0)}`);
+        },
+      },
+      urbanProductionEfficiency: {
+        label: "Urban Production Efficiency",
+        colorFor(id) {
+          return filteredHeatColor(locByNumber.get(id), "averageUrbanBuildingProductionEfficiency");
+        },
+        tooltipFor(id) {
+          const loc = locByNumber.get(id);
+          const value = ownedNumericOrZero(loc, "averageUrbanBuildingProductionEfficiency");
+          if (typeof value !== "number") return null;
+          const samples = loc.urbanBuildingProductionEfficiencySamples || 0;
+          const levels = loc.urbanBuildingProductionEfficiencyLevels || 0;
+          return `Urban Avg Building Production Efficiency: ${value >= 0 ? "+" : ""}${fmtPercent(value, 1)} (${fmtNum(levels, 0)} levels across ${fmtNum(samples, 0)} buildings)`;
+        },
+        legend: () => {
+          const s = scaleFor("averageUrbanBuildingProductionEfficiency");
+          return gradientLegend(s.min, s.max, (v) => `${v >= 0 ? "+" : ""}${fmtPercent(v, 0)}`);
         },
       },
       control: {

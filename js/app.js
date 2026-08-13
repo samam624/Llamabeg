@@ -109,7 +109,7 @@
   // computeLlamaScores' mode param). Persisted so reloading the page keeps
   // whichever mode was last selected.
   const LLAMA_MODE_KEY = "eu5-analyzer-llama-mode";
-  const ASSET_VERSION = "v1.3.16";
+  const ASSET_VERSION = "v1.3.19";
   let llamaScoreMode = localStorage.getItem(LLAMA_MODE_KEY) === "pve" ? "pve" : "pvp";
   let currentEstateMetricGroup = "commoners";
   // Set when the page loads with a ?save=<id> URL that isn't in this
@@ -434,15 +434,21 @@
       result.locations.some((loc) => loc && Array.isArray(loc.popIds) && loc.popIds.length) &&
       (!Array.isArray(result.popRecords) || !result.popRecords.length);
     const missingEstateIncomeRecords = !Array.isArray(result.estateTradeIncomes);
+    const missingBuildingProductionMethods =
+      Array.isArray(result.buildings) &&
+      result.buildings.length > 0 &&
+      result.buildings.some((building) => building && !Array.isArray(building.productionMethods));
     const staleParsedResult =
       (result.__schemaVersion !== undefined && result.__schemaVersion !== RESULT_SCHEMA_VERSION) ||
       missingPopulationRecords ||
-      missingEstateIncomeRecords;
+      missingEstateIncomeRecords ||
+      missingBuildingProductionMethods;
     if (staleParsedResult) {
       const canRemoveStale = options.persist === false && options.libraryId;
       const missingData = [];
       if (missingPopulationRecords) missingData.push("population database records");
       if (missingEstateIncomeRecords) missingData.push("per-estate income records");
+      if (missingBuildingProductionMethods) missingData.push("building production-method records");
       if (!missingData.length) missingData.push("newer fields (including estate tax rates)");
       showError(
         `This save was loaded from parsed data saved by an older version of this analyzer - some ${missingData.join(" and ")} may be missing until it's re-parsed. ` +
@@ -512,6 +518,7 @@
       c.armyTotalK = bucket.levy + bucket.regular + bucket.mercenary;
     });
     computeCountryLocationMetrics(result);
+    applyAdditionalSaveMetrics(result);
     applyBuildingsValueMetric(result);
     applyMaintenanceEfficiencyMetric(result);
     renderOverview(result);
@@ -2006,6 +2013,7 @@
     income: "Gross income - every income source added together, before expenses.",
     expense: "Gross expense - every outgoing cost added together.",
     tradeIncome: "Crown's state trade revenue last month (last_months_trade_income) - already net of the government's trade share, excludes estates' private trade wealth. The live in-game panel previews the current month instead.",
+    tradeCapacity: "Total Trade Capacity across every market where this country has a merchant, summed from the save's per-market merchant capacity values.",
     taxIncome: "Crown's state tax revenue last month (last_months_tax_income) = Σ each estate's paid_taxes. The live in-game panel recalculates the current month instead.",
     profit: "Income − Expense.",
     efficiency: "Profit ÷ Income. 100% = no expenses; 0% = spending everything made; negative = spending more than made.",
@@ -2026,6 +2034,11 @@
       "Gold spent maintaining ALL buildings last month - the game's own last_months_building_maintenance total. Raw spend, not adjusted for empire size (see Building Maintenance Efficiency for that).",
     maintenanceEfficiency:
       "How cheaply this country maintains buildings vs. a benchmark, isolating price from raw spend. efficiency = 1 − actualUpkeep / expectedUpkeep, where expectedUpkeep = Σ(your levels × benchmark ducats/level) per building type. Benchmark = level-weighted average upkeep/level across the comparison group: other visible players (Players table) or every real country (Countries table). Positive = cheaper than benchmark; negative = pricier.",
+    averageRuralBuildingProductionEfficiency:
+      "Average of the green Production Efficiency modifier shown on operating buildings in rural settlements, weighted by building levels. Empty, unresolved, or input-shortage-affected buildings are excluded.",
+    averageUrbanBuildingProductionEfficiency:
+      "Average of the green Production Efficiency modifier shown on operating buildings in towns, cities, and megalopolises, weighted by building levels. Empty, unresolved, or input-shortage-affected buildings are excluded.",
+    literacy: "Population-weighted average literacy across all pops in the country's owned locations. The save stores literacy in percentage points (38 = 38%).",
     manpowerPerPop: "Manpower ÷ Population.",
     greatPowerRank: "Rank on the game's Great Power standings (lower is better) - the game's own Great Power Score (population, income, advances, stability, prestige, markets, military, ...).",
     popAtStart: "Population at the start of the Black Death outbreak, before any plague deaths.",
@@ -2066,6 +2079,7 @@
     { key: "income", label: "Gross Income", numeric: true, render: (c) => fmtNum(c.income, 1) },
     { key: "expense", label: "Gross Expense", numeric: true, render: (c) => fmtNum(c.expense, 1) },
     { key: "tradeIncome", label: "State Trade Income (Last Month)", numeric: true, render: (c) => fmtNum(c.tradeIncome, 2) },
+    { key: "tradeCapacity", label: "Trade Capacity", numeric: true, heatColumn: true, render: (c) => fmtNum(c.tradeCapacity, 2) },
     { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (c) => fmtNum(c.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (c) => fmtNum(c.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (c) => fmtNum(c.latestEconomicalBase, 1) },
@@ -2090,6 +2104,26 @@
       heatColumn: true,
       render: (c) => (typeof c.maintenanceEfficiency === "number" ? `${c.maintenanceEfficiency >= 0 ? "+" : ""}${fmtPercent(c.maintenanceEfficiency, 1)}` : "-"),
     },
+    {
+      key: "averageRuralBuildingProductionEfficiency",
+      label: "Rural Avg Prod. Eff.",
+      numeric: true,
+      heatColumn: true,
+      render: (c) =>
+        typeof c.averageRuralBuildingProductionEfficiency === "number"
+          ? `${c.averageRuralBuildingProductionEfficiency >= 0 ? "+" : ""}${fmtPercent(c.averageRuralBuildingProductionEfficiency, 1)}`
+          : "-",
+    },
+    {
+      key: "averageUrbanBuildingProductionEfficiency",
+      label: "Urban Avg Prod. Eff.",
+      numeric: true,
+      heatColumn: true,
+      render: (c) =>
+        typeof c.averageUrbanBuildingProductionEfficiency === "number"
+          ? `${c.averageUrbanBuildingProductionEfficiency >= 0 ? "+" : ""}${fmtPercent(c.averageUrbanBuildingProductionEfficiency, 1)}`
+          : "-",
+    },
     { key: "profit", label: "Profit", numeric: true, render: (c) => fmtNum(c.profit, 1) },
     {
       key: "efficiency",
@@ -2108,6 +2142,7 @@
     { key: "armyMercenariesK", label: "Mercenaries (k)", numeric: true, render: (c) => fmtNum(c.armyMercenariesK, 2) },
     { key: "armyMercenaries", label: "Merc. Regiments", numeric: true, render: (c) => fmtNum(c.armyMercenaries, 0) },
     { key: "population", label: "Population (people)", numeric: true, render: (c) => fmtPopulation(c.population) },
+    { key: "literacy", label: "Literacy", numeric: true, heatColumn: true, render: (c) => (typeof c.literacy === "number" ? `${fmtNum(c.literacy, 1)}%` : "-") },
     { key: "incomePerPop", label: "GDP (Income/1k people)", numeric: true, render: (c) => fmtNum(c.incomePerPop, 3) },
     { key: "taxBasePerPop", label: "Tax Base/1k people", numeric: true, render: (c) => fmtNum(c.taxBasePerPop, 3) },
     { key: "manpowerPerPop", label: "Manpower/1k people", numeric: true, render: (c) => fmtNum(c.manpowerPerPop, 3) },
@@ -2326,6 +2361,7 @@
     { key: "gold", label: "Treasury", numeric: true, render: (p) => fmtNum(p.country && p.country.gold, 1) },
     { key: "lastMonthGoldIncome", label: "Income/mo", numeric: true, render: (p) => fmtNum(p.country && p.country.lastMonthGoldIncome, 2) },
     { key: "tradeIncome", label: "State Trade Income (Last Month)", numeric: true, render: (p) => fmtNum(p.country && p.country.tradeIncome, 2) },
+    { key: "tradeCapacity", label: "Trade Capacity", numeric: true, heatColumn: true, render: (p) => fmtNum(p.country && p.country.tradeCapacity, 2) },
     { key: "taxIncome", label: "State Tax Income (Last Month)", numeric: true, render: (p) => fmtNum(p.country && p.country.taxIncome, 2) },
     { key: "latestTaxBase", label: "Base Tax", numeric: true, render: (p) => fmtNum(p.country && p.country.latestTaxBase, 1) },
     { key: "latestEconomicalBase", label: "Economic Base", numeric: true, render: (p) => fmtNum(p.country && p.country.latestEconomicalBase, 1) },
@@ -2357,6 +2393,26 @@
           ? `${p.country.maintenanceEfficiencyVsPlayers >= 0 ? "+" : ""}${fmtPercent(p.country.maintenanceEfficiencyVsPlayers, 1)}`
           : "-",
     },
+    {
+      key: "averageRuralBuildingProductionEfficiency",
+      label: "Rural Avg Prod. Eff.",
+      numeric: true,
+      heatColumn: true,
+      render: (p) =>
+        p.country && typeof p.country.averageRuralBuildingProductionEfficiency === "number"
+          ? `${p.country.averageRuralBuildingProductionEfficiency >= 0 ? "+" : ""}${fmtPercent(p.country.averageRuralBuildingProductionEfficiency, 1)}`
+          : "-",
+    },
+    {
+      key: "averageUrbanBuildingProductionEfficiency",
+      label: "Urban Avg Prod. Eff.",
+      numeric: true,
+      heatColumn: true,
+      render: (p) =>
+        p.country && typeof p.country.averageUrbanBuildingProductionEfficiency === "number"
+          ? `${p.country.averageUrbanBuildingProductionEfficiency >= 0 ? "+" : ""}${fmtPercent(p.country.averageUrbanBuildingProductionEfficiency, 1)}`
+          : "-",
+    },
     { key: "profit", label: "Profit", numeric: true, render: (p) => fmtNum(p.country && p.country.profit, 1) },
     {
       key: "efficiency",
@@ -2365,6 +2421,7 @@
       render: (p) => (p.country && typeof p.country.efficiency === "number" ? (p.country.efficiency * 100).toFixed(0) + "%" : "-"),
     },
     { key: "population", label: "Population (people)", numeric: true, render: (p) => fmtPopulation(p.country && p.country.population) },
+    { key: "literacy", label: "Literacy", numeric: true, heatColumn: true, render: (p) => (p.country && typeof p.country.literacy === "number" ? `${fmtNum(p.country.literacy, 1)}%` : "-") },
     { key: "incomePerPop", label: "GDP (Income/1k people)", numeric: true, render: (p) => fmtNum(p.country && p.country.incomePerPop, 3) },
     { key: "taxBasePerPop", label: "Tax Base/1k people", numeric: true, render: (p) => fmtNum(p.country && p.country.taxBasePerPop, 3) },
     { key: "manpower", label: "Manpower (k)", numeric: true, render: (p) => fmtNum(p.country && p.country.manpower, 2) },
@@ -2433,14 +2490,18 @@
     "gold",
     "lastMonthGoldIncome",
     "tradeIncome",
+    "tradeCapacity",
     "taxIncome",
     "latestTaxBase",
     "latestEconomicalBase",
     "buildingsValue",
     "lastMonthsBuildingMaintenance",
+    "averageRuralBuildingProductionEfficiency",
+    "averageUrbanBuildingProductionEfficiency",
     "profit",
     "efficiency",
     "population",
+    "literacy",
     "incomePerPop",
     "taxBasePerPop",
     "manpowerPerPop",
@@ -2464,7 +2525,7 @@
   ];
 
   const COUNTRY_METRIC_GROUPS = {
-    key: ["tag", "playerNames", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "manpowerPerPop"],
+    key: ["tag", "playerNames", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "literacy", "manpowerPerPop"],
     economy: [
       "tag",
       "playerNames",
@@ -2473,12 +2534,15 @@
       "income",
       "expense",
       "tradeIncome",
+      "tradeCapacity",
       "taxIncome",
       "latestTaxBase",
       "latestEconomicalBase",
       "buildingsValue",
       "lastMonthsBuildingMaintenance",
       "maintenanceEfficiency",
+      "averageRuralBuildingProductionEfficiency",
+      "averageUrbanBuildingProductionEfficiency",
       "profit",
       "efficiency",
       "lastMonthsArmyMaintenance",
@@ -2511,6 +2575,7 @@
       "totalDevelopment",
       "avgDevelopment",
       "population",
+      "literacy",
       "incomePerPop",
       "taxBasePerPop",
       "manpowerPerPop",
@@ -2521,19 +2586,22 @@
   };
 
   const PLAYER_METRIC_GROUPS = {
-    key: ["name", "tag", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "manpowerPerPop", "__hide"],
+    key: ["name", "tag", "lastMonthGoldIncome", "latestTaxBase", "profit", "efficiency", "population", "literacy", "manpowerPerPop", "__hide"],
     economy: [
       "name",
       "tag",
       "gold",
       "lastMonthGoldIncome",
       "tradeIncome",
+      "tradeCapacity",
       "taxIncome",
       "latestTaxBase",
       "latestEconomicalBase",
       "buildingsValue",
       "lastMonthsBuildingMaintenance",
       "maintenanceEfficiency",
+      "averageRuralBuildingProductionEfficiency",
+      "averageUrbanBuildingProductionEfficiency",
       "profit",
       "efficiency",
       "incomePerPop",
@@ -2558,7 +2626,7 @@
       "navyShips",
       "__hide",
     ],
-    demographic: ["name", "tag", "greatPowerRank", "locationCount", "totalDevelopment", "avgDevelopment", "population", "incomePerPop", "taxBasePerPop", "stability", "prestige", "__hide"],
+    demographic: ["name", "tag", "greatPowerRank", "locationCount", "totalDevelopment", "avgDevelopment", "population", "literacy", "incomePerPop", "taxBasePerPop", "stability", "prestige", "__hide"],
     estates: ["name", "tag", "__estates", "__hide"],
   };
 
@@ -2606,7 +2674,7 @@
     return row[col.key];
   }
 
-  const KEY_HEAT_COLUMNS = new Set(["lastMonthGoldIncome", "profit", "efficiency", "population", "manpowerPerPop"]);
+  const KEY_HEAT_COLUMNS = new Set(["lastMonthGoldIncome", "profit", "efficiency", "population", "literacy", "manpowerPerPop"]);
 
   function metricValue(row, col) {
     const value = sortValue(row, col);
@@ -2724,7 +2792,10 @@
         })
         .join("");
 
-      const tableClass = columns.length >= 12 ? ' class="dense-metric-table"' : "";
+      const tableClasses = [];
+      if (columns.length >= 12) tableClasses.push("dense-metric-table");
+      if (options.stickyFirstColumn) tableClasses.push("sticky-first-column");
+      const tableClass = tableClasses.length ? ` class="${tableClasses.join(" ")}"` : "";
       const headerHtml = options.headerHtml ? options.headerHtml() : "";
       container.innerHTML = `${headerHtml}<table${tableClass}><thead><tr>${thead}</tr></thead><tbody>${tbody}</tbody></table>`;
 
@@ -2782,6 +2853,7 @@
       defaultSortKey: defaultSortKeyFor(columns),
       colorKeyMetrics: true,
       colorAllNumericMetrics: true,
+      stickyFirstColumn: true,
       // Unlike the Countries table (1000+ rows, real risk of a catastrophic
       // outlier squishing everyone else into a thin green sliver - see
       // heatScoreFor), the Players table is a handful of rows where relative
@@ -2813,6 +2885,50 @@
   }
 
   let countriesController = null;
+
+  // Static production-method recipes are derived from the local game files
+  // by tools/build-production-methods.js and shipped as data-only JSON. The
+  // save contains all dynamic values (selected method, prices, active
+  // levels, access, normalized profit); this compact table supplies the base
+  // input/output coefficients needed to solve the green building Production
+  // Efficiency percentage.
+  let productionMethodsCache = null;
+  let productionMethodsPromise = null;
+  function loadProductionMethods() {
+    if (!productionMethodsPromise) {
+      productionMethodsPromise = fetch("game_data/production-methods.json")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          productionMethodsCache = data;
+          return data;
+        })
+        .catch(() => {
+          productionMethodsCache = null;
+          return null;
+        });
+    }
+    return productionMethodsPromise;
+  }
+  loadProductionMethods();
+
+  function applyAdditionalSaveMetrics(result) {
+    if (typeof AdditionalMetrics === "undefined") return;
+    AdditionalMetrics.applySaveBackedMetrics(result);
+    const applyProductionWith = (definitions) => {
+      if (definitions) AdditionalMetrics.applyProductionEfficiency(result, definitions);
+    };
+    applyProductionWith(productionMethodsCache);
+    if (!productionMethodsCache) {
+      loadProductionMethods().then((definitions) => {
+        if (latestResult !== result || !definitions) return;
+        applyProductionWith(definitions);
+        renderCountries(result);
+        renderPlayers(result);
+        mapRenderedForResult = false;
+        if (tabPanels.map && !tabPanels.map.hidden) renderMap(result);
+      });
+    }
+  }
 
   // Static per-building-type base cost table (tools/build-building-costs.js's
   // output, bundled at build time - see scripts/build-netlify-site.js). Only
@@ -3194,7 +3310,9 @@
   // country-level last_months_trade_income field (binary token 0x36f8), and
   // the Economy table uses it instead of summing estates' private
   // last_month.trade_income pools.
-  const RESULT_SCHEMA_VERSION = 13;
+  // v14 (2026-08-12): building records retain their selected production
+  // methods and input shortages for the Production Efficiency map/metric.
+  const RESULT_SCHEMA_VERSION = 14;
 
   function saveResultToLibrary(fileName, result, remoteMarker) {
     if (typeof SaveLibrary === "undefined" || !SaveLibrary.available) return;

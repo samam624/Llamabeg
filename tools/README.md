@@ -4,7 +4,8 @@ Data-prep and local game-install scanning scripts. Two categories:
 
 - **Map data prep** (`build-location-data.js`, `bake-location-id-map.py`,
   `bake-home-hero.js`) - documented in the root README's "Map setup".
-- **Game-install scanners** (`scan-modifier-sources.js`) - read directly from
+- **Game-install scanners** (`scan-modifier-sources.js`,
+  `build-building-costs.js`, `build-production-methods.js`) - read directly from
   a local EU5 Steam install to answer questions the save file alone can't
   (e.g. what grants a given modifier). Read-only: never write into the game
   install.
@@ -76,10 +77,28 @@ the snapshot or event history.
 
 ## game_data/ (gitignored)
 
-Both `scan-modifier-sources.js`'s output and any future install-derived
-extraction land in `game_data/` at the repo root - never committed, same
-treatment as `map_data/`'s raw Paradox files (see that folder's own
-README and the root README's "License / data note"). This is Paradox's
-own game-design/balance data, not this project's own derived transform of
-it, so unlike `map_data/`'s two shipped derived files, nothing here is
-intended to ever be committed or deployed.
+All install-derived extraction lands in `game_data/` at the repo root and is
+never committed, same treatment as `map_data/`'s raw Paradox files. Raw
+scanner output is not deployed. Two compact numeric transforms are the
+deliberate exceptions: `building-costs.json` and `production-methods.json`
+are copied into `dist/` so the browser can calculate Buildings Value and
+Building Production Efficiency. They remain gitignored and must be
+regenerated from a local game install when preparing a release.
+
+### build-production-methods.js
+
+Builds the compact recipe table used by the rural/urban Building Production Efficiency
+metrics and mapmodes:
+
+```powershell
+node tools/build-production-methods.js
+node tools/build-production-methods.js --root="D:\Games\Europa Universalis V"
+```
+
+The tool reads goods, production methods, inline unique production methods, building types,
+and scripted numeric values from the installed game. It writes only resolved method output
+goods/amounts, input goods/amounts, and compact building metadata to
+`game_data/production-methods.json`; no Paradox source text is copied. Regenerate it after an
+EU5 patch changes production recipes and before a release build. See
+[`docs/PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md`](../docs/PRODUCTION_EFFICIENCY_AND_ADDITIONAL_METRICS.md)
+for the runtime formula and exclusions.

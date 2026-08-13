@@ -51,18 +51,20 @@ if (mapDataShipped < MAP_DATA_FILES.length) {
   console.warn(`map_data/ not fully set up locally (${mapDataShipped}/${MAP_DATA_FILES.length} files found) - Map tab/Home backdrop won't work in this build. See root README's "Map setup".`);
 }
 
-// Same treatment as map_data/ above: game_data/building-costs.json is
-// DERIVED, data-only numbers (tools/build-building-costs.js's output from
-// the player's own local install), never Paradox's original text files, so
-// it's safe to ship even though the whole game_data/ directory is
-// gitignored - see that tool's own header comment for how it's generated.
-// Optional locally, same as map_data - a checkout without it still builds,
-// just without the Buildings Value economic metric.
-const gameDataBuildingCostsSrc = path.join(root, "game_data", "building-costs.json");
-if (fs.existsSync(gameDataBuildingCostsSrc)) {
-  copyFile(path.join("game_data", "building-costs.json"));
-} else {
-  console.warn(`game_data/building-costs.json not found - Buildings Value metric won't work in this build. Run: node tools/build-building-costs.js`);
+// Derived, data-only numbers generated from the developer's local install;
+// never ship Paradox source text. Both files are optional for contributors,
+// with their corresponding metric degrading to blank if absent.
+const DERIVED_GAME_DATA = [
+  { name: "building-costs.json", tool: "build-building-costs.js", metric: "Buildings Value" },
+  { name: "production-methods.json", tool: "build-production-methods.js", metric: "Building Production Efficiency" },
+];
+for (const item of DERIVED_GAME_DATA) {
+  const src = path.join(root, "game_data", item.name);
+  if (fs.existsSync(src)) {
+    copyFile(path.join("game_data", item.name));
+  } else {
+    console.warn(`game_data/${item.name} not found - ${item.metric} metric won't work in this build. Run: node tools/${item.tool}`);
+  }
 }
 
 // Public shared-save backend config (see config.example.js / js/share-store.js).

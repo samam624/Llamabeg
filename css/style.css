@@ -840,6 +840,28 @@ thead th .arrow {
   min-width: 4.5rem;
 }
 
+/* Player names remain visible while the wide metric sheets scroll sideways,
+   matching a spreadsheet's frozen first column. The explicit cell surface
+   prevents metrics underneath from showing through the sticky cell. */
+.sticky-first-column thead th:first-child {
+  left: 0;
+  z-index: 3;
+  background: var(--row-hover);
+  box-shadow: 1px 0 0 var(--panel-border);
+}
+
+.sticky-first-column tbody td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel-bg);
+  box-shadow: 1px 0 0 var(--panel-border);
+}
+
+.sticky-first-column tbody tr:hover td:first-child {
+  background: var(--row-hover);
+}
+
 tbody td {
   padding: 0.52rem 0.75rem;
   border-bottom: 1px solid var(--panel-border);
@@ -860,6 +882,10 @@ tbody tr:hover {
 
 tbody tr.is-player td:first-child {
   box-shadow: inset 3px 0 var(--accent);
+}
+
+.sticky-first-column tbody tr.is-player td:first-child {
+  box-shadow: inset 3px 0 var(--accent), 1px 0 0 var(--panel-border);
 }
 
 td.num {
