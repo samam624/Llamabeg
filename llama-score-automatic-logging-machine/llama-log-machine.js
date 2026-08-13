@@ -1961,7 +1961,32 @@ async function processBuiltSnapshot(file, stat, hash, snapshot, config, state, p
 // threaded-but-yielding - so parsing N files back-to-back on the main
 // thread always took N x ~2.3s no matter how often scan() itself was
 // called. See parseFilesInParallel() below for why that mattered.
-function parseSaveInWorker(file, config) {
+// Upper bound on the worker's own V8 heap ceiling - a hard backstop, not
+// the primary defense (that's the self-calibrating admission-control gate
+// below). 4096 is already generous given js/clausewitz-binary.js's
+// 2026-08-12 streaming rewrite (see that file's makeDecoder comment): no
+// materialized tape at all anymore, measured at ~14-18x raw file size
+// (down from ~65-100x under the original boxed-array tape, and ~40-48x
+// after an earlier same-day fix that kept the tape but made it typed-array-
+// backed) - a real 77MB save now peaks at ~1.4GB, not several GB.
+const WORKER_HEAP_CEILING_STATIC_MB = 4096;
+// A static ceiling alone can still itself be the problem on a low-memory
+// machine: a worker "allowed" to grow to a multi-GB ceiling can starve
+// everything else on a machine that never had that much to spare, which is
+// exactly the complaint this whole rework exists to close off ("most
+// people do not have this much memory to throw away for a simple
+// tracker"). The ceiling actually handed to a worker is therefore also
+// capped to a fraction of what's ACTUALLY free right now, so it can never
+// itself be configured above what the machine can safely give up - never
+// below a reasonable floor either, since a ceiling too close to the real
+// estimate would make normal GC headroom trip a spurious heap-limit error.
+function workerHeapCeilingMb(stat, state) {
+  const estimate = estimatedParsePeakMb(stat, state) * 1.5;
+  const shareOfFree = systemFreeMb() * 0.6;
+  return Math.max(512, Math.min(WORKER_HEAP_CEILING_STATIC_MB, estimate, shareOfFree));
+}
+
+function parseSaveInWorker(file, config, stat, state) {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     let peakRssMb = process.memoryUsage().rss / (1024 * 1024);
@@ -1978,22 +2003,20 @@ function parseSaveInWorker(file, config) {
     }
     const worker = new Worker(path.join(__dirname, "parse-worker.js"), {
       workerData: { file, playerWarsOnly: !!config.playerWarsOnly },
-      // The two-phase tape parser (js/clausewitz-binary.js) builds parallel
-      // arrays with one entry per token. A current real 77MB save reaches
-      // about 7.6GB process RSS while that tape exists. Keep the elevated
-      // ceiling on this short-lived worker only; the worker now compacts the
-      // raw result to a ~1MB snapshot seed before postMessage, so Electron's
-      // long-lived main process no longer needs its own raised heap or a
-      // second structured-cloned copy of the raw parser graph.
-      resourceLimits: { maxOldGenerationSizeMb: 12288 },
+      // Dynamic per-worker ceiling - see workerHeapCeilingMb above. Kept on
+      // this short-lived worker only; it compacts the raw result to a
+      // ~1MB snapshot seed before postMessage, so Electron's long-lived
+      // main process never needs its own raised heap or a second
+      // structured-cloned copy of the raw parser graph.
+      resourceLimits: { maxOldGenerationSizeMb: Math.round(workerHeapCeilingMb(stat, state)) },
     });
     let settled = false;
     worker.once("message", async (msg) => {
       settled = true;
       stopMemoryProbe();
       // Do not release the pool slot until the old worker has fully exited.
-      // Starting the next 7GB parse while terminate() is still pending can
-      // briefly overlap both workers and defeat the one-large-file cap.
+      // Starting the next multi-GB parse while terminate() is still pending
+      // can briefly overlap both workers and defeat the one-large-file cap.
       try {
         await worker.terminate();
       } catch {
@@ -2004,11 +2027,12 @@ function parseSaveInWorker(file, config) {
         console.log(
           `Parse memory (${path.basename(file)}): peak RSS ${peakRssMb.toFixed(0)}MB, minimum system free ${minimumFreeMb.toFixed(0)}MB, seed ${seedKb.toFixed(0)}KB, elapsed ${((Date.now() - startedAt) / 1000).toFixed(1)}s`
         );
-        resolve({ hash: msg.hash, seed: msg.seed });
+        resolve({ hash: msg.hash, seed: msg.seed, peakRssMb });
       }
       else {
         const err = new Error(msg.error);
         err.code = msg.code;
+        err.peakRssMb = peakRssMb;
         reject(err);
       }
     });
@@ -2021,6 +2045,7 @@ function parseSaveInWorker(file, config) {
       } catch {
         // Preserve the original worker error.
       }
+      err.peakRssMb = peakRssMb;
       reject(err);
     });
     // A worker that dies WITHOUT ever firing "message" or "error" (observed
@@ -2037,7 +2062,9 @@ function parseSaveInWorker(file, config) {
       if (settled) return;
       settled = true;
       stopMemoryProbe();
-      reject(new Error(`worker exited (code ${code}) without completing`));
+      const err = new Error(`worker exited (code ${code}) without completing`);
+      err.peakRssMb = peakRssMb;
+      reject(err);
     });
   });
 }
@@ -2048,18 +2075,16 @@ function parseSaveInWorker(file, config) {
 // updating state.json).
 const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
 
-// The two-phase tape parser (js/clausewitz-binary.js) needs roughly 100x
-// a current save file's raw byte size in transient process memory - measured
-// directly after the campaign grew: a real 77MB save peaked at ~7.6GB. EU5's
-// autosave rotation overwrites
-// several ~70MB+ slot files while a long real campaign is actively being
-// played, so a single scan's candidate batch can genuinely contain 2-3+
-// such files at once (each one a real content change, not a caching bug -
-// confirmed via direct instrumentation on a real live campaign). Running
-// them all concurrently under the old thread-count-only cap needed
-// 15-20GB+ simultaneously and crashed the whole app with a real, real-
-// data-reproduced "JavaScript heap out of memory" a few seconds/minutes
-// into actual play.
+// The two-phase tape parser (js/clausewitz-binary.js) needs a large multiple
+// of a save file's raw byte size in transient process memory. EU5's autosave
+// rotation overwrites several ~70MB+ slot files while a long real campaign is
+// actively being played, so a single scan's candidate batch can genuinely
+// contain 2-3+ such files at once (each one a real content change, not a
+// caching bug - confirmed via direct instrumentation on a real live
+// campaign). Running them all concurrently under a thread-count-only cap
+// needed 15-20GB+ simultaneously and crashed the whole app with a real,
+// real-data-reproduced "JavaScript heap out of memory" a few seconds/minutes
+// into actual play - the incident history behind everything below.
 //
 // An earlier version of this fix budgeted total ESTIMATED memory across
 // in-flight parses (size * a measured multiplier) instead of a hard count
@@ -2068,40 +2093,90 @@ const MAX_PARSE_WORKERS = Math.max(1, Math.min(4, os.cpus().length - 1));
 // real campaign's actual current save files hit a genuine ~14.8GB peak RSS
 // (no crash there - nothing else was competing for memory), well above
 // what the estimate predicted for that batch - meaning the budget math
-// still let 2 large files' workers overlap in practice. Inside the real
-// packaged app, the actual EU5 game is ALSO running and consuming its own
-// large share of system memory the whole time, which an isolated repro
-// doesn't account for - that combination is what actually killed the app:
-// no stderr, no Windows Event Log crash entry, no Node "exit" event
-// anywhere, consistent with an external, OS-level termination once total
-// system memory pressure got severe enough (confirmed via live monitoring:
-// system-wide free memory was still several GB when the process vanished,
-// ruling out this worker's own resourceLimits ceiling as the trigger).
-// A SIZE ESTIMATE can be wrong; a hard count cap on large files can't be -
-// strictly one large file parses at a time, full stop, regardless of what
-// the byte-size math predicts for the others.
+// still let 2 large files' workers overlap in practice. A SIZE ESTIMATE can
+// be wrong; a hard count cap on large files can't be - strictly one large
+// file parses at a time, full stop, regardless of what the byte-size math
+// predicts for the others. This is the one piece of the gate that's a firm
+// structural rule rather than a number, and it stays that way below.
 const LARGE_FILE_THRESHOLD_MB = 15;
 const PARSE_MEMORY_BUDGET_MB = 12288;
-const PARSE_BYTES_TO_PEAK_MB = 110;
-function estimatedParsePeakMb(stat) {
-  return (stat.size / (1024 * 1024)) * PARSE_BYTES_TO_PEAK_MB;
+
+// The per-file byte-size multiplier used to estimate a parse's peak memory
+// is now SELF-CALIBRATING instead of a hand-tuned constant. This constant
+// had to be manually bumped upward multiple times as real incidents revealed
+// it was too low (most recently 110x, itself raised from an earlier value),
+// and the reserve padding around it got hand-tuned too (see git history) -
+// exactly the "bandaid" pattern that let this class of bug keep recurring:
+// a human has to notice drift after something already broke, then edit a
+// number. `recordObservedMultiplier()` below replaces that with a ratchet
+// fed by every real parse's OWN measured peak RSS (already collected by
+// parseSaveInWorker's memory probe): the stored estimate can only grow to
+// match reality, never shrink below a real observation, so it self-corrects
+// upward automatically if a future save's content mix needs more headroom -
+// no one has to notice and hand-edit a constant again. FLOOR is the
+// starting point before any real measurement exists (e.g. right after
+// install, before the first large save is parsed) - set with real margin
+// above the ~14-18x actually measured across 3 real saves of different
+// sizes/campaigns after 2026-08-12's parser rework (js/clausewitz-
+// binary.js's makeDecoder() comment): first an intermediate fix moved the
+// tape from a boxed heterogeneous array onto typed arrays and released the
+// raw/inflated buffers early (~65-100x -> ~40-48x), then a deeper rework
+// eliminated the materialized tape entirely in favor of true on-demand
+// streaming (~40-48x -> ~14-18x, and a real 77MB save's peak RSS dropped
+// from 5.0GB to 1.4GB) - verified by direct RSS measurement each time, not
+// reasoned about. CEILING exists so one anomalous/bogus reading (e.g. a
+// transient system hiccup during the 250ms poll) can't ratchet the
+// estimate up so far that the gate never approves a parse again - a
+// runaway estimate is its own failure mode (permanent stall), not a safe
+// direction to be wrong in.
+const PARSE_BYTES_TO_PEAK_MB_FLOOR = 30;
+const PARSE_BYTES_TO_PEAK_MB_CEILING = 400;
+function currentParseMultiplier(state) {
+  return (state && state.parseMemoryMultiplier) || PARSE_BYTES_TO_PEAK_MB_FLOOR;
+}
+function estimatedParsePeakMb(stat, state) {
+  return (stat.size / (1024 * 1024)) * currentParseMultiplier(state);
 }
 function isLargeParseCandidate(stat) {
   return stat.size > LARGE_FILE_THRESHOLD_MB * 1024 * 1024;
 }
 
-// Check live system memory before committing to a large parse. The old fixed
-// 6144MB threshold was lower than one current save's measured 7.6GB peak, so
-// it could explicitly approve a parse that did not fit. Require the
-// size-derived peak estimate plus a reserve for Electron, Windows, and normal
-// measurement error. A deferred file remains unknown to state.files and is
-// retried on the next scan.
-const SYSTEM_MEMORY_RESERVE_MB = 2048;
+// Called after every large-file parse attempt, success OR failure (a
+// near-miss/crash is the most valuable calibration signal there is - it
+// means the estimate almost, or did, undershoot reality). Persists
+// immediately rather than waiting for this tick's normal end-of-scan
+// state.json write, since the whole point is to defend the very next large
+// parse, which could be moments away.
+function recordObservedMultiplier(state, config, sizeBytes, peakRssMb) {
+  const sizeMb = sizeBytes / (1024 * 1024);
+  if (!(sizeMb > 0) || !(peakRssMb > 0)) return;
+  const observed = Math.min(PARSE_BYTES_TO_PEAK_MB_CEILING, peakRssMb / sizeMb);
+  const current = currentParseMultiplier(state);
+  if (observed <= current) return;
+  state.parseMemoryMultiplier = observed;
+  console.warn(
+    `Raised parse memory multiplier estimate ${current.toFixed(0)}x -> ${observed.toFixed(0)}x (observed on a ${sizeMb.toFixed(1)}MB save, peak RSS ${peakRssMb.toFixed(0)}MB) - future large parses will require more headroom before starting.`
+  );
+  try {
+    saveJson(path.join(config.dataDir, "state.json"), state);
+  } catch (err) {
+    console.warn(`Could not persist updated parse memory multiplier: ${err.message}`);
+  }
+}
+
+// Check live system memory before committing to a large parse. Require the
+// size-derived peak estimate (now self-calibrating, see above) plus a
+// reserve for Electron, Windows, and normal measurement error. A deferred
+// file remains unknown to state.files and is retried on the next scan.
+// Reserve is anchored to this app's own live-measured full footprint (all 5
+// Electron processes: main, GPU, renderer, utility, crash helper) of ~500MB
+// combined, doubled for real headroom against Windows/measurement error.
+const SYSTEM_MEMORY_RESERVE_MB = 1024;
 function systemFreeMb() {
   return os.freemem() / (1024 * 1024);
 }
-function requiredSystemFreeMb(stat) {
-  return estimatedParsePeakMb(stat) + SYSTEM_MEMORY_RESERVE_MB;
+function requiredSystemFreeMb(stat, state) {
+  return estimatedParsePeakMb(stat, state) + SYSTEM_MEMORY_RESERVE_MB;
 }
 
 // Parses candidate files CONCURRENTLY across a small worker pool instead
@@ -2116,7 +2191,7 @@ function requiredSystemFreeMb(stat) {
 // Confirmed the underlying chronological sort/dedup logic itself was
 // already correct (a frozen, isolated single-file test scan came out
 // perfectly ordered) - this is purely a throughput/memory-safety concern.
-async function parseFilesInParallel(candidates, config) {
+async function parseFilesInParallel(candidates, config, state) {
   const results = [];
   const queue = candidates.slice();
   let inFlightMb = 0;
@@ -2131,7 +2206,7 @@ async function parseFilesInParallel(candidates, config) {
       while (queue.length) {
         const stat = queue[0].stat;
         const large = isLargeParseCandidate(stat);
-        const cost = estimatedParsePeakMb(stat);
+        const cost = estimatedParsePeakMb(stat, state);
         if (large) {
           // Hard cap: never more than one large file in flight, no matter
           // what the size estimate says about the others (see comment
@@ -2156,7 +2231,7 @@ async function parseFilesInParallel(candidates, config) {
           // never updated for it, so the very next scan() (~5s later,
           // rebuilding candidates from scratch) picks it right back up.
           const freeMb = systemFreeMb();
-          const requiredMb = requiredSystemFreeMb(stat);
+          const requiredMb = requiredSystemFreeMb(stat, state);
           if (freeMb < requiredMb) {
             console.warn(
               `Deferring large save parse (${path.basename(queue[0].file)}) - only ${freeMb.toFixed(0)}MB system memory free, want ${requiredMb.toFixed(0)}MB for this ${(stat.size / (1024 * 1024)).toFixed(1)}MB save; will retry next scan`
@@ -2173,14 +2248,18 @@ async function parseFilesInParallel(candidates, config) {
         inFlightCount++;
         inFlightMb += cost;
         if (large) largeInFlight++;
-        parseSaveInWorker(file, config)
-          .then(({ hash, seed }) => {
+        parseSaveInWorker(file, config, stat, state)
+          .then(({ hash, seed, peakRssMb }) => {
             results.push({ file, stat, hash, seed, date: seed.date, forceModifierStateRefresh });
+            if (large) recordObservedMultiplier(state, config, stat.size, peakRssMb);
           })
           .catch((err) => {
             if (!err || !["ENOENT", "EPERM", "EBUSY"].includes(err.code)) {
               console.warn(`Could not process ${path.basename(file)}: ${err.message}`);
             }
+            // A near-miss or crash is the most valuable calibration signal -
+            // record it even though this file's own parse didn't succeed.
+            if (large && err && err.peakRssMb) recordObservedMultiplier(state, config, stat.size, err.peakRssMb);
           })
           .finally(() => {
             inFlightCount--;
@@ -2250,7 +2329,7 @@ async function scan(config, state) {
     candidates.push({ file, stat, forceModifierStateRefresh });
   }
 
-  const parsed = await parseFilesInParallel(candidates, config);
+  const parsed = await parseFilesInParallel(candidates, config, state);
   parsed.sort((a, b) => compareDates(a.date, b.date) || a.stat.mtimeMs - b.stat.mtimeMs);
 
   let processed = 0;

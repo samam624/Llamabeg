@@ -2,23 +2,24 @@
 // same result shape as js/clausewitz.js's parseSave() for melted text saves,
 // so the rest of the app doesn't need to care which format was uploaded.
 //
-// Two-phase "tape" architecture (matching github.com/rakaly/jomini, the
-// Rust parser PDX Tools is built on, which officially supports EU5):
-//   Phase 1 (tokenize): one mechanical forward pass over the raw bytes,
-//   turning them into a flat array of typed tokens. Width is ALWAYS
-//   determined purely by a token's own 2-byte type tag - never by "what
-//   section/key is this", so this phase can never lose byte alignment from
-//   a shape assumption being wrong. That was the actual root cause of two
-//   real bugs found in one real save tonight (a bare/unkeyed top-level
-//   array the old single-pass walker didn't expect, and two real value-type
-//   codes - I64 0x0317, F32 0x000d - that had no width handling at all and
-//   silently under-consumed their payload). See CHANGELOG.
-//   Phase 2 (walk): the section-specific extractors (parseCountriesSection
-//   etc.) walk the tape by INDEX, not by byte offset. Every tape index is
-//   guaranteed to land on a real token boundary by construction, so a
-//   mistaken shape assumption in phase 2 can at worst misread ONE section's
-//   meaning - it can never again corrupt byte alignment for everything
-//   downstream.
+// Streaming decoder (originally a two-phase "tape" matching github.com/
+// rakaly/jomini, the Rust parser PDX Tools is built on; rearchitected again
+// 2026-08-12 onto on-demand streaming - see makeDecoder's own comment for
+// why). The property that actually matters, preserved across both designs:
+//   Width is ALWAYS determined purely by a token's own 2-byte type tag -
+//   never by "what section/key is this", so a shape assumption being wrong
+//   can never lose byte alignment for everything downstream. That was the
+//   actual root cause of two real bugs found in one real save the night
+//   this was first built (a bare/unkeyed top-level array the old single-
+//   pass walker didn't expect, and two real value-type codes - I64 0x0317,
+//   F32 0x000d - that had no width handling at all and silently
+//   under-consumed their payload). See CHANGELOG.
+//   The section-specific extractors (parseCountriesSection etc.) walk
+//   forward through the decoded tokens by INDEX, not by byte offset. Every
+//   index is guaranteed to land on a real token boundary by construction,
+//   so a mistaken shape assumption in a section extractor can at worst
+//   misread ONE section's meaning - it can never again corrupt byte
+//   alignment for everything downstream.
 //
 // Format (reverse-engineered against real saves, cross-checked field by
 // field against melted plaintext - see test/run-binary.js, which validates
@@ -85,7 +86,7 @@
   const CLOSE = 0x0004;
   const EQUALS = 0x0001;
 
-  // --- Phase 1: tokenize raw bytes into a flat tape --------------------
+  // --- Streaming decoder: tokenize AND walk in one pass, on demand -------
 
   const TAPE_OPEN = 1;
   const TAPE_CLOSE = 2;
@@ -104,176 +105,253 @@
     return Buffer.from(bytes).toString("utf8"); // Node fallback
   }
 
-  // One mechanical forward pass, self-describing width only - see the
-  // module comment. Resilient to a truncated/corrupted tail the same way
-  // the old single-pass walker was: stops at the point a read would run
-  // past the buffer, keeping every token successfully tokenized before it
-  // (tape.truncated flags this for the caller).
-  function tokenize(view, strings, onProgress) {
+  // 2026-08-12: rearchitected from a two-phase design (tokenize the WHOLE
+  // file into a flat in-memory array first, then walk that array by index)
+  // onto true on-demand streaming - no materialized representation of the
+  // file's tokens exists at all now, just this cursor's own O(1) state.
+  // This is the actual root cause fix behind repeated real OOM crashes: the
+  // old tape's per-entry arrays (even after an earlier same-day pass moved
+  // them onto typed arrays instead of a boxed heterogeneous array) still
+  // cost memory proportional to the WHOLE file's token count - measured at
+  // 3.1GB peak RSS for one real 77MB save even after that first fix. A
+  // "simple background save-tracker" has no business needing gigabytes of
+  // RAM, and every prior fix in this file's history (worker heap ceilings,
+  // concurrency caps, memory-reserve constants) was managing around that
+  // cost instead of removing it.
+  //
+  // This works because of something already true about how phase 2 ever
+  // consumed the tape: every walker (decodeBody/skipBody in this file) only
+  // ever moves FORWARD, one token at a time, with at most a tiny bounded
+  // "peek a token, and un-peek it if it turns out not to be a key" lookback
+  // (confirmed by inspection: `matches`, the tape's OWN matching-bracket-
+  // index array from the prior architecture, was NEVER READ anywhere in
+  // this codebase - real, unnecessary dead weight, not a leftover this
+  // rewrite needs to preserve). Nothing here ever needed true random
+  // access. `makeDecoder()` below decodes exactly one token at a time
+  // directly from the raw byte view and hands it to the caller; the only
+  // state it keeps between tokens is a small fixed-size ring buffer (16
+  // entries) recording each of the last few tokens' byte start position,
+  // which is all the ".pos = someEarlierPos" rewind pattern above ever
+  // actually needs (verified: the deepest real rewind in this file is ~6
+  // tokens, for the one case - a bare RGB color value - where resolving a
+  // token can itself consume several more before the caller discovers it
+  // needs to back up and re-read differently). A rewind past what the ring
+  // retains throws loudly instead of silently reading the wrong bytes -
+  // this parser has a real history of subtle correctness bugs from changes
+  // just like this one, so an unexpected access pattern should fail fast in
+  // testing, not corrupt data quietly in production.
+  //
+  // Width is still ALWAYS self-describing purely from a token's own 2-byte
+  // type code, exactly as before - that correctness property (the actual
+  // point of the 2026-07-23 tape rewrite, which this doesn't undo) is
+  // unchanged; only the STORAGE between decoding a token and consuming it
+  // changed, from "keep every one forever in an array" to "keep the current
+  // one, plus a short recent history for the rare rewind."
+  function makeDecoder(view, strings, opts) {
     const total = view.byteLength;
-    const kinds = [];
-    const values = [];
-    const offsets = [];
-    const matches = []; // matching bracket's tape index, for OPEN/CLOSE only
-    const openStack = [];
-    let pos = 0;
-    let truncated = false;
-    const progressStep = Math.max(1, Math.floor(total / 50));
-    let lastProgressPos = 0;
-
-    function lookupStr(idx) {
-      return strings && strings[idx] !== undefined ? strings[idx] : `#strref:${idx}`;
-    }
-    function push(kind, value, start) {
-      kinds.push(kind);
-      values.push(value);
-      offsets.push(start);
-      matches.push(-1);
-    }
-
-    try {
-      while (pos < total) {
-        const start = pos;
-        const code = view.getUint16(pos, true);
-        pos += 2;
-
-        if (code === OPEN) {
-          openStack.push(kinds.length);
-          push(TAPE_OPEN, null, start);
-        } else if (code === CLOSE) {
-          const idx = kinds.length;
-          push(TAPE_CLOSE, null, start);
-          const openIdx = openStack.pop();
-          if (openIdx !== undefined) {
-            matches[openIdx] = idx;
-            matches[idx] = openIdx;
-          }
-        } else if (code === EQUALS) {
-          push(TAPE_EQUALS, null, start);
-        } else if (code === STRREF8 || code === STRREF8_ALT) {
-          const idx = view.getUint8(pos);
-          pos += 1;
-          push(TAPE_STRING, lookupStr(idx), start);
-        } else if (code === STRREF16 || code === STRREF16_NAME) {
-          const idx = view.getUint16(pos, true);
-          pos += 2;
-          push(TAPE_STRING, lookupStr(idx), start);
-        } else if (code === STRREF24) {
-          const idx = view.getUint8(pos) + (view.getUint8(pos + 1) << 8) + (view.getUint8(pos + 2) << 16);
-          pos += 3;
-          push(TAPE_STRING, lookupStr(idx), start);
-        } else if (code === STRREF32) {
-          const idx = view.getUint32(pos, true);
-          pos += 4;
-          push(TAPE_STRING, lookupStr(idx), start);
-        } else if (code === EMPTY_STRING) {
-          push(TAPE_STRING, "", start);
-        } else if (code === 0x000e) {
-          const v = view.getUint8(pos);
-          pos += 1;
-          push(TAPE_BOOL, v === 1, start);
-        } else if (code === 0x000c || code === 0x0014) {
-          const v = view.getInt32(pos, true);
-          pos += 4;
-          push(TAPE_NUMBER, v, start);
-        } else if (code === 0x029c || code === 0x0317) {
-          // U64 / I64 - both real 8-byte codes (jomini's catalog,
-          // github.com/rakaly/jomini). 0x0317 had zero handling at all
-          // before tonight and silently under-consumed its payload -
-          // exactly the bug class this whole architecture exists to
-          // structurally rule out.
-          const lo = view.getUint32(pos, true);
-          const hi = view.getInt32(pos + 4, true);
-          pos += 8;
-          push(TAPE_NUMBER, hi * 4294967296 + lo, start);
-        } else if (code === 0x000d) {
-          const v = view.getFloat32(pos, true);
-          pos += 4;
-          push(TAPE_NUMBER, v, start);
-        } else if (code === 0x000f || code === 0x0017) {
-          const len = view.getUint16(pos, true);
-          pos += 2;
-          const s = utf8Decode(view, pos, len);
-          pos += len;
-          push(TAPE_STRING, s, start);
-        } else if (code === 0x0167) {
-          const lo = view.getUint32(pos, true);
-          const hi = view.getInt32(pos + 4, true);
-          pos += 8;
-          push(TAPE_NUMBER, (hi * 4294967296 + lo) / 100000.0, start);
-        } else if (code === FIXED_POINT_ZERO) {
-          push(TAPE_NUMBER, 0, start);
-        } else if (code >= 0x0d48 && code <= 0x0d4e) {
-          const n = code - 0x0d48 + 1;
-          let v = 0;
-          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(pos + i);
-          pos += n;
-          push(TAPE_NUMBER, v / 100000.0, start);
-        } else if (code >= 0x0d4f && code <= 0x0d56) {
-          const n = code - 0x0d4f + 1;
-          let v = 0;
-          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(pos + i);
-          pos += n;
-          push(TAPE_NUMBER, -v / 100000.0, start);
-        } else if (code === 0x0243) {
-          // Zero payload of its own - the OPEN+3 numbers+CLOSE that follow
-          // tokenize completely normally as the next iterations of this
-          // same loop; phase 2 composes them into a color.
-          push(TAPE_RGB_TAG, null, start);
-        } else {
-          // Opaque fixed-ID: a well-known key (resolved later via
-          // EU5FixedIds) or an enum-like value we don't further decode.
-          // Reached only once every real value-type code above has already
-          // claimed its own width - not a guess.
-          push(TAPE_TOKEN, code, start);
-        }
-
-        if (onProgress && pos - lastProgressPos > progressStep) {
-          lastProgressPos = pos;
-          onProgress(pos / total);
-        }
-      }
-    } catch (err) {
-      truncated = true;
-    }
-
-    return { kinds, values, offsets, matches, length: kinds.length, truncated };
-  }
-
-  // --- Phase 2: walk the tape by index -----------------------------------
-
-  function makeTapeCursor(tape, opts) {
-    let idx = 0;
     const onSpecialKey = opts && opts.onSpecialKey;
+    const onProgress = opts && opts.onProgress;
     const debugRing = opts && opts.debug ? [] : null;
     const DEBUG_RING_SIZE = 80;
+    const progressStep = Math.max(1, Math.floor(total / 200));
+    let lastProgressPos = 0;
+    let truncated = false;
+
     function debugRecord(entry) {
       if (!debugRing) return;
       debugRing.push(entry);
       if (debugRing.length > DEBUG_RING_SIZE) debugRing.shift();
     }
+    function lookupStr(idx) {
+      return strings && strings[idx] !== undefined ? strings[idx] : `#strref:${idx}`;
+    }
+
+    // Decodes exactly one token starting at byte `p`. Returns
+    // {kind, start, next, numVal, strVal} (numVal/strVal populated per kind,
+    // matching tokenize()'s old per-kind split), or null at EOF/on a read
+    // that would run past the buffer (also sets `truncated`).
+    function decodeOneAt(p) {
+      if (p >= total) return null;
+      const start = p;
+      try {
+        const code = view.getUint16(p, true);
+        p += 2;
+        if (code === OPEN) return { kind: TAPE_OPEN, start, next: p };
+        if (code === CLOSE) return { kind: TAPE_CLOSE, start, next: p };
+        if (code === EQUALS) return { kind: TAPE_EQUALS, start, next: p };
+        if (code === STRREF8 || code === STRREF8_ALT) {
+          const idx = view.getUint8(p);
+          p += 1;
+          return { kind: TAPE_STRING, start, next: p, strVal: lookupStr(idx) };
+        }
+        if (code === STRREF16 || code === STRREF16_NAME) {
+          const idx = view.getUint16(p, true);
+          p += 2;
+          return { kind: TAPE_STRING, start, next: p, strVal: lookupStr(idx) };
+        }
+        if (code === STRREF24) {
+          const idx = view.getUint8(p) + (view.getUint8(p + 1) << 8) + (view.getUint8(p + 2) << 16);
+          p += 3;
+          return { kind: TAPE_STRING, start, next: p, strVal: lookupStr(idx) };
+        }
+        if (code === STRREF32) {
+          const idx = view.getUint32(p, true);
+          p += 4;
+          return { kind: TAPE_STRING, start, next: p, strVal: lookupStr(idx) };
+        }
+        if (code === EMPTY_STRING) return { kind: TAPE_STRING, start, next: p, strVal: "" };
+        if (code === 0x000e) {
+          const v = view.getUint8(p);
+          p += 1;
+          return { kind: TAPE_BOOL, start, next: p, numVal: v === 1 ? 1 : 0 };
+        }
+        if (code === 0x000c || code === 0x0014) {
+          const v = view.getInt32(p, true);
+          p += 4;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: v };
+        }
+        if (code === 0x029c || code === 0x0317) {
+          // U64 / I64 - both real 8-byte codes (jomini's catalog,
+          // github.com/rakaly/jomini) - see the module comment's token
+          // grammar table for the full width reference.
+          const lo = view.getUint32(p, true);
+          const hi = view.getInt32(p + 4, true);
+          p += 8;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: hi * 4294967296 + lo };
+        }
+        if (code === 0x000d) {
+          const v = view.getFloat32(p, true);
+          p += 4;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: v };
+        }
+        if (code === 0x000f || code === 0x0017) {
+          const len = view.getUint16(p, true);
+          p += 2;
+          const s = utf8Decode(view, p, len);
+          p += len;
+          return { kind: TAPE_STRING, start, next: p, strVal: s };
+        }
+        if (code === 0x0167) {
+          const lo = view.getUint32(p, true);
+          const hi = view.getInt32(p + 4, true);
+          p += 8;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: (hi * 4294967296 + lo) / 100000.0 };
+        }
+        if (code === FIXED_POINT_ZERO) return { kind: TAPE_NUMBER, start, next: p, numVal: 0 };
+        if (code >= 0x0d48 && code <= 0x0d4e) {
+          const n = code - 0x0d48 + 1;
+          let v = 0;
+          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(p + i);
+          p += n;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: v / 100000.0 };
+        }
+        if (code >= 0x0d4f && code <= 0x0d56) {
+          const n = code - 0x0d4f + 1;
+          let v = 0;
+          for (let i = n - 1; i >= 0; i--) v = v * 256 + view.getUint8(p + i);
+          p += n;
+          return { kind: TAPE_NUMBER, start, next: p, numVal: -v / 100000.0 };
+        }
+        if (code === 0x0243) {
+          // Zero payload of its own - the OPEN+3 numbers+CLOSE that follow
+          // decode completely normally as the next tokens; resolveToken()
+          // below composes them into a color.
+          return { kind: TAPE_RGB_TAG, start, next: p };
+        }
+        // Opaque fixed-ID: a well-known key (resolved later via
+        // EU5FixedIds) or an enum-like value we don't further decode.
+        // Reached only once every real value-type code above has already
+        // claimed its own width - not a guess.
+        return { kind: TAPE_TOKEN, start, next: p, numVal: code };
+      } catch (err) {
+        truncated = true;
+        return null;
+      }
+    }
+
+    // Fixed-size lookback so the bounded "peek then un-peek" pattern used
+    // by decodeBody/skipBody/peekFirstKeyOfObject can rewind without
+    // keeping the whole file's tokens around - see the module comment
+    // above for why 16 is comfortably above every real rewind distance in
+    // this file.
+    const RING_SIZE = 16;
+    const ring = new Array(RING_SIZE);
+    let tokenIndex = -1; // index of the current (already-decoded, not yet advanced-past) token
+    let bytePos = 0;
+    let curKind, curNumVal, curStrVal, curStart, curNext;
+    let curDecoded = false;
+
+    function ensureCurrent() {
+      if (curDecoded) return;
+      const t = decodeOneAt(bytePos);
+      if (!t) {
+        curKind = undefined;
+        curDecoded = true;
+        return;
+      }
+      curKind = t.kind;
+      curNumVal = t.numVal;
+      curStrVal = t.strVal;
+      curStart = t.start;
+      curNext = t.next;
+      curDecoded = true;
+      tokenIndex++;
+      ring[tokenIndex % RING_SIZE] = { tokenIndex, byteStart: curStart };
+      if (onProgress && curNext - lastProgressPos > progressStep) {
+        lastProgressPos = curNext;
+        onProgress(curNext / total);
+      }
+    }
+
+    function advance() {
+      ensureCurrent();
+      if (curKind === undefined) return;
+      bytePos = curNext;
+      curDecoded = false;
+    }
 
     function peekKind() {
-      return idx < tape.length ? tape.kinds[idx] : undefined;
+      ensureCurrent();
+      return curKind;
     }
 
     function currentByteOffset() {
-      if (idx < tape.length) return tape.offsets[idx];
-      return tape.length ? tape.offsets[tape.length - 1] : 0;
+      ensureCurrent();
+      return curKind !== undefined ? curStart : bytePos;
     }
 
-    // Resolves the token at the cursor to a string/number/bool (already
-    // decoded in phase 1), an RGB object, or a fixed-ID key name / "#hex"
-    // placeholder. Advances past the whole token (and, for RGB, the
-    // container that follows it) either way.
+    function getPos() {
+      ensureCurrent();
+      return tokenIndex;
+    }
+
+    function setPos(v) {
+      if (curDecoded && v === tokenIndex + 1) {
+        advance();
+        return;
+      }
+      const entry = ring[((v % RING_SIZE) + RING_SIZE) % RING_SIZE];
+      if (!entry || entry.tokenIndex !== v) {
+        throw new Error(`streaming cursor cannot rewind to tape index ${v} (current ${tokenIndex}, retains the last ${RING_SIZE}) - an access pattern this decoder wasn't designed for`);
+      }
+      bytePos = entry.byteStart;
+      tokenIndex = v - 1;
+      curDecoded = false;
+    }
+
+    // Resolves the current token to a string/number/bool, an RGB object, or
+    // a fixed-ID key name / "#hex" placeholder, decoding it fresh if it
+    // hasn't been peeked yet. Advances past the whole token (and, for RGB,
+    // the container that follows it) either way.
     function resolveToken() {
-      const kind = tape.kinds[idx];
-      const val = tape.values[idx];
-      idx++;
+      ensureCurrent();
+      const kind = curKind;
+      const val = kind === TAPE_STRING ? curStrVal : kind === TAPE_BOOL ? curNumVal === 1 : curNumVal;
+      advance();
       if (kind === TAPE_STRING || kind === TAPE_NUMBER || kind === TAPE_BOOL) return val;
       if (kind === TAPE_RGB_TAG) {
-        if (tape.kinds[idx] !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at tape index ${idx}`);
-        idx++;
+        if (peekKind() !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at byte ${currentByteOffset()}`);
+        advance();
         return { colorSpace: "rgb", values: decodeBody() };
       }
       if (kind === TAPE_TOKEN) {
@@ -302,7 +380,11 @@
       if (kind === TAPE_EQUALS) return { fixedNum: 1 };
       if (kind === TAPE_OPEN) return { fixedNum: 3 };
       if (kind === TAPE_CLOSE) return { fixedNum: 4 };
-      throw new Error(`unexpected tape kind ${kind} in value position at tape index ${idx - 1}`);
+      // Reached when the stream ends (kind undefined) mid-section, or any
+      // other genuinely unexpected state - the caller's own try/catch (see
+      // parseCompressedSave) turns this into a flagged parseWarning rather
+      // than silently returning incomplete data as if it were complete.
+      throw new Error(`unexpected end of gamestate (kind ${kind}) in value position at byte ${currentByteOffset()}`);
     }
 
     function keyToPropName(resolved) {
@@ -324,28 +406,28 @@
     }
 
     function readBareValue() {
-      if (tape.kinds[idx] === TAPE_OPEN) {
-        idx++;
+      if (peekKind() === TAPE_OPEN) {
+        advance();
         return decodeBody();
       }
       return resolveToken();
     }
 
     function skipBareValue() {
-      const kind = tape.kinds[idx];
+      const kind = peekKind();
       if (kind === TAPE_OPEN) {
-        idx++;
+        advance();
         skipBody();
         return;
       }
       if (kind === TAPE_RGB_TAG) {
-        idx++;
-        if (tape.kinds[idx] !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at tape index ${idx}`);
-        idx++;
+        advance();
+        if (peekKind() !== TAPE_OPEN) throw new Error(`expected OPEN after COLOR_RGB at byte ${currentByteOffset()}`);
+        advance();
         skipBody();
         return;
       }
-      idx++;
+      advance();
     }
 
     function decodeBody() {
@@ -353,27 +435,27 @@
       const named = {};
       let hasNamed = false;
       while (true) {
-        const kind = tape.kinds[idx];
+        const kind = peekKind();
         if (kind === TAPE_CLOSE) {
-          idx++;
+          advance();
           break;
         }
         if (kind === TAPE_OPEN) {
-          idx++;
+          advance();
           items.push(decodeBody());
           continue;
         }
-        const savedIdx = idx;
+        const savedPos = getPos();
         const resolved = resolveToken();
-        if (tape.kinds[idx] === TAPE_EQUALS) {
-          idx++;
+        if (peekKind() === TAPE_EQUALS) {
+          advance();
           const value = readBareValue();
           addEntry(named, keyToPropName(resolved), value);
           hasNamed = true;
         } else if (typeof resolved !== "object") {
           items.push(resolved);
         } else {
-          idx = savedIdx;
+          setPos(savedPos);
           items.push(readBareValue());
         }
       }
@@ -386,23 +468,23 @@
     function skipBody(depth) {
       depth = depth || 1;
       while (true) {
-        const tokenStart = idx;
-        const kind = tape.kinds[idx];
+        const tokenStart = getPos();
+        const kind = peekKind();
         if (kind === TAPE_CLOSE) {
-          idx++;
+          advance();
           debugRecord({ pos: tokenStart, depth, type: "CLOSE" });
           return;
         }
         if (kind === TAPE_OPEN) {
-          idx++;
+          advance();
           debugRecord({ pos: tokenStart, depth, type: "OPEN" });
           skipBody(depth + 1);
           continue;
         }
-        const savedIdx = idx;
+        const savedPos = getPos();
         const resolved = resolveToken();
-        if (tape.kinds[idx] === TAPE_EQUALS) {
-          idx++;
+        if (peekKind() === TAPE_EQUALS) {
+          advance();
           const keyName = keyToPropName(resolved);
           debugRecord({ pos: tokenStart, depth, type: "KEY", key: keyName });
           if (!onSpecialKey || !onSpecialKey(keyName)) {
@@ -411,7 +493,7 @@
         } else if (typeof resolved !== "object") {
           debugRecord({ pos: tokenStart, depth, type: "BAREVALUE", value: resolved });
         } else {
-          idx = savedIdx;
+          setPos(savedPos);
           debugRecord({ pos: tokenStart, depth, type: "BAREVALUE_FIXEDID", fixedNum: resolved.fixedNum });
           skipBareValue();
         }
@@ -419,18 +501,17 @@
     }
 
     return {
-      tape,
       get pos() {
-        return idx;
+        return getPos();
       },
       set pos(v) {
-        idx = v;
+        setPos(v);
       },
       get byteOffset() {
         return currentByteOffset();
       },
-      get length() {
-        return tape.length;
+      get truncated() {
+        return truncated;
       },
       peekKind,
       getDebugRing() {
@@ -446,18 +527,6 @@
       skipBody,
       keyToPropName,
     };
-  }
-
-  // Compatibility shim: same (view, strings, opts) call signature the old
-  // single-pass decoder had, so parseMetadataBlock/parseCompressedSave (and
-  // any external test/debug script) don't need to change how they
-  // construct one - internally it now tokenizes eagerly, then wraps a tape
-  // cursor. NOTE: `.pos` is now a TAPE INDEX, not a byte offset (use
-  // `.byteOffset` for diagnostics) - the one externally-visible contract
-  // change from the old byte-walking decoder.
-  function makeDecoder(view, strings, opts) {
-    const tape = tokenize(view, strings, opts && opts.onTokenizeProgress);
-    return makeTapeCursor(tape, opts);
   }
 
   function parseStringLookup(bytes) {
@@ -962,7 +1031,7 @@
   async function parseCompressedSave(arrayBuffer, options) {
     options = options || {};
     const onProgress = options.onProgress || function () {};
-    const bytes = new Uint8Array(arrayBuffer);
+    let bytes = new Uint8Array(arrayBuffer);
 
     const headerText = utf8Decode(new DataView(bytes.buffer, bytes.byteOffset, Math.min(64, bytes.length)), 0, Math.min(64, bytes.length));
     const nl = headerText.indexOf("\n");
@@ -978,20 +1047,20 @@
     }
     if (zipStart === -1) throw new Error("could not find embedded zip in save file");
 
-    const metadataBytes = bytes.subarray(bodyStart, zipStart);
+    let metadataBytes = bytes.subarray(bodyStart, zipStart);
     onProgress(0.1);
 
-    const zipBytes = bytes.subarray(zipStart);
+    let zipBytes = bytes.subarray(zipStart);
     const entries = await extractZipEntries(zipBytes, ["gamestate", "string_lookup"]);
     onProgress(0.4);
 
-    const strings = parseStringLookup(entries.string_lookup);
+    let strings = parseStringLookup(entries.string_lookup);
     onProgress(0.5);
 
     const metadata = parseMetadataBlock(metadataBytes, strings);
     onProgress(0.55);
 
-    const gsView = new DataView(entries.gamestate.buffer, entries.gamestate.byteOffset, entries.gamestate.byteLength);
+    let gsView = new DataView(entries.gamestate.buffer, entries.gamestate.byteOffset, entries.gamestate.byteLength);
     const includeLocations = !!options.includeLocations;
     const includeWars = !!options.includeWars;
     const includeModifierState = !!options.includeModifierState;
@@ -1038,12 +1107,20 @@
       subunitManagerSeen: false,
     };
 
-    // Phase 1: tokenize the whole gamestate buffer up front (0.55 -> 0.85).
-    const gsTape = tokenize(gsView, strings, (frac) => onProgress(0.55 + 0.3 * frac));
-    if (gsTape.truncated) {
-      result.parseWarning = `Gamestate truncated or corrupted around byte ${gsTape.length ? gsTape.offsets[gsTape.length - 1] : 0} - some sections may be missing.`;
-    }
-    onProgress(0.85);
+    // Drop the raw input buffer and the (already-fully-consumed) string_lookup
+    // zip entry here instead of leaving them reachable via this function's
+    // own local scope for the rest of the parse. `strings` and `gsView` (the
+    // inflated gamestate) can NOT be freed this early anymore - unlike the
+    // old two-phase tape, the streaming decoder below reads directly from
+    // `gsView` and looks up `strings` throughout the whole walk, not just in
+    // an upfront pass - but eliminating the tape entirely more than makes up
+    // for it (see makeDecoder's 2026-08-12 comment for the real measured
+    // numbers).
+    arrayBuffer = null;
+    bytes = null;
+    zipBytes = null;
+    metadataBytes = null;
+    entries.string_lookup = null;
 
     // Normally "countries" and "played_country" are true top-level keys, but
     // at least one observed save (an early-patch autosave) nested them one
@@ -1281,13 +1358,15 @@
       return false;
     }
 
-    const dec = makeTapeCursor(gsTape, { onSpecialKey: handleSpecialKey });
-    const totalTapeLen = gsTape.length;
-    let lastProgressPos = 0;
-    const progressStep = Math.max(1, Math.floor(totalTapeLen / 50));
+    // Single streaming pass over the gamestate (0.55 -> 1.0): tokenizes and
+    // walks simultaneously, never materializing a full in-memory tape (see
+    // makeDecoder's 2026-08-12 comment) - this used to be two separate
+    // phases (tokenize the whole buffer, then walk the result) with a large
+    // intermediate array held in memory for the whole walk.
+    const dec = makeDecoder(gsView, strings, { onSpecialKey: handleSpecialKey, onProgress: (frac) => onProgress(0.55 + 0.45 * frac) });
 
     try {
-      while (dec.pos < totalTapeLen) {
+      while (dec.peekKind() !== undefined) {
         // Normally every top-level gamestate entry is "key=value", but a
         // real multiplayer save (274MB gamestate, 2500+ countries, 8
         // players) was found with a run of bare (unkeyed) entries sitting
@@ -1313,11 +1392,13 @@
           // else: a bare scalar sibling of the OPEN case above, already
           // consumed by resolveToken() - fall through and keep going.
         }
-
-        if (dec.pos - lastProgressPos > progressStep) {
-          lastProgressPos = dec.pos;
-          onProgress(0.85 + 0.15 * (dec.pos / totalTapeLen));
-        }
+      }
+      // A genuinely truncated/corrupted tail that happened to end exactly at
+      // the true top level (not mid-section) exits the loop above normally
+      // instead of throwing - still worth flagging, just discovered here
+      // instead of in the catch below.
+      if (dec.truncated) {
+        result.parseWarning = `Gamestate truncated or corrupted around byte ${dec.byteOffset} - some sections may be missing.`;
       }
     } catch (err) {
       // Truncated save, or a structural quirk we haven't seen - keep
@@ -1328,6 +1409,13 @@
         console.warn("EU5 save parsing stopped early (partial results kept):", err.message);
       }
     }
+
+    // The walk is done - drop the inflated gamestate buffer and the string
+    // lookup table now, before the postprocessing calls below build further
+    // on `result` (they only ever touch `result`, never these).
+    entries.gamestate = null;
+    strings = null;
+    gsView = null;
 
     // See js/clausewitz.js's collapsePlayerSessions for why "last entry per
     // country wins, then dedupe by player name across countries too" (no
