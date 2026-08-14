@@ -278,6 +278,7 @@
     "2df5": "heir",
     "3148": "court_language",
     "3def": "ai_personality",
+    "3869": "automated_systems",
     "27fd": "capital",
     "3d35": "game_start_capital",
     "3d36": "default_capital",

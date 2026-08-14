@@ -1712,96 +1712,24 @@
     return departed;
   }
 
-  // The exact set of automation-delegation options EU5 exposes as of this
-  // writing (confirmed empirically against real save data spanning multiple
-  // campaigns, not guessed - see player_session_handling memory / the
-  // comment on `automatedSystems` in js/clausewitz.js): every genuinely
-  // AI-only country in a real, unmodified save carries ONLY
-  // "ProductionMethods", the single default, with zero exceptions across a
-  // full ~2500-country population. A human player can selectively enable
-  // any subset of the rest for convenience. The length check alongside the
-  // name check is a deliberate belt-and-suspenders: if a future game patch
-  // adds new automation options, a country with "every flag that exists in
-  // THIS save, whatever they're named" still trips the length threshold
-  // even before this constant gets updated for the new names.
-  const FULL_AUTOMATION_FLAGS = new Set([
-    "ProductionMethods",
-    "ArmyBuilder",
-    "Buildings",
-    "Cabinet",
-    "CabinetMembers",
-    "CloseBuildings",
-    "Credit",
-    "CultureAcceptance",
-    "DestroyBuildings",
-    "DestroyEstateBuildings",
-    "Estates",
-    "ExpandBuildings",
-    "ExpandRGO",
-    "Exploration",
-    "Finances",
-    "GovernmentReforms",
-    "Laws",
-    "NavyBuilder",
-    "Privateers",
-    "ReligiousDoctrines",
-    "ReplaceAdmirals",
-    "ReplaceGenerals",
-    "Research",
-    "Rgo",
-    "Rivals",
-  ]);
-  function isFullyAutomated(automatedSystems) {
-    if (!Array.isArray(automatedSystems) || automatedSystems.length < FULL_AUTOMATION_FLAGS.size) return false;
-    for (const flag of FULL_AUTOMATION_FLAGS) if (!automatedSystems.includes(flag)) return false;
-    return true;
-  }
-
-  // Per the user's explicit call: "if you see every automation flag on then
-  // they are AI [...] auto exclude from metrics maps and future scoring."
-  // Returns Map<playerName, departedAsOfDate> - the SAME shape as the
-  // shared hidden-players.json list (see [[player_session_handling]]'s
-  // 2026-07-15 update), so it merges into the exact same date-aware
-  // exclusion pipeline computeFromLedger already has for the manual Hide
-  // button, no separate code path needed. `departedAsOf` is the EARLIEST
-  // snapshot where the country has been continuously fully-automated
-  // through to the latest snapshot (walking backward from the end) - a war
-  // that concluded before automation kicked in still counts as a real fight
-  // by whoever was actually playing then, only a later one fighting a
-  // phantom gets excluded, same reasoning as every other departure signal
-  // in this file. Only ever fires on a country's CURRENT state (the last
-  // snapshot must still be fully-automated) - a player who briefly toggled
-  // everything on and then reverted is not flagged.
-  function computeAutomationDepartures(snapshots) {
-    const sorted = (snapshots || []).slice().sort((a, b) => dateKey(a.date) - dateKey(b.date));
-    const byCountry = new Map();
-    for (const snapshot of sorted) {
-      for (const c of snapshot.playerCountries || []) {
-        if (!c || typeof c.number !== "number") continue;
-        if (!byCountry.has(c.number)) byCountry.set(c.number, []);
-        byCountry.get(c.number).push({ date: snapshot.date, automatedSystems: c.automatedSystems, players: c.players || [] });
-      }
-    }
-    const result = new Map();
-    for (const history of byCountry.values()) {
-      if (!history.length) continue;
-      const last = history[history.length - 1];
-      if (!isFullyAutomated(last.automatedSystems)) continue;
-      let departedAsOf = last.date;
-      for (let i = history.length - 1; i >= 0; i--) {
-        if (!isFullyAutomated(history[i].automatedSystems)) break;
-        departedAsOf = history[i].date;
-      }
-      for (const name of last.players) if (!result.has(name)) result.set(name, departedAsOf);
-    }
-    return result;
-  }
+  // Automatic "fully automated = departed" detection (an "every automation
+  // flag enabled at once" heuristic) was tried and removed: `automatedSystems`
+  // can prove a country IS actively customized by a human (2026-08-13 - no
+  // real AI country in a real ~2500-country population ever shows anything
+  // but exactly ["ProductionMethods"]), but it can't prove the reverse - a
+  // real, present player who simply never touches any automation toggle
+  // (confirmed on real data: a real player showed that exact same
+  // ["ProductionMethods"]-only signature) is indistinguishable from AI by
+  // this field alone. No other candidate signal in the save format
+  // (per-unit `activity_type`, `played_country`'s UI-state counters, a
+  // broad keyword sweep for anything session/connection-shaped) held up
+  // either once checked against real data. Manual "Fix players"/Hide remain
+  // the only mechanism for this.
 
   return {
     computeLlamaScores,
     computeFromLedger,
     computeDepartedPlayers,
-    computeAutomationDepartures,
     summarizeWars,
     overrideKey,
     warScoreFor,

@@ -448,17 +448,18 @@
       ownedLocations: Array.isArray(obj.owned_locations) ? obj.owned_locations : [],
       // Which of the game's own automation-delegation options ("let the AI
       // handle building queues", "let the AI replace dead generals", etc.)
-      // are currently enabled for this country. Confirmed on real data (see
-      // [[player_session_handling]]): every genuinely AI-only country in a
-      // real save carries ONLY the single default entry ("ProductionMethods"),
-      // with zero exceptions across a full ~2500-country population, while
-      // human players selectively enable a handful of others for
-      // convenience - EXCEPT a player who's actually stopped playing, whose
-      // country had literally every automation option enabled at once
-      // (confirmed real, not theoretical - dramatically more than any
-      // actively-played country in the same game). Used by
-      // js/llama-score.js's computeAutomationDepartures() as an automatic
-      // departed-player signal, alongside the existing manual Hide button.
+      // are currently enabled for this country. Confirmed on real data:
+      // every genuinely AI-only country in a real save carries ONLY the
+      // single default entry ("ProductionMethods"), with zero exceptions
+      // across a full ~2500-country population - but that's one-directional
+      // evidence only (proves engagement, never proves absence): a real,
+      // present player who simply never touches any automation toggle shows
+      // that exact same signature, confirmed on real data too. An earlier
+      // "every automation option enabled at once = departed" auto-detection
+      // built on this field was tried and scratched for exactly that reason
+      // (2026-08-13) - kept here as raw data since it's still useful context
+      // for a human making the call manually via "Fix players"/Hide, just no
+      // longer wired into any automatic decision.
       automatedSystems: Array.isArray(obj.automated_systems) ? obj.automated_systems : [],
       // Population / historical trends (one entry per in-game year)
       population: obj.last_months_population,

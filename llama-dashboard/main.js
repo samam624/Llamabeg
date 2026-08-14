@@ -667,16 +667,6 @@ function pushUpdate() {
       snapshots = snapshots.slice(0, -1).concat([latestCopy]);
     }
     const hiddenPlayers = readHiddenPlayers(campaignKey);
-    // "Every automation flag enabled at once" (see js/llama-score.js's
-    // isFullyAutomated/computeAutomationDepartures) is a fully-automatic
-    // departure signal, confirmed against real data - merged in alongside
-    // the manual/shared hidden-players.json list (which wins on conflict,
-    // since an explicit human choice should never be silently overridden by
-    // an inferred one). No IPC/file write involved - purely computed fresh
-    // from the ledger every tick.
-    for (const [name, date] of LlamaScore.computeAutomationDepartures(snapshots)) {
-      if (!hiddenPlayers.has(name)) hiddenPlayers.set(name, date);
-    }
     // computeFromLedger/summarizeWars are called twice (once per mode) -
     // each call is independent/pure, so this is simply "score the same
     // ledger data twice under a different filter", not a duplicated recorder
