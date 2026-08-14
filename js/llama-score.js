@@ -1169,7 +1169,7 @@
   // `mode` ("pvp", the default, or "pve") - see the identical parameter on
   // computeLlamaScores above for the full rationale; this is the same split
   // applied to the campaign-ledger data source instead of a single save.
-  function computeFromLedger(snapshots, events, overrides, excludedPlayers, mode) {
+  function computeFromLedger(snapshots, events, overrides, excludedPlayers, mode, absentRanges) {
     overrides = overrides || {};
     snapshots = snapshots || [];
     events = events || [];
@@ -1179,7 +1179,7 @@
     // `excludedPlayers` accepts either a bare Set<name> (legacy/manual "hide
     // this name, no date info" - what the web app's own localStorage list
     // has always been) or a Map<name, departedAsOfDate> (the shared hide
-    // list - see hidden-players.json/[[player_session_handling]]) - a
+    // list - see hidden-players.json/player_session_handling memory) - a
     // player marked departed as of a specific in-game date should still
     // score normally for anything that happened before that date; only a
     // Set entry (no date known at all) falls back to the old all-or-nothing
@@ -1198,6 +1198,35 @@
       if (d === undefined) return false;
       if (d === null || !atDate) return true;
       return dateKey(atDate) >= dateKey(d);
+    }
+
+    // `absentRanges` (Map<name, Array<{from, to}>>, optional) is a
+    // DIFFERENT, deliberately separate mechanism from the departed-as-of
+    // cutoff above: a per-session attendance check ("who missed the stretch
+    // since I last looked") records a BOUNDED window per miss, not a
+    // one-way "gone forever" cutoff - a player who missed one session but
+    // came back the next should score normally again once they return,
+    // which a single cutoff date can't express. Kept as its own map/check
+    // rather than folded into excludedPlayers/isDepartedAsOf so the
+    // well-tested one-way-cutoff semantics of manual/shared Hide stay
+    // exactly as they were - see the 2026-08-13 farming-prevention
+    // investigation for why this exists (real signal was found that a
+    // country IS actively customized, but nothing proves the reverse:
+    // "currently AI-piloted" can't be detected from save data alone, so
+    // this closes the gap with a lightweight per-session prompt instead).
+    // Both ends inclusive - `to` is stored as exactly the latest snapshot's own
+    // date at the moment the range was recorded (see js/app.js's
+    // maybePromptSessionAttendance), a real day the review covers, not an
+    // exclusive boundary. An exclusive `to` (an earlier version of this
+    // function used `k < dateKey(r.to)`) let a war starting on that exact
+    // last-reviewed day slip through unexcluded - the whole point of marking
+    // that day absent. Matches isDepartedAsOf's inclusive cutoff above.
+    function isAbsentDuring(name, atDate) {
+      if (!name || !absentRanges || !atDate) return false;
+      const ranges = absentRanges instanceof Map ? absentRanges.get(name) : absentRanges[name];
+      if (!Array.isArray(ranges) || !ranges.length) return false;
+      const k = dateKey(atDate);
+      return ranges.some((r) => r && k >= dateKey(r.from) && k <= dateKey(r.to));
     }
 
     // The recorder can now persist a snapshot that arrived chronologically
@@ -1448,9 +1477,16 @@
           const cands = [...(playerCountries.get(c) || [])];
           return activePlayerAt(c, war.startDate) || lastControllerAt(c, war.startDate) || cands[cands.length - 1] || null;
         }
+        // Departed-as-of (permanent, one-way) and absent-during (a bounded
+        // per-session miss) are two different DATA SOURCES for the same
+        // question - "was this player really available to fight as of this
+        // date" - so every exclusion check below treats them the same way.
+        function isUnavailableAsOf(name, atDate) {
+          return isDepartedAsOf(name, atDate) || isAbsentDuring(name, atDate);
+        }
         const selfDeparted = !activePlayerAt(country, war.startDate);
         const enemyActivePlayer = enemyEverPlayer.filter(
-          (c) => activePlayerAt(c, war.startDate) && !isDepartedAsOf(attributedPlayerFor(c), war.startDate)
+          (c) => activePlayerAt(c, war.startDate) && !isUnavailableAsOf(attributedPlayerFor(c), war.startDate)
         );
         // A revolt war (INDEPENDENCE_WAR_NAME/CIVIL_WAR_NAME, `war.revolt`)
         // is fighting your own rebels/pretender, not a foreign AI nation -
@@ -1461,7 +1497,7 @@
         // the same way in both modes (a revolt is never PvP in practice -
         // confirmed on real data, every revolter is AI - so this is a no-op
         // for PVP mode either way).
-        const autoExcludeReason = isDepartedAsOf(player, war.startDate)
+        const autoExcludeReason = isUnavailableAsOf(player, war.startDate)
           ? "player-hidden"
           : war.revolt
             ? "revolt"

@@ -278,8 +278,8 @@
                 <ul>
                   <li><strong>Not a PvP result</strong> - the opposing side was never player-controlled.</li>
                   <li><strong>Not a PvE result</strong> (PVE mode only) - the opposing side had a real player.</li>
-                  <li><strong>Player had already left</strong> - this player's country had already reverted to AI before the war even began. A war they were actually playing when it started still counts, even if they left partway through it.</li>
-                  <li><strong>Opponent had already left</strong> - every enemy in the war had already left the campaign before it even began. A war fought against a real opponent still counts even if that opponent left partway through it.</li>
+                  <li><strong>Player had already left</strong> - this player's country had already reverted to AI before the war even began, or they were marked as missing that session via "Who missed a session&hellip;" below. A war they were actually playing when it started still counts, even if they left partway through it.</li>
+                  <li><strong>Opponent had already left</strong> - every enemy in the war had already left the campaign before it even began, or was marked as missing that session. A war fought against a real opponent still counts even if that opponent left partway through it.</li>
                   <li><strong>Never actually fought</strong> (PvP only) - joined the war but never recorded a Battle/Capture loss.</li>
                   <li><strong>Manually hidden</strong> - this player was hidden as departed on the Players table.</li>
                 </ul>
@@ -294,6 +294,8 @@
           <p class="panel-note" id="llamaH2HNote">One row per war between players - who fought whom, who won, and how much score each side gained or lost.</p>
           <div id="llamaHeadToHeadTable" class="table-wrap"></div>
           <button type="button" id="llamaWarDetailsBtn" class="link-btn">Edit war corrections&hellip;</button>
+          &middot;
+          <button type="button" id="llamaAttendanceManageBtn" class="link-btn">Who missed a session&hellip;</button>
         </section>
       </section>
 
@@ -304,6 +306,26 @@
         </div>
         <label class="llama-toggle-row"><input type="checkbox" id="llamaShowAiWars"> <span id="llamaShowAiWarsLabel">Show AI-only wars (reference data, never scored)</span></label>
         <div id="llamaWarsTable" class="table-wrap"></div>
+      </dialog>
+
+      <dialog id="llamaAttendanceModal">
+        <div class="modal-header">
+          <h3>Who missed this session?</h3>
+          <button type="button" id="llamaAttendanceModalClose" class="link-btn">Close</button>
+        </div>
+        <p class="panel-note">
+          Checked players are treated as not really controlling their country for the reviewed date range - wars during that
+          window won't count for or against them, closing off the "beat up whoever's currently AI-piloted" farming case
+          without needing a reliable AI-vs-human signal (which the save format doesn't provide).
+        </p>
+        <p class="panel-note" id="llamaAttendanceRangeNote"></p>
+        <div id="llamaAttendanceCheckboxList"></div>
+        <button type="button" id="llamaAttendanceSubmitBtn" class="link-btn">Submit</button>
+        <details class="formula-note" id="llamaAttendanceHistoryDetails">
+          <summary>Previously marked absent</summary>
+          <p class="panel-note">Edit the dates or remove an entry if it was marked by mistake.</p>
+          <div id="llamaAttendanceHistoryList"></div>
+        </details>
       </dialog>
 
       <section id="mapTab" class="tab-panel" hidden>

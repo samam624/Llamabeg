@@ -32,6 +32,13 @@
   const llamaWarModalEl = document.getElementById("llamaWarModal");
   const llamaWarDetailsBtn = document.getElementById("llamaWarDetailsBtn");
   const llamaWarModalCloseBtn = document.getElementById("llamaWarModalClose");
+  const llamaAttendanceModalEl = document.getElementById("llamaAttendanceModal");
+  const llamaAttendanceModalCloseBtn = document.getElementById("llamaAttendanceModalClose");
+  const llamaAttendanceRangeNoteEl = document.getElementById("llamaAttendanceRangeNote");
+  const llamaAttendanceCheckboxListEl = document.getElementById("llamaAttendanceCheckboxList");
+  const llamaAttendanceSubmitBtn = document.getElementById("llamaAttendanceSubmitBtn");
+  const llamaAttendanceHistoryListEl = document.getElementById("llamaAttendanceHistoryList");
+  const llamaAttendanceManageBtn = document.getElementById("llamaAttendanceManageBtn");
   const llamaShowAiWarsEl = document.getElementById("llamaShowAiWars");
   const llamaShowAiWarsLabelEl = document.getElementById("llamaShowAiWarsLabel");
   const llamaModePvpBtn = document.getElementById("llamaModePvp");
@@ -100,6 +107,21 @@
   // "Show Llama Score" checkbox is unchecked (see updateLlamaPanelVisibility).
   let llamaAutoLinked = false;
   let currentLlamaDraw = null; // stores the currently-active mode's draw() so the AI-wars toggle can re-render on demand
+  // "Who missed this session?" dialog state - which campaign/checkpoint the
+  // currently-open modal is answering for (set when it opens, read on
+  // submit), and which (campaignKey|latestDate) combos have already been
+  // offered this page load so re-rendering the panel (tab switches, mode
+  // toggles, override edits - renderLlamaScore() fires on all of these)
+  // doesn't reopen it repeatedly. See maybePromptSessionAttendance() below.
+  let attendanceModalCampaignKey = null;
+  let attendanceModalTargetDate = null;
+  const promptedAttendanceFor = new Set();
+  // Latest campaign/snapshot renderLedgerLlamaScore's draw() last computed -
+  // lets the manual "Who missed a session?" button (unlike the auto-prompt)
+  // reopen the same dialog on demand, e.g. to fix a mistaken answer, without
+  // needing its own separate computeFromLedger call.
+  let currentLlamaCampaignKey = null;
+  let currentLlamaLatestSnapshot = null;
   const LLAMA_SHOW_TOGGLE_KEY = "eu5-analyzer-llama-show-toggle";
   const THEME_KEY = "eu5-analyzer-theme";
   // PVP (default) scores player-vs-player wars, same as always. PVE scores
@@ -211,24 +233,6 @@
   // stays the raw manual set, since the Hide/Show buttons read AND WRITE it
   // directly and shouldn't accidentally persist an auto-detected name into
   // permanent manual storage.
-  // Name -> departed-as-of date, computed fresh from the ledger every call -
-  // "every automation flag enabled at once" (see js/llama-score.js's
-  // isFullyAutomated/computeAutomationDepartures) is the third automatic
-  // departure signal alongside roster-change detection and the shared Hide
-  // file, per the user's explicit call after confirming the real-data
-  // pattern. Requires a ledger (single-save mode has no automatedSystems
-  // history to walk).
-  function computeAutomationDeparturesForCurrentLedger() {
-    if (!llamaSnapshotsLedger || !llamaSnapshotsLedger.length || typeof LlamaScore === "undefined" || !LlamaScore.computeAutomationDepartures) return new Map();
-    try {
-      const campaignKey = pickLatestCampaignKey(llamaSnapshotsLedger) || "campaign";
-      const { snapshots } = filterLedgerToCampaign(llamaSnapshotsLedger, llamaEventsLedger, campaignKey);
-      return LlamaScore.computeAutomationDepartures(snapshots);
-    } catch (err) {
-      return new Map(); // Ledger data mid-write or otherwise malformed - fall back to nothing extra.
-    }
-  }
-
   function getAllExcludedPlayers() {
     const excluded = getExcludedPlayers();
     if (llamaSnapshotsLedger && llamaSnapshotsLedger.length && typeof LlamaScore !== "undefined" && LlamaScore.computeDepartedPlayers) {
@@ -240,7 +244,6 @@
         // Ledger data mid-write or otherwise malformed - fall back to just the manual list.
       }
     }
-    for (const name of computeAutomationDeparturesForCurrentLedger().keys()) excluded.add(name);
     // Anyone hidden via Llamabeg's Hide button (see sharedHiddenPlayers'
     // comment above) should disappear from this app's current-state views
     // too, without the user needing to hide them a second time here.
@@ -248,16 +251,15 @@
     return excluded;
   }
 
-  // The manual list + shared file + automation-detected departures, MERGED
-  // as a Map (name -> departed-as-of date or null) rather than flattened to
-  // a bare Set of names - this is what the ledger-based Llama Score panel's
-  // computeFromLedger call needs so a dated departure only excludes wars
-  // that started after that date, while the manual Hide button here (no
-  // date info, never has had any) keeps its existing all-or-nothing
-  // behavior. See computeFromLedger's own comment in js/llama-score.js.
+  // The manual list + shared file, MERGED as a Map (name -> departed-as-of
+  // date or null) rather than flattened to a bare Set of names - this is
+  // what the ledger-based Llama Score panel's computeFromLedger call needs
+  // so a dated departure only excludes wars that started after that date,
+  // while the manual Hide button here (no date info, never has had any)
+  // keeps its existing all-or-nothing behavior. See computeFromLedger's own
+  // comment in js/llama-score.js.
   function excludedPlayersForScoring() {
     const merged = new Map(sharedHiddenPlayers);
-    for (const [name, date] of computeAutomationDeparturesForCurrentLedger()) if (!merged.has(name)) merged.set(name, date);
     for (const name of getExcludedPlayers()) if (!merged.has(name)) merged.set(name, null);
     return merged;
   }
@@ -861,8 +863,8 @@
   const AUTO_EXCLUDE_TITLES = {
     "vs-ai": "Auto-excluded: opposing side was never player-controlled - not a PvP result. Uncheck to score anyway.",
     "vs-player": "Auto-excluded: opposing side had a real player - not a PvE result, doesn't count under Alpaca Points. Uncheck to score anyway.",
-    "player-departed": "Auto-excluded: this player had already reverted to AI before this war began. A war they were playing when it started still counts, even if they left partway through. Uncheck to score anyway.",
-    "opponent-departed": "Auto-excluded: every enemy had already left the campaign before this war began. A war against a real opponent still counts even if they left partway through. Uncheck to score anyway.",
+    "player-departed": "Auto-excluded: this player had already reverted to AI before this war began, or was marked absent for this session in \"Who missed this session?\". A war they were playing when it started still counts, even if they left partway through. Uncheck to score anyway.",
+    "opponent-departed": "Auto-excluded: every enemy had already left the campaign before this war began, or was marked absent for this session in \"Who missed this session?\". A war against a real opponent still counts even if they left partway through. Uncheck to score anyway.",
     "player-hidden": "Auto-excluded: this player was marked departed (Hide button here or in the desktop dashboard). Wars that started before that point still count. Unhide to include everything again.",
     revolt: "Auto-excluded: a revolt (independence/civil war) against your own rebels/pretender, not a fight against a foreign AI nation - winner still tracked, but never moves PVE/Alpaca Points. Uncheck to score anyway.",
     "no-battle-losses": "Auto-excluded: never recorded a Battle/Capture loss in this PvP war - joined but never fought, so doesn't count as an enemy/ally for anyone else either. PvP-only (a PvE win engineered through vassals still counts). Uncheck to score anyway.",
@@ -1165,6 +1167,219 @@
     localStorage.setItem(LLAMA_LEDGER_OVERRIDES_PREFIX + campaignKey, JSON.stringify(overrides));
   }
 
+  // "Who missed this session?" - per-campaign attendance log, browser-local
+  // only (same storage model as the manual Hide list and the war-correction
+  // overrides above - not synced to the shared hidden-players.json/desktop
+  // dashboard). Answers the farming-prevention gap found investigating why
+  // Zuup's AI-piloted session went untracked: there's no reliable save-data
+  // signal for "is a human currently driving this country" (see
+  // player_session_handling memory's 2026-08-13 entries), so instead of
+  // trying to detect it, this prompts once per genuinely new stretch of
+  // ledger data and lets a human say who wasn't actually playing.
+  // Shape: { lastCheckpointDate: "1544.1.1", absences: [{name, from, to}] }.
+  // `lastCheckpointDate` is the boundary up to which attendance has already
+  // been reviewed - advances every time the dialog is answered (even if
+  // nobody was marked absent), so re-opening the tab immediately after
+  // doesn't re-ask about the same stretch. `absences` accumulates one
+  // {name, from, to} entry per missed stretch - deliberately a RANGE, not a
+  // one-way departed-as-of cutoff like the Hide button, since missing one
+  // session and returning for the next should score normally again once
+  // they're back (see js/llama-score.js's isAbsentDuring).
+  const LLAMA_SESSION_ATTENDANCE_PREFIX = "eu5-analyzer-llama-session-attendance:";
+  function getSessionAttendance(campaignKey) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LLAMA_SESSION_ATTENDANCE_PREFIX + campaignKey) || "{}");
+      if (!Array.isArray(parsed.absences)) parsed.absences = [];
+      return parsed;
+    } catch (err) {
+      return { lastCheckpointDate: null, absences: [] };
+    }
+  }
+  function setSessionAttendance(campaignKey, attendance) {
+    localStorage.setItem(LLAMA_SESSION_ATTENDANCE_PREFIX + campaignKey, JSON.stringify(attendance));
+  }
+  // Deliberately stricter than js/llama-score.js's own dateKey(), which
+  // silently treats anything unparsable as 0 - fine for trusted,
+  // save-derived dates, dangerous for the free-text history-edit inputs
+  // below (see renderAttendanceHistory's change handler).
+  function isValidEu5Date(value) {
+    return typeof value === "string" && /^\d{1,5}\.\d{1,2}\.\d{1,2}(\.\d{1,2})?$/.test(value.trim());
+  }
+
+  // Reshapes the flat {name,from,to}[] storage format into the
+  // Map<name, {from,to}[]> shape LlamaScore.computeFromLedger's
+  // isAbsentDuring() actually reads.
+  function buildAbsentRangesMap(attendance) {
+    const map = new Map();
+    for (const entry of attendance.absences || []) {
+      if (!entry || !entry.name || !entry.from || !entry.to) continue;
+      if (!map.has(entry.name)) map.set(entry.name, []);
+      map.get(entry.name).push({ from: entry.from, to: entry.to });
+    }
+    return map;
+  }
+
+  // `attendance` is optional - omit it to force a fresh read (needed right
+  // after a mutation, e.g. the Remove-button handler below); pass an
+  // already-loaded object (e.g. from openAttendanceModal, which just fetched
+  // one) to avoid a redundant localStorage.getItem+JSON.parse of the same
+  // key on every modal open.
+  function renderAttendanceHistory(campaignKey, attendance) {
+    attendance = attendance || getSessionAttendance(campaignKey);
+    if (!attendance.absences.length) {
+      llamaAttendanceHistoryListEl.innerHTML = '<p class="panel-note">No sessions marked absent yet.</p>';
+      return;
+    }
+    llamaAttendanceHistoryListEl.innerHTML = attendance.absences
+      .map(
+        (entry, idx) => `
+      <div class="llama-attendance-history-row">
+        <span>${escapeHtml(entry.name)}</span>
+        <input type="text" class="llama-attendance-edit-from" data-idx="${idx}" value="${escapeHtml(entry.from)}" size="10">
+        <span>&rarr;</span>
+        <input type="text" class="llama-attendance-edit-to" data-idx="${idx}" value="${escapeHtml(entry.to)}" size="10">
+        <button type="button" class="hide-player-btn llama-attendance-remove" data-idx="${idx}">Remove</button>
+      </div>`
+      )
+      .join("");
+    llamaAttendanceHistoryListEl.querySelectorAll(".llama-attendance-remove").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const current = getSessionAttendance(campaignKey);
+        current.absences.splice(Number(btn.dataset.idx), 1);
+        setSessionAttendance(campaignKey, current);
+        renderAttendanceHistory(campaignKey);
+        if (currentLlamaDraw) currentLlamaDraw();
+      });
+    });
+    llamaAttendanceHistoryListEl.querySelectorAll(".llama-attendance-edit-from, .llama-attendance-edit-to").forEach((input) => {
+      input.addEventListener("change", () => {
+        const current = getSessionAttendance(campaignKey);
+        const entry = current.absences[Number(input.dataset.idx)];
+        if (!entry) return;
+        const field = input.classList.contains("llama-attendance-edit-from") ? "from" : "to";
+        const value = input.value.trim();
+        // A blank/malformed date silently parses to dateKey 0 in
+        // js/llama-score.js, which is <= every real date - an edit that
+        // fat-fingers this field would silently exclude the player's ENTIRE
+        // campaign history instead of just the intended stretch, with no
+        // error anywhere (a real bug found reviewing this feature). Reject
+        // at the edit boundary instead of ever writing a bad value.
+        if (!isValidEu5Date(value)) {
+          input.value = entry[field];
+          input.title = `"${value}" doesn't look like an EU5 date (expected year.month.day, e.g. 1545.1.1) - reverted.`;
+          input.classList.add("llama-attendance-invalid-flash");
+          setTimeout(() => input.classList.remove("llama-attendance-invalid-flash"), 1500);
+          return;
+        }
+        input.title = "";
+        entry[field] = value;
+        setSessionAttendance(campaignKey, current);
+        if (currentLlamaDraw) currentLlamaDraw();
+      });
+    });
+  }
+
+  function openAttendanceModal(campaignKey, attendance, latestSnapshot) {
+    const nothingNew = attendance.lastCheckpointDate === latestSnapshot.date;
+    attendanceModalCampaignKey = campaignKey;
+    attendanceModalTargetDate = nothingNew ? null : latestSnapshot.date;
+    llamaAttendanceSubmitBtn.hidden = nothingNew;
+    if (nothingNew) {
+      llamaAttendanceRangeNoteEl.textContent = `Already reviewed through ${attendance.lastCheckpointDate} - nothing new to mark yet. Play on and come back once there's a new session's worth of data.`;
+      llamaAttendanceCheckboxListEl.innerHTML = "";
+    } else {
+      llamaAttendanceRangeNoteEl.textContent = `Reviewing ${attendance.lastCheckpointDate} → ${latestSnapshot.date}. Check anyone who didn't actually play this stretch - their wars in this window won't count either direction.`;
+      // Built as {name, tag} objects, not a "name|tag" joined string - a
+      // player name containing a literal "|" (not prevented by the save
+      // format) would otherwise truncate on re-split, showing/recording the
+      // wrong name (a real bug found reviewing this feature).
+      const playersByName = new Map();
+      for (const c of latestSnapshot.playerCountries || []) {
+        if (!Array.isArray(c.players)) continue;
+        for (const name of c.players) {
+          if (name && !playersByName.has(name)) playersByName.set(name, c.tag || "?");
+        }
+      }
+      const players = [...playersByName.keys()].sort((a, b) => a.localeCompare(b));
+      if (!players.length) {
+        llamaAttendanceCheckboxListEl.innerHTML = '<p class="panel-note">No current players found in this campaign\'s latest data.</p>';
+      } else {
+        llamaAttendanceCheckboxListEl.innerHTML = players
+          .map(
+            (name) => `
+        <label class="llama-toggle-row">
+          <input type="checkbox" class="llama-attendance-check" data-name="${escapeHtml(name)}">
+          <span>${escapeHtml(name)} <span class="tag-badge">${escapeHtml(playersByName.get(name))}</span></span>
+        </label>`
+          )
+          .join("");
+      }
+    }
+    renderAttendanceHistory(campaignKey, attendance);
+    llamaAttendanceModalEl.showModal();
+  }
+
+  // Fires once per genuinely new stretch of ledger data (see the
+  // `promptedAttendanceFor` comment above) - called from renderLedgerLlamaScore's
+  // draw() every time it runs, but only actually opens the dialog when
+  // there's real unreviewed data AND nothing else is already open.
+  function maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance) {
+    if (!latestSnapshot || !latestSnapshot.date || !campaignKey) return;
+    if (llamaAttendanceModalEl.open || llamaWarModalEl.open) return;
+    const latestDate = latestSnapshot.date;
+    if (!attendance.lastCheckpointDate) {
+      // First time this campaign has ever been seen here - nothing to
+      // review yet (no prior checkpoint to compare against), just seed it
+      // silently rather than asking about the campaign's entire history.
+      attendance.lastCheckpointDate = latestDate;
+      setSessionAttendance(campaignKey, attendance);
+      return;
+    }
+    if (attendance.lastCheckpointDate === latestDate) return; // nothing new since last review
+    const promptKey = campaignKey + "|" + latestDate;
+    if (promptedAttendanceFor.has(promptKey)) return; // already offered this page load
+    promptedAttendanceFor.add(promptKey);
+    openAttendanceModal(campaignKey, attendance, latestSnapshot);
+  }
+
+  llamaAttendanceManageBtn.addEventListener("click", () => {
+    // A real bug found reviewing this feature: this used to silently return
+    // here with zero feedback whenever no campaign ledger was connected
+    // (single-save mode, or right after Disconnect) - the button looked
+    // broken/unresponsive instead of explaining why it can't do anything.
+    if (!currentLlamaCampaignKey || !currentLlamaLatestSnapshot) {
+      attendanceModalCampaignKey = null;
+      attendanceModalTargetDate = null;
+      llamaAttendanceSubmitBtn.hidden = true;
+      llamaAttendanceRangeNoteEl.textContent =
+        "This needs a connected campaign ledger (\"Connect campaign folder…\" above) - a single loaded save has no session history to review attendance against.";
+      llamaAttendanceCheckboxListEl.innerHTML = "";
+      llamaAttendanceHistoryListEl.innerHTML = "";
+      llamaAttendanceModalEl.showModal();
+      return;
+    }
+    openAttendanceModal(currentLlamaCampaignKey, getSessionAttendance(currentLlamaCampaignKey), currentLlamaLatestSnapshot);
+  });
+  llamaAttendanceModalCloseBtn.addEventListener("click", () => llamaAttendanceModalEl.close());
+  llamaAttendanceModalEl.addEventListener("click", (e) => {
+    if (e.target === llamaAttendanceModalEl) llamaAttendanceModalEl.close(); // backdrop click
+  });
+  llamaAttendanceSubmitBtn.addEventListener("click", () => {
+    if (!attendanceModalCampaignKey || !attendanceModalTargetDate) {
+      llamaAttendanceModalEl.close();
+      return;
+    }
+    const attendance = getSessionAttendance(attendanceModalCampaignKey);
+    const from = attendance.lastCheckpointDate;
+    const to = attendanceModalTargetDate;
+    const checkedNames = [...llamaAttendanceCheckboxListEl.querySelectorAll(".llama-attendance-check:checked")].map((cb) => cb.dataset.name);
+    for (const name of checkedNames) attendance.absences.push({ name, from, to });
+    attendance.lastCheckpointDate = to;
+    setSessionAttendance(attendanceModalCampaignKey, attendance);
+    llamaAttendanceModalEl.close();
+    if (currentLlamaDraw) currentLlamaDraw();
+  });
+
   // Recorder output is JSON Lines - one object per line, and the file can be
   // large (tens of MB over a long campaign), so a bad/truncated line (e.g.
   // the recorder was killed mid-write) shouldn't take down the whole parse.
@@ -1363,16 +1578,26 @@
     }
 
     function draw() {
+      // Fetched once and threaded through both call sites below (scoring
+      // and the auto-prompt check) instead of each doing its own
+      // localStorage.getItem+JSON.parse of the identical key - draw() fires
+      // on every tab switch/mode toggle/override edit, so the duplicate read
+      // was real, repeated I/O for no reason (found reviewing this feature).
+      const attendance = getSessionAttendance(campaignKey);
       const { rows, leaderboard, latestSnapshot, unscoreableCount } = LlamaScore.computeFromLedger(
         snapshots,
         events,
         overrides,
         excludedPlayersForScoring(),
-        llamaScoreMode
+        llamaScoreMode,
+        buildAbsentRangesMap(attendance)
       );
       rows.forEach((r) => {
         r.__key = LlamaScore.overrideKey(r.warNumber, r.country);
       });
+      currentLlamaCampaignKey = campaignKey;
+      currentLlamaLatestSnapshot = latestSnapshot;
+      maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance);
 
       const scoredCount = rows.filter((r) => !r.excluded).length;
       llamaLedgerStatusEl.textContent =
@@ -1832,6 +2057,14 @@
     llamaEventsLedger = null;
     llamaAutoLinked = false;
     setLlamaLinkStatus(null);
+    // Without this, "Who missed a session…" keeps using the disconnected
+    // campaign's stale roster/date - a real bug found reviewing this
+    // feature: marking someone absent after disconnecting silently writes
+    // to localStorage under the orphaned campaign key with no visible
+    // effect on the (now per-save) panel, looking like a no-op while
+    // actually persisting bad data.
+    currentLlamaCampaignKey = null;
+    currentLlamaLatestSnapshot = null;
     await LedgerConnect.clearHandle();
     llamaDisconnectBtn.hidden = true;
     llamaConnectBtn.hidden = false;

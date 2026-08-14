@@ -1135,6 +1135,60 @@ td.metric-heat {
   margin: 0;
 }
 
+#llamaAttendanceModal {
+  background: var(--panel-bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  padding: 1.25rem 1.5rem;
+  width: min(95vw, 500px);
+  max-height: 85vh;
+}
+
+#llamaAttendanceModal::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+#llamaAttendanceModal .modal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+#llamaAttendanceModal .modal-header h3 {
+  margin: 0;
+}
+
+#llamaAttendanceSubmitBtn {
+  margin: 0.75rem 0 1rem;
+  font-weight: 600;
+}
+
+.llama-attendance-history-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  margin-top: 0.4rem;
+}
+
+.llama-attendance-history-row input[type="text"] {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.15rem 0.3rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  width: 5.5rem;
+}
+
+.llama-attendance-invalid-flash {
+  border-color: var(--bad) !important;
+}
+
 .hide-player-btn {
   padding: 0.2rem 0.55rem;
   border-radius: 3px;
