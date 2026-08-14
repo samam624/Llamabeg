@@ -1189,12 +1189,29 @@ function economicOutcomeSignal(war, economy, warReparations, afterCountries) {
     // opposite directions (e.g. -24 / +24, an exact mirror); one side
     // sitting at exactly 0 proves nothing came from/went to this opponent,
     // whatever the other side's unrelated change was.
+    //
+    // Real bug found on real data: requiring OPPOSITE signs (on top of the
+    // nonzero guard above) missed a real, decisive pile-on war - a
+    // 2-attacker-vs-34-defender conquest where the attacker principal ended
+    // net -23 locations and the defender principal ended net -7 (a real
+    // war-time save shows a clean 7-location swap between exactly these two
+    // principals, PLUS the attacker separately losing 23 more elsewhere in
+    // the same multi-front war to other coalition members not tracked as
+    // this defender's own principal). Both deltas were real and nonzero,
+    // just same-signed, so the old sign check silently discarded a genuine,
+    // sizeable relative loss and fell through to White Peace. The nonzero
+    // guard above already rules out the "one side truly uninvolved" false
+    // positive described above; requiring opposite signs on top of that only
+    // protects against two unrelated, similarly-sized swings elsewhere
+    // coincidentally producing a spread - a much rarer and smaller risk than
+    // silently missing every same-signed pile-on result, so the relative
+    // spread between the two principals (not the sign of either) is what
+    // decides now.
     const winnerSide = spread > 0 ? "Attacker" : "Defender";
     if (
       aLocations !== 0 &&
       dLocations !== 0 &&
-      Math.abs(spread) >= 2 &&
-      Math.sign(aLocations) !== Math.sign(dLocations)
+      Math.abs(spread) >= 2
     ) {
       const clean = aLoc.usedPrincipal && dLoc.usedPrincipal;
       landApplies = true;
