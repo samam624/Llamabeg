@@ -254,7 +254,22 @@
       const heuristic = heuristicWinnerSide(war);
       const participantByCountry = new Map((war.participants || []).map((p) => [p.country, p]));
       const fought = (c) => hasFoughtLosses(participantByCountry.get(c));
-      for (const participant of war.participants) {
+      // Real bug found reviewing this function: it used to loop over every
+      // RAW entry in war.participants unconditionally, so a country that
+      // appears more than once (left-then-rejoined the same war is a real,
+      // coded status per extractWarFields' Left handling) got a row - and a
+      // full score - for each entry, double-counting that player. Dedup to
+      // one entry per country first, keeping the FIRST occurrence to match
+      // participantSide()/sideCountries() above, which already use
+      // .find()/a Set and would silently disagree with a "last entry wins"
+      // choice here otherwise.
+      const seenCountries = new Set();
+      const dedupedParticipants = (war.participants || []).filter((p) => {
+        if (typeof p.country !== "number" || seenCountries.has(p.country)) return false;
+        seenCountries.add(p.country);
+        return true;
+      });
+      for (const participant of dedupedParticipants) {
         const country = participant.country;
         if (typeof country !== "number") continue;
         // Never actually joined this war (invited/targeted, declined) - see
@@ -1332,25 +1347,43 @@
     }
 
     const rows = [];
-    const seen = new Set();
     // A war-disappeared event with no lastWar means the recorder never had a
     // chance to capture that war's state before it vanished from the save
     // (e.g. a restart lost in-memory tracking of it before hydrateStateFromSnapshots()
     // existed/ran) - unscoreable, not just uncertain, so it's counted
     // separately rather than silently dropped with no explanation.
     const disappearedEvents = events.filter((event) => event && event.type === "war-disappeared");
-    const finishedEvents = disappearedEvents.filter((event) => event.lastWar);
+    let finishedEvents = disappearedEvents.filter((event) => event.lastWar);
     const unscoreableCount = disappearedEvents.length - finishedEvents.length;
     finishedEvents.sort((a, b) => dateKey(a.date) - dateKey(b.date));
+    // Real bug found on real data: the SAME war can get more than one
+    // war-disappeared event if the recorder loses track of it for one
+    // snapshot and reacquires it the next (confirmed real: a war vanished at
+    // one date, a war-start RE-DETECTION fired shortly after for the same
+    // warNumber, then it vanished again later - both disappearance events
+    // carry the identical `lastWar.startDate`, proving it's one underlying
+    // war, not two). The old dedup key was `sourceHash:warNumber`, which
+    // doesn't catch this - each duplicate comes from a different snapshot,
+    // so every participant silently got scored TWICE for the same real war.
+    // Dedup on warNumber+startDate instead (startDate as a defensive check
+    // against warNumber ever being reused for a genuinely different war,
+    // not observed but cheap to guard), keeping the LATEST disappearance -
+    // an earlier one followed by a war-start re-detection was a transient
+    // tracking loss, not the war's real end; if it had been the real end,
+    // no re-detection would have followed it.
+    const latestByWar = new Map();
+    for (const event of finishedEvents) {
+      const key = `${event.warNumber}:${event.lastWar.startDate}`;
+      const existing = latestByWar.get(key);
+      if (!existing || dateKey(event.date) >= dateKey(existing.date)) latestByWar.set(key, event);
+    }
+    finishedEvents = [...latestByWar.values()].sort((a, b) => dateKey(a.date) - dateKey(b.date));
     for (const event of finishedEvents) {
       const war = event.lastWar;
       const afterSnapshot = event.sourceHash ? snapshotBySourceHash.get(event.sourceHash) : null;
       const afterCountries = afterSnapshot ? Object.assign({}, afterSnapshot.countries, afterSnapshot.economyCountries) : null;
       const outcome = inferOutcome(war, event.economyDelta, afterSnapshot ? afterSnapshot.warReparations : null, afterCountries);
       if (outcome.winnerSide !== "Attacker" && outcome.winnerSide !== "Defender" && !outcome.whitePeace) continue;
-      const keyBase = `${event.sourceHash || event.date}:${event.warNumber}`;
-      if (seen.has(keyBase)) continue;
-      seen.add(keyBase);
 
       const participantByCountry = new Map((war.participants || []).map((p) => [p.country, p]));
       const fought = (c) => hasFoughtLosses(participantByCountry.get(c));

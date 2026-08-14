@@ -1952,8 +1952,26 @@ async function processBuiltSnapshot(file, stat, hash, snapshot, config, state, p
     return true;
   }
   const { events, currentWars } = classifyEvents(previousWars, snapshot);
-  appendJsonl(campaignSnapshotsFile(config, snapshot.campaignKey), snapshot);
+  // Events are written BEFORE the snapshot deliberately, not just in the
+  // order they happen to be computed - a real bug found reviewing this
+  // file: hydrateStateFromSnapshots() rebuilds activeWarsByCampaign from
+  // only the LATEST snapshot on startup, not from war-events.jsonl. If the
+  // process is killed between these two writes with the snapshot written
+  // first (the old order), a war-disappeared event showing a war as gone
+  // becomes durable in snapshots.jsonl while its own event never reaches
+  // war-events.jsonl - on restart, hydrate sees the war already gone from
+  // the last snapshot, so previousWars never contains it again and that
+  // war's outcome is silently unrecoverable forever, with no error anywhere.
+  // Writing events first means a crash in this exact window still loses the
+  // snapshot, but the event survives - previousWars on restart still shows
+  // the war active, so the next real snapshot naturally reproduces (at
+  // worst re-emits) the same transition instead of losing it. A possible
+  // duplicate war-disappeared event from this path is intentionally
+  // considered safe, not swept back under the rug - see computeFromLedger's
+  // own warNumber+startDate dedup in js/llama-score.js, which now merges
+  // exactly this shape rather than double-scoring it.
   for (const event of events) appendJsonl(campaignEventsFile(config, snapshot.campaignKey), event);
+  appendJsonl(campaignSnapshotsFile(config, snapshot.campaignKey), snapshot);
 
   let archivedTo = null;
   if (shouldArchive(events, snapshot, state, config)) archivedTo = archiveSave(file, snapshot, config);
