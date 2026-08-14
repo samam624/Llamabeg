@@ -650,7 +650,20 @@
         dec.pos += 1;
         break;
       }
-      const numResolved = dec.resolveToken();
+      let numResolved = dec.resolveToken();
+      // Real bug found on a real save: a database entry's key is always a
+      // non-negative identity number, never a genuine signed quantity - but
+      // the int32 token codes (0x000c/0x0014) that carry it are ALSO used
+      // for real signed values elsewhere (gold, stability, ...), so
+      // readScalarValue has no way to know this specific occurrence should
+      // be unsigned; it decodes with getInt32 unconditionally. A key at or
+      // above 2^31 (confirmed real: 169/148,336 population.database keys in
+      // a real 2500-country save, e.g. the true unsigned key 2332033899
+      // silently became -1962933397) wraps negative. Correct it at this one
+      // choke point, shared by every walkDatabase caller (countries,
+      // locations, population, ...), rather than trying to special-case it
+      // per section.
+      if (typeof numResolved === "number" && numResolved < 0) numResolved += 4294967296;
       if (dec.peekKind() !== TAPE_EQUALS) throw new Error(`database desync at tape index ${dec.pos} (byte ${dec.byteOffset})`);
       dec.pos += 1;
       const obj = dec.readBareValue();
