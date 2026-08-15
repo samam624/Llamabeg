@@ -109,19 +109,29 @@
   let currentLlamaDraw = null; // stores the currently-active mode's draw() so the AI-wars toggle can re-render on demand
   // "Who missed this session?" dialog state - which campaign/checkpoint the
   // currently-open modal is answering for (set when it opens, read on
-  // submit), and which (campaignKey|latestDate) combos have already been
+  // submit), and which (campaignKey, latestDate) combos have already been
   // offered this page load so re-rendering the panel (tab switches, mode
   // toggles, override edits - renderLlamaScore() fires on all of these)
   // doesn't reopen it repeatedly. See maybePromptSessionAttendance() below.
+  // Keyed as campaignKey -> Set<date>, not a single joined "key|date"
+  // string - a real bug found reviewing this: a campaignKey containing a
+  // literal "|" (reachable via the recorder's --campaign-key override) could
+  // collide two different campaigns' prompt state onto the same string key,
+  // the same delimiter-collision class already fixed elsewhere in this
+  // feature (the checkbox name/tag join).
   let attendanceModalCampaignKey = null;
   let attendanceModalTargetDate = null;
-  const promptedAttendanceFor = new Set();
-  // Latest campaign/snapshot renderLedgerLlamaScore's draw() last computed -
-  // lets the manual "Who missed a session?" button (unlike the auto-prompt)
-  // reopen the same dialog on demand, e.g. to fix a mistaken answer, without
-  // needing its own separate computeFromLedger call.
+  const promptedAttendanceFor = new Map();
+  // Latest campaign/snapshot/full-snapshot-list renderLedgerLlamaScore's
+  // draw() last computed - lets the manual "Who missed a session?" button
+  // (unlike the auto-prompt) reopen the same dialog on demand, e.g. to fix
+  // a mistaken answer, without needing its own separate computeFromLedger
+  // call. currentLlamaSnapshots feeds openAttendanceModal's window-roster
+  // build (every player active between the last checkpoint and now, not
+  // just the current snapshot's roster).
   let currentLlamaCampaignKey = null;
   let currentLlamaLatestSnapshot = null;
+  let currentLlamaSnapshots = null;
   const LLAMA_SHOW_TOGGLE_KEY = "eu5-analyzer-llama-show-toggle";
   const THEME_KEY = "eu5-analyzer-theme";
   // PVP (default) scores player-vs-player wars, same as always. PVE scores
@@ -538,6 +548,16 @@
     llamaSnapshotsLedger = null;
     llamaEventsLedger = null;
     llamaAutoLinked = false;
+    // A real bug found reviewing this: currentLlamaCampaignKey/
+    // currentLlamaLatestSnapshot (only otherwise cleared on Disconnect)
+    // used to stay pointed at whichever campaign was loaded before this
+    // save, for the whole async window until autoLinkLlamaForCurrentSave()
+    // below resolves and draw() re-runs. "Who missed a session" clicked
+    // during that window would show/record attendance against the WRONG
+    // (previous) campaign.
+    currentLlamaCampaignKey = null;
+    currentLlamaLatestSnapshot = null;
+    currentLlamaSnapshots = null;
     setLlamaLinkStatus(null);
     llamaAutoStatusEl.textContent = "Checking for this save's recorder data…";
     renderLlamaScore();
@@ -1201,9 +1221,18 @@
   // Deliberately stricter than js/llama-score.js's own dateKey(), which
   // silently treats anything unparsable as 0 - fine for trusted,
   // save-derived dates, dangerous for the free-text history-edit inputs
-  // below (see renderAttendanceHistory's change handler).
+  // below (see renderAttendanceHistory's change handler). Reuses
+  // Clausewitz.DATE_RE (the parser's own date-shape regex) instead of a
+  // second hand-copied pattern - two real bugs found reviewing the
+  // hand-copied version: it accepted "0.0.0", which collides with
+  // dateKey()'s own 0 fallback (the exact value this validator exists to
+  // keep out of storage), and didn't bound month/day to real ranges (e.g.
+  // "1547.13.5" passed). Both closed below.
   function isValidEu5Date(value) {
-    return typeof value === "string" && /^\d{1,5}\.\d{1,2}\.\d{1,2}(\.\d{1,2})?$/.test(value.trim());
+    if (typeof value !== "string" || !Clausewitz.DATE_RE.test(value.trim())) return false;
+    const parts = value.trim().split(".").map((p) => parseInt(p, 10));
+    const [year, month, day] = parts;
+    return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= 31;
   }
 
   // Reshapes the flat {name,from,to}[] storage format into the
@@ -1279,7 +1308,24 @@
     });
   }
 
-  function openAttendanceModal(campaignKey, attendance, latestSnapshot) {
+  function openAttendanceModal(campaignKey, attendance, latestSnapshot, windowSnapshots) {
+    // A real bug found reviewing this feature: the manual "manage" button
+    // below calls this function directly, bypassing
+    // maybePromptSessionAttendance's own seeding step (the only OTHER place
+    // lastCheckpointDate gets initialized for a campaign never reviewed
+    // here before - reachable if the war-corrections modal happens to be
+    // open during this campaign's very first draw(), which blocks that
+    // seed via its own open-modal guard). Without this, `nothingNew` below
+    // would be false with no real checkpoint to anchor "from" - Submit
+    // would then write an absence entry with `from: undefined`, which
+    // dateKey() treats as 0, silently excluding the marked player's ENTIRE
+    // campaign history instead of just the intended stretch. Guaranteeing
+    // the seed here, for every caller, closes that path; this is a no-op
+    // when maybePromptSessionAttendance already seeded it.
+    if (!attendance.lastCheckpointDate) {
+      attendance.lastCheckpointDate = latestSnapshot.date;
+      setSessionAttendance(campaignKey, attendance);
+    }
     const nothingNew = attendance.lastCheckpointDate === latestSnapshot.date;
     attendanceModalCampaignKey = campaignKey;
     attendanceModalTargetDate = nothingNew ? null : latestSnapshot.date;
@@ -1293,16 +1339,30 @@
       // player name containing a literal "|" (not prevented by the save
       // format) would otherwise truncate on re-split, showing/recording the
       // wrong name (a real bug found reviewing this feature).
+      // Union of playerCountries across every snapshot IN the reviewed
+      // window, not just the latest one - a real gap found reviewing this
+      // feature: a player who was active earlier in the window but whose
+      // country was gone by the latest snapshot (conquered, merged, handed
+      // to someone else) used to never appear in the checklist at all, with
+      // no way to retroactively mark them absent for a stretch they may
+      // have genuinely missed part of.
       const playersByName = new Map();
-      for (const c of latestSnapshot.playerCountries || []) {
-        if (!Array.isArray(c.players)) continue;
-        for (const name of c.players) {
-          if (name && !playersByName.has(name)) playersByName.set(name, c.tag || "?");
+      const fromKey = LlamaScore.dateKey(attendance.lastCheckpointDate);
+      const toKey = LlamaScore.dateKey(latestSnapshot.date);
+      for (const snap of windowSnapshots || [latestSnapshot]) {
+        if (!snap || !snap.date) continue;
+        const k = LlamaScore.dateKey(snap.date);
+        if (k < fromKey || k > toKey) continue;
+        for (const c of snap.playerCountries || []) {
+          if (!Array.isArray(c.players)) continue;
+          for (const name of c.players) {
+            if (name && !playersByName.has(name)) playersByName.set(name, c.tag || "?");
+          }
         }
       }
       const players = [...playersByName.keys()].sort((a, b) => a.localeCompare(b));
       if (!players.length) {
-        llamaAttendanceCheckboxListEl.innerHTML = '<p class="panel-note">No current players found in this campaign\'s latest data.</p>';
+        llamaAttendanceCheckboxListEl.innerHTML = '<p class="panel-note">No players found in this campaign for the reviewed window.</p>';
       } else {
         llamaAttendanceCheckboxListEl.innerHTML = players
           .map(
@@ -1323,7 +1383,7 @@
   // `promptedAttendanceFor` comment above) - called from renderLedgerLlamaScore's
   // draw() every time it runs, but only actually opens the dialog when
   // there's real unreviewed data AND nothing else is already open.
-  function maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance) {
+  function maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance, snapshots) {
     if (!latestSnapshot || !latestSnapshot.date || !campaignKey) return;
     if (llamaAttendanceModalEl.open || llamaWarModalEl.open) return;
     const latestDate = latestSnapshot.date;
@@ -1336,10 +1396,11 @@
       return;
     }
     if (attendance.lastCheckpointDate === latestDate) return; // nothing new since last review
-    const promptKey = campaignKey + "|" + latestDate;
-    if (promptedAttendanceFor.has(promptKey)) return; // already offered this page load
-    promptedAttendanceFor.add(promptKey);
-    openAttendanceModal(campaignKey, attendance, latestSnapshot);
+    const offeredDates = promptedAttendanceFor.get(campaignKey);
+    if (offeredDates && offeredDates.has(latestDate)) return; // already offered this page load
+    if (offeredDates) offeredDates.add(latestDate);
+    else promptedAttendanceFor.set(campaignKey, new Set([latestDate]));
+    openAttendanceModal(campaignKey, attendance, latestSnapshot, snapshots);
   }
 
   llamaAttendanceManageBtn.addEventListener("click", () => {
@@ -1358,7 +1419,7 @@
       llamaAttendanceModalEl.showModal();
       return;
     }
-    openAttendanceModal(currentLlamaCampaignKey, getSessionAttendance(currentLlamaCampaignKey), currentLlamaLatestSnapshot);
+    openAttendanceModal(currentLlamaCampaignKey, getSessionAttendance(currentLlamaCampaignKey), currentLlamaLatestSnapshot, currentLlamaSnapshots);
   });
   llamaAttendanceModalCloseBtn.addEventListener("click", () => llamaAttendanceModalEl.close());
   llamaAttendanceModalEl.addEventListener("click", (e) => {
@@ -1597,7 +1658,8 @@
       });
       currentLlamaCampaignKey = campaignKey;
       currentLlamaLatestSnapshot = latestSnapshot;
-      maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance);
+      currentLlamaSnapshots = snapshots;
+      maybePromptSessionAttendance(campaignKey, latestSnapshot, attendance, snapshots);
 
       const scoredCount = rows.filter((r) => !r.excluded).length;
       llamaLedgerStatusEl.textContent =
@@ -2065,6 +2127,18 @@
     // actually persisting bad data.
     currentLlamaCampaignKey = null;
     currentLlamaLatestSnapshot = null;
+    currentLlamaSnapshots = null;
+    // Same class of bug as the currentLlamaCampaignKey clear just above,
+    // for the attendance MODAL's own separate state - a real bug found
+    // reviewing this: if the modal is already open when Disconnect is
+    // clicked, submitting afterward would still write into the now-
+    // orphaned campaign's localStorage key via these, even though
+    // currentLlamaCampaignKey (what the manage button itself checks) was
+    // already cleared. Also close the modal if it's open, so a stale
+    // Submit isn't reachable at all.
+    attendanceModalCampaignKey = null;
+    attendanceModalTargetDate = null;
+    if (llamaAttendanceModalEl.open) llamaAttendanceModalEl.close();
     await LedgerConnect.clearHandle();
     llamaDisconnectBtn.hidden = true;
     llamaConnectBtn.hidden = false;

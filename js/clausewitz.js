@@ -35,6 +35,22 @@
   const FLOAT_RE = /^-?\d+\.\d+$/;
   const DATE_RE = /^\d{1,5}\.\d{1,2}\.\d{1,2}(\.\d{1,2})?$/;
 
+  // A reference to a database-keyed entity (character_db, etc.) is always a
+  // non-negative identity number, never a genuine signed quantity - the
+  // same reasoning as walkDatabase's own key-decode fix in
+  // js/clausewitz-binary.js, applied here to VALUES that reference one of
+  // those keys (government.ruler/heir/consort/regent) rather than to the
+  // key itself. A real bug found reviewing that fix: it only corrected a
+  // database entry's own key, not other fields elsewhere that point at one
+  // by value - those still went through the ordinary signed int32 decode
+  // path with no correction, so a character ID large enough to wrap
+  // negative (population.database keys from the same shared ID pool were
+  // confirmed reaching ~2.3 billion on a real save) would silently fail to
+  // match its now-corrected character_db entry.
+  function unwrapDatabaseId(n) {
+    return typeof n === "number" && n < 0 ? n + 4294967296 : n;
+  }
+
   function coerceScalar(raw) {
     if (raw === "yes") return true;
     if (raw === "no") return false;
@@ -482,10 +498,10 @@
         variableKeys: variableKeys(obj.variables),
         societalValues: societalValuePositions(government.societal_values),
         acceptedCultures: Array.isArray(obj.accepted_cultures) ? obj.accepted_cultures : [],
-        ruler: typeof government.ruler === "number" ? government.ruler : null,
-        heir: typeof government.heir === "number" ? government.heir : null,
-        consort: typeof government.consort === "number" ? government.consort : null,
-        regent: typeof government.regent === "number" ? government.regent : null,
+        ruler: typeof government.ruler === "number" ? unwrapDatabaseId(government.ruler) : null,
+        heir: typeof government.heir === "number" ? unwrapDatabaseId(government.heir) : null,
+        consort: typeof government.consort === "number" ? unwrapDatabaseId(government.consort) : null,
+        regent: typeof government.regent === "number" ? unwrapDatabaseId(government.regent) : null,
         maintenances: economy.maintenances && typeof economy.maintenances === "object" ? economy.maintenances : {},
         employmentSystem: typeof obj.employment_system === "string" ? obj.employment_system : "first_come_first_serve",
       };
@@ -2537,5 +2553,6 @@
     attachActiveEstateTypes,
     attachSocietalSourceFacts,
     normalizeEu5Date,
+    DATE_RE,
   };
 });

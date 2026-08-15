@@ -53,6 +53,7 @@
         "to": "vendor/js",
         "filter": [
           "llama-score.js",
+          "llama-score-outcome.js",
           "clausewitz.js",
           "clausewitz-binary.js",
           "eu5-fixed-ids.js",

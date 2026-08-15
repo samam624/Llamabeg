@@ -19,7 +19,7 @@ const copies = [
   {
     from: path.join(root, "..", "js"),
     to: path.join(vendorDir, "js"),
-    files: ["llama-score.js", "clausewitz.js", "clausewitz-binary.js", "eu5-fixed-ids.js", "modifier-finder.js"],
+    files: ["llama-score.js", "llama-score-outcome.js", "clausewitz.js", "clausewitz-binary.js", "eu5-fixed-ids.js", "modifier-finder.js"],
   },
   { from: path.join(root, "..", "tools"), to: path.join(vendorDir, "tools"), files: ["scan-modifier-sources.js"] },
   {
