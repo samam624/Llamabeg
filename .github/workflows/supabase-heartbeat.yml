@@ -1,8 +1,11 @@
 name: Supabase heartbeat
 
 # Free-tier Supabase projects auto-pause after 7 days with no API activity.
-# This just makes one real read against the project's REST API every few
-# days so it never goes idle long enough to trigger that.
+# This used to just do a plain SELECT, but the project paused anyway despite
+# that heartbeat succeeding on schedule right up until the pause - evidence
+# that a read isn't counted as "real" activity. Now it calls the
+# eu5_heartbeat_ping() RPC (see supabase/migrations/20260827000000_eu5_heartbeat.sql),
+# which performs an actual UPDATE, in case a write is what's needed.
 on:
   schedule:
     - cron: "0 6 */3 * *"
@@ -12,13 +15,17 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Supabase REST API
+      - name: Write-ping Supabase via eu5_heartbeat_ping RPC
         run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://wkylbxozlppqovlwjxsy.supabase.co/rest/v1/eu5_campaigns?select=id&limit=1" \
+          status=$(curl -s -o /tmp/heartbeat_body -w "%{http_code}" \
+            -X POST \
+            "https://wkylbxozlppqovlwjxsy.supabase.co/rest/v1/rpc/eu5_heartbeat_ping" \
             -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY")
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{}")
           echo "Response status: $status"
+          cat /tmp/heartbeat_body
           # 2xx/4xx both mean the DB answered (a 4xx here would be a query-shape
           # error, not an unreachable project) - only fail on no response at all.
           if [ "$status" = "000" ]; then
