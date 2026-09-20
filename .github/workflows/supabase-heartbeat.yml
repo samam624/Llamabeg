@@ -1,36 +1,141 @@
 name: Supabase heartbeat
 
-# Free-tier Supabase projects auto-pause after 7 days with no API activity.
-# This used to just do a plain SELECT, but the project paused anyway despite
-# that heartbeat succeeding on schedule right up until the pause - evidence
-# that a read isn't counted as "real" activity. Now it calls the
-# eu5_heartbeat_ping() RPC (see supabase/migrations/20260827000000_eu5_heartbeat.sql),
-# which performs an actual UPDATE, in case a write is what's needed.
+# Free-tier Supabase pauses projects that show LOW ACTIVITY over a rolling
+# 7-day window. The bar in Supabase's own docs is "a few user requests to the
+# database each day over the previous week" - NOT "at least one request before
+# the 7 days are up":
+#   https://supabase.com/docs/guides/platform/free-project-pausing
+#
+# Two earlier versions of this workflow pinged once every 3 days (~2 requests a
+# week, and zero on most days) and the project paused under both of them:
+#   - v1 (plain anon SELECT)  -> paused 2026-08-26
+#   - v2 (real write via RPC) -> last ping 2026-09-07 returned HTTP 200, and the
+#                                project was already unreachable by 2026-09-10
+# Swapping the read for a write changed nothing, because the request TYPE was
+# never the variable - the cadence was. Once every 3 days IS "low activity".
+# This version pings every 3 hours, so every single day has ~8 database writes.
 on:
   schedule:
-    - cron: "0 6 */3 * *"
+    # Every 3 hours at :17. Deliberately off the hour: GitHub sheds scheduled
+    # runs under load, and :00 is the worst-contended minute.
+    - cron: "17 */3 * * *"
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: supabase-heartbeat
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
       - name: Write-ping Supabase via eu5_heartbeat_ping RPC
-        run: |
-          status=$(curl -s -o /tmp/heartbeat_body -w "%{http_code}" \
-            -X POST \
-            "https://wkylbxozlppqovlwjxsy.supabase.co/rest/v1/rpc/eu5_heartbeat_ping" \
-            -H "apikey: $SUPABASE_ANON_KEY" \
-            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{}")
-          echo "Response status: $status"
-          cat /tmp/heartbeat_body
-          # 2xx/4xx both mean the DB answered (a 4xx here would be a query-shape
-          # error, not an unreachable project) - only fail on no response at all.
-          if [ "$status" = "000" ]; then
-            echo "Supabase project did not respond - it may be paused." >&2
-            exit 1
-          fi
+        id: ping
         env:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          PROJECT_REF: wkylbxozlppqovlwjxsy
+        run: |
+          # No `set -e`: a failing curl inside $(...) would kill the step before
+          # it could report WHY. The previous workflow died this way - 4 runs in
+          # a row ended as a bare "exit code 6" with no diagnosis printed.
+          set +e
+
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::error::SUPABASE_ANON_KEY repo secret is empty or missing."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "detail=SUPABASE_ANON_KEY secret is missing" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          url="https://$PROJECT_REF.supabase.co/rest/v1/rpc/eu5_heartbeat_ping"
+          ok=false
+          detail=""
+
+          for attempt in 1 2 3; do
+            # curl does NOT truncate the -o file when it fails before any
+            # response (e.g. DNS), so clear it or a later attempt reports the
+            # PREVIOUS run's body and the diagnosis reads as a success.
+            rm -f /tmp/hb_body
+            http=$(curl -s --max-time 30 -o /tmp/hb_body -w "%{http_code}" \
+              -X POST "$url" \
+              -H "apikey: $SUPABASE_ANON_KEY" \
+              -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+              -H "Content-Type: application/json" \
+              -d '{}')
+            rc=$?
+            body=$(head -c 500 /tmp/hb_body 2>/dev/null)
+            echo "attempt $attempt: curl_exit=$rc http=$http body=$body"
+
+            if [ "$rc" -eq 0 ] && [ "$http" = "200" ]; then
+              ok=true
+              detail="wrote pinged_at=$body"
+              break
+            fi
+
+            # curl 6 = could not resolve host. A paused Supabase project stops
+            # resolving in DNS entirely, so 6 is the paused-project signature.
+            if [ "$rc" -eq 6 ]; then
+              detail="DNS for $PROJECT_REF.supabase.co does not resolve - the project is almost certainly PAUSED."
+            elif [ "$rc" -ne 0 ]; then
+              detail="curl failed with exit $rc (network/TLS level, project may be unreachable)."
+            else
+              detail="project answered with HTTP $http: $body"
+            fi
+
+            [ "$attempt" -lt 3 ] && sleep 20
+          done
+
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+
+          if [ "$ok" = "true" ]; then
+            echo "Supabase heartbeat OK - $detail"
+            echo "Supabase heartbeat OK - $detail" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Supabase heartbeat FAILED - $detail"
+            echo "Supabase heartbeat FAILED - $detail" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      # A heartbeat nobody watches is worse than none: the last outage ran 4
+      # failed scheduled runs over 9 days before anyone noticed. An issue makes
+      # GitHub send an actual email, and the restore link is right there.
+      - name: Open or update the outage issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DETAIL: ${{ steps.ping.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Supabase project is down (heartbeat failing)"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          note="Heartbeat failed at $(date -u '+%Y-%m-%d %H:%M UTC').
+
+          **Detail:** ${DETAIL:-no detail captured}
+
+          Restore it here (Supabase gives no CLI/API path - it is a manual dashboard click):
+          https://supabase.com/dashboard/project/wkylbxozlppqovlwjxsy
+
+          Failing run: $RUN_URL"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$note"
+          else
+            gh issue create --title "$title" --body "$note"
+          fi
+
+      - name: Close the outage issue once it recovers
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Supabase project is down (heartbeat failing)"
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "Heartbeat is succeeding again as of $(date -u '+%Y-%m-%d %H:%M UTC')."
+          fi

@@ -1,6 +1,10 @@
 [build]
   command = "node scripts/build-netlify-site.js"
   publish = "dist"
+  # Holds the scheduled Supabase keep-alive (netlify/functions/supabase-keepalive.mjs).
+  # This is Netlify's default location, but declare it so the keep-alive can't
+  # silently stop being deployed if the default ever changes.
+  functions = "netlify/functions"
 
 [[redirects]]
   from = "/*"
