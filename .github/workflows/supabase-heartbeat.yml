@@ -108,6 +108,10 @@ jobs:
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job deliberately does no checkout (it only needs curl), so gh
+          # cannot infer the repo from a git remote and fails with "not a git
+          # repository". GH_REPO tells it explicitly.
+          GH_REPO: ${{ github.repository }}
           DETAIL: ${{ steps.ping.outputs.detail }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -132,6 +136,7 @@ jobs:
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           title="Supabase project is down (heartbeat failing)"
