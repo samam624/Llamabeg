@@ -1,5 +1,17 @@
 # Llamabeg
 
+[![Push tests](https://github.com/samam624/Llamabeg/actions/workflows/push-tests.yml/badge.svg)](https://github.com/samam624/Llamabeg/actions/workflows/push-tests.yml)
+
+<p align="center">
+  <img src="assets/home-hero-map.jpg" alt="Llamabeg political map rendered from an Europa Universalis V save" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://llamabeg.netlify.app">Live web app</a> ·
+  <a href="https://github.com/samam624/Llamabeg/releases/latest">Desktop downloads</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture and validation</a>
+</p>
+
 A browser-based analyzer for Europa Universalis V save files — players, countries, world
 stats, and multiplayer war scoring — in the spirit of tools like [pdx.tools](https://pdx.tools)
 and [Skanderbeg](https://www.skanderbeg.pm/). pdx.tools already supports EU5 itself
@@ -24,6 +36,20 @@ Point this web app at either one's output folder and it auto-scores every war it
 see the **Llama Score** tab in the app itself for the full write-up of how scoring works
 (the formula, how a winner is decided, and what makes a war's result "clean" vs. a fallback
 White Peace).
+
+## Engineering snapshot
+
+- A two-phase binary-save parser and web-worker pipeline keep parsing client-side and responsive.
+- Political, economic, trade and demographic map modes turn parsed game state into interactive
+  visualizations.
+- The companion Electron recorder preserves campaign history outside the application install and
+  ships as verified Windows, macOS and Linux release packages.
+- Parser cross-checks compare compressed binary saves with melted plaintext copies of the same
+  save, while focused Node tests cover scoring, data paths, update policy and modifier discovery.
+
+This is an AI-assisted software project maintained by Sam Amezcua. It demonstrates product
+specification, testing, release engineering and data interpretation; it is not presented as a
+claim that every line was hand-written.
 
 ## Features
 

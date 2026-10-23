@@ -1,0 +1,29 @@
+name: Push tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build deployable site
+        run: npm run build
+      - name: Run dependency-free tests
+        run: |
+          node test/dashboard-data-paths.js
+          node test/departed-player-parse-warning.js
+          node test/desktop-platform-paths.js
+          node test/desktop-update-policy.js
+          node test/modifier-finder.js
+          node test/recorder-snapshot-seed.js
+          node test/update-release-wrapper.js
